@@ -3031,8 +3031,11 @@ static void help_render(void)
     buf_append(&eb, "\r\n", 2);
     buf_append(&eb, "\x1b[100m", 6);
     char status[80];
-    int len = snprintf(status, sizeof(status), " [HELP] line %d/%d",
-                       offset + 1, HELP_NUM_LINES);
+    int last_visible = offset + visible;
+    if (last_visible > HELP_NUM_LINES)
+        last_visible = HELP_NUM_LINES;
+    int len = snprintf(status, sizeof(status), " [HELP] lines %d-%d of %d",
+                       offset + 1, last_visible, HELP_NUM_LINES);
     if (len > ec.screen_cols)
         len = ec.screen_cols;
     buf_append(&eb, status, len);
@@ -3356,7 +3359,11 @@ static void editor_process_key(void)
         }
         break;
 
-    case MODE_HELP:
+    case MODE_HELP: {
+        int visible   = ec.screen_rows - 2;
+        int max_offset = HELP_NUM_LINES - visible;
+        if (max_offset < 0)
+            max_offset = 0;
         switch (c) {
         case CTRL_('g'):
         case CTRL_('x'):
@@ -3369,24 +3376,25 @@ static void editor_process_key(void)
                 ec.mode_state.help.offset--;
             break;
         case ARROW_DOWN:
-            if (ec.mode_state.help.offset < HELP_NUM_LINES - 1)
+            if (ec.mode_state.help.offset < max_offset)
                 ec.mode_state.help.offset++;
             break;
         case PAGE_UP:
-            ec.mode_state.help.offset -= ec.screen_rows - 2;
+            ec.mode_state.help.offset -= visible;
             if (ec.mode_state.help.offset < 0)
                 ec.mode_state.help.offset = 0;
             break;
         case PAGE_DOWN:
-            ec.mode_state.help.offset += ec.screen_rows - 2;
-            if (ec.mode_state.help.offset > HELP_NUM_LINES - 1)
-                ec.mode_state.help.offset = HELP_NUM_LINES - 1;
+            ec.mode_state.help.offset += visible;
+            if (ec.mode_state.help.offset > max_offset)
+                ec.mode_state.help.offset = max_offset;
             break;
         default:
             break; /* ignore other keys */
         }
         help_render();
         return;
+    }
 
     case MODE_SEARCH:
     case MODE_PROMPT:
