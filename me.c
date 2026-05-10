@@ -722,6 +722,9 @@ typedef union {
         char *current_dir; /* Current directory path */
         bool show_hidden;  /* Show hidden files (toggle with H) */
     } browser;
+    struct {
+        int offset;        /* Scroll offset (lines from top) */
+    } help;
 } mode_data_t;
 
 /* Editor config structure */
@@ -892,7 +895,8 @@ static void mode_set(editor_mode_t new_mode)
         ec.mode_state.search.last_match = -1;
         break;
     case MODE_HELP:
-        ui_set_message("-- HELP -- Press any key to exit");
+        ec.mode_state.help.offset = 0;
+        ui_set_message("^X or ^G to exit, arrows/PgUp/PgDn to scroll");
         break;
     case MODE_NORMAL:
         ec.selection.active = false;
@@ -922,32 +926,43 @@ static const char *mode_get_name(editor_mode_t mode)
     return "UNKNOWN";
 }
 
-static void help_generate(char *buffer, size_t size)
-{
-    /* Generate help text from key bindings X-macro */
-    int offset = snprintf(buffer, size, "Key Bindings:\n");
-
-#define _(action, key, desc) \
-    offset +=                \
-        snprintf(buffer + offset, size - offset, "  ^%c - %s\n", key, desc);
-    KEY_BINDINGS
-#undef _
-
-    offset += snprintf(buffer + offset, size - offset,
-                       "  M-A - Set/toggle mark\n"
-                       "  M-6 - Copy marked text\n"
-                       "  M-U - Undo last action\n"
-                       "  M-E - Redo last undo\n"
-                       "  M-B - Open file browser\n");
-
-    offset += snprintf(buffer + offset, size - offset, "\nEditor Modes:\n");
-
-#define _(mode, name, desc) \
-    offset +=               \
-        snprintf(buffer + offset, size - offset, "  %s - %s\n", name, desc);
-    EDITOR_MODES
-#undef _
-}
+/* Static help content shown by ^G */
+static const char * const help_lines[] = {
+    "Help  (^X or ^G to exit, arrows/PgUp/PgDn to scroll)",
+    "",
+    "File:",
+    "  ^X      Exit (prompts to save if modified)",
+    "  ^O      Write/save file",
+    "  M-B     Open file browser",
+    "",
+    "Editing:",
+    "  ^K      Cut current line (consecutive ^K appends to cut buffer)",
+    "  ^U      Uncut/paste",
+    "  M-A     Set/toggle mark",
+    "  M-6     Copy marked region",
+    "",
+    "Search:",
+    "  ^W      Find text (Where is)",
+    "",
+    "Navigation:",
+    "  Arrows  Move cursor",
+    "  PgUp    Page up",
+    "  PgDn    Page down",
+    "  Home    Beginning of line",
+    "  End     End of line",
+    "  M-\\     Go to first line of file",
+    "  M-/     Go to last line of file",
+    "",
+    "Undo/Redo:",
+    "  M-U     Undo last edit",
+    "  M-E     Redo last undo",
+    "",
+    "View:",
+    "  ^N      Toggle line numbers",
+    "  ^G      Show this help screen",
+    "",
+};
+#define HELP_NUM_LINES (int)(sizeof(help_lines) / sizeof(help_lines[0]))
 
 static void term_clear(void)
 {
@@ -2982,6 +2997,55 @@ static void browser_open_selected(void)
     }
 }
 
+static void help_render(void)
+{
+    editor_buf_t eb = {NULL, 0};
+
+    /* Clear screen */
+    buf_append(&eb, "\x1b[?25l", 6);
+    buf_append(&eb, "\x1b[2J", 4);
+    buf_append(&eb, "\x1b[H", 3);
+
+    /* Title bar */
+    buf_append(&eb, "\x1b[7m", 4);
+    buf_append(&eb, "  Help\x1b[K", 8);
+    buf_append(&eb, "\x1b[0m", 4);
+    buf_append(&eb, "\r\n", 2);
+
+    int visible = ec.screen_rows - 2; /* title + status */
+    int offset  = ec.mode_state.help.offset;
+
+    for (int i = 0; i < visible; i++) {
+        int idx = offset + i;
+        buf_append(&eb, "\x1b[K", 3); /* clear line */
+        if (idx < HELP_NUM_LINES) {
+            buf_append(&eb, help_lines[idx], strlen(help_lines[idx]));
+        } else {
+            buf_append(&eb, "~", 1);
+        }
+        if (i < visible - 1)
+            buf_append(&eb, "\r\n", 2);
+    }
+
+    /* Status bar */
+    buf_append(&eb, "\r\n", 2);
+    buf_append(&eb, "\x1b[100m", 6);
+    char status[80];
+    int len = snprintf(status, sizeof(status), " [HELP] line %d/%d",
+                       offset + 1, HELP_NUM_LINES);
+    if (len > ec.screen_cols)
+        len = ec.screen_cols;
+    buf_append(&eb, status, len);
+    while (len++ < ec.screen_cols)
+        buf_append(&eb, " ", 1);
+    buf_append(&eb, "\x1b[m", 3);
+    buf_append(&eb, "\r\n", 2);
+    ui_draw_messagebar(&eb);
+
+    write(STDOUT_FILENO, eb.buf, eb.len);
+    buf_destroy(&eb);
+}
+
 static void browser_render(void)
 {
     editor_buf_t eb = {NULL, 0};
@@ -3293,9 +3357,35 @@ static void editor_process_key(void)
         break;
 
     case MODE_HELP:
-        /* Any key exits help mode */
-        mode_restore();
-        editor_refresh_full(); /* Full redraw after exiting help */
+        switch (c) {
+        case CTRL_('g'):
+        case CTRL_('x'):
+        case '\x1b':
+            mode_restore();
+            editor_refresh_full();
+            return;
+        case ARROW_UP:
+            if (ec.mode_state.help.offset > 0)
+                ec.mode_state.help.offset--;
+            break;
+        case ARROW_DOWN:
+            if (ec.mode_state.help.offset < HELP_NUM_LINES - 1)
+                ec.mode_state.help.offset++;
+            break;
+        case PAGE_UP:
+            ec.mode_state.help.offset -= ec.screen_rows - 2;
+            if (ec.mode_state.help.offset < 0)
+                ec.mode_state.help.offset = 0;
+            break;
+        case PAGE_DOWN:
+            ec.mode_state.help.offset += ec.screen_rows - 2;
+            if (ec.mode_state.help.offset > HELP_NUM_LINES - 1)
+                ec.mode_state.help.offset = HELP_NUM_LINES - 1;
+            break;
+        default:
+            break; /* ignore other keys */
+        }
+        help_render();
         return;
 
     case MODE_SEARCH:
@@ -3432,15 +3522,8 @@ static void editor_process_key(void)
         break;
     case CTRL_('g'): /* Show help (GNU nano: ^G) */
         mode_set(MODE_HELP);
-        /* Generate comprehensive help */
-        {
-            static char help_buffer[256];
-            help_generate(help_buffer, sizeof(help_buffer));
-            ui_set_message(
-                "Press any key to close. Key bindings: ^X=Exit ^O=Save ^W=Find "
-                "M-A=Mark M-6=Copy ^K=Cut ^U=Paste M-U=Undo M-E=Redo M-\\=First M-/=Last");
-        }
-        break;
+        help_render();
+        return; /* Don't continue to normal refresh */
     case BACKSPACE:
     case CTRL_('h'):
     case DEL_KEY:
