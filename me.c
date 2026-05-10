@@ -697,7 +697,6 @@ typedef struct {
     _(QUIT, 'x', "Exit editor")           \
     _(SAVE, 'o', "Save file")             \
     _(FIND, 'w', "Search text")           \
-    _(MARK, '^', "Start marking text")    \
     _(CUT, 'k', "Cut line/marked text")   \
     _(PASTE, 'u', "Paste/uncut")          \
     _(HELP, 'g', "Show help")
@@ -953,6 +952,7 @@ static void help_generate(char *buffer, size_t size)
 #undef _
 
     offset += snprintf(buffer + offset, size - offset,
+                       "  M-A - Set/toggle mark\n"
                        "  M-6 - Copy marked text\n"
                        "  M-U - Undo last action\n"
                        "  M-E - Redo last undo\n"
@@ -2331,39 +2331,83 @@ static void ui_draw_statusbar(editor_buf_t *eb)
     buf_append(eb, "\r\n", 2);
 }
 
+/*
+ * Count visible (non-escape-sequence) characters in s, stopping at
+ * max_visible.  Returns the number of bytes that should be written to the
+ * terminal to display exactly that many visible characters.  CSI sequences of
+ * the form ESC [ ... <final 0x40-0x7e> are skipped transparently.
+ */
+static int str_visible_bytes(const char *s, int max_visible)
+{
+    const char *p = s;
+    int visible = 0;
+    while (*p) {
+        if ((unsigned char)*p == '\x1b' && *(p + 1) == '[') {
+            /* Skip the CSI sequence including its final byte */
+            p += 2;
+            while (*p && ((unsigned char)*p < 0x40 || (unsigned char)*p > 0x7e))
+                p++;
+            if (*p)
+                p++;
+        } else {
+            if (visible >= max_visible)
+                break;
+            visible++;
+            p++;
+        }
+    }
+    return (int)(p - s);
+}
+
+/* Count the total number of visible characters in s. */
+static int str_visible_len(const char *s)
+{
+    const char *p = s;
+    int len = 0;
+    while (*p) {
+        if ((unsigned char)*p == '\x1b' && *(p + 1) == '[') {
+            p += 2;
+            while (*p && ((unsigned char)*p < 0x40 || (unsigned char)*p > 0x7e))
+                p++;
+            if (*p)
+                p++;
+        } else {
+            len++;
+            p++;
+        }
+    }
+    return len;
+}
+
 static void ui_draw_messagebar(editor_buf_t *eb)
 {
     buf_append(eb, "\x1b[93m\x1b[44m\x1b[K", 13);
-    int msg_len = strlen(ec.status_msg);
     int displayed_len = 0;
 
     /* For search messages, try to show as much as possible */
     if (strstr(ec.status_msg, "Search:")) {
-        /* Always show search messages, even if long */
-        if (msg_len > ec.screen_cols) {
-            /* Truncate but try to keep the help text visible */
-            buf_append(eb, ec.status_msg, ec.screen_cols);
-            displayed_len = ec.screen_cols;
-        } else {
-            buf_append(eb, ec.status_msg, msg_len);
-            displayed_len = msg_len;
-        }
+        int vlen = str_visible_len(ec.status_msg);
+        if (vlen > ec.screen_cols)
+            vlen = ec.screen_cols;
+        int blen = str_visible_bytes(ec.status_msg, vlen);
+        buf_append(eb, ec.status_msg, blen);
+        displayed_len = vlen;
     } else if (strstr(ec.status_msg, "File Browser:")) {
-        /* Always show file browser messages */
-        if (msg_len > ec.screen_cols) {
-            buf_append(eb, ec.status_msg, ec.screen_cols);
-            displayed_len = ec.screen_cols;
-        } else {
-            buf_append(eb, ec.status_msg, msg_len);
-            displayed_len = msg_len;
-        }
+        int vlen = str_visible_len(ec.status_msg);
+        if (vlen > ec.screen_cols)
+            vlen = ec.screen_cols;
+        int blen = str_visible_bytes(ec.status_msg, vlen);
+        buf_append(eb, ec.status_msg, blen);
+        displayed_len = vlen;
     } else {
-        /* Regular messages: truncate and show for 5 seconds */
-        if (msg_len > ec.screen_cols)
-            msg_len = ec.screen_cols;
-        if (msg_len && time(NULL) - ec.status_msg_time < 5) {
-            buf_append(eb, ec.status_msg, msg_len);
-            displayed_len = msg_len;
+        /* Regular messages: truncate to screen width and show for 5 seconds */
+        int vlen = str_visible_len(ec.status_msg);
+        if (vlen > ec.screen_cols)
+            vlen = ec.screen_cols;
+        int blen = str_visible_bytes(ec.status_msg, vlen);
+        if (blen && time(NULL) - ec.status_msg_time < 5) {
+            buf_append(eb, ec.status_msg, blen);
+            displayed_len = vlen;
         }
     }
 
@@ -3274,7 +3318,8 @@ static void editor_process_key(void)
     case CTRL_('o'): /* Save file (GNU nano: ^O Write Out) */
         file_save();
         break;
-    case CTRL_('^'): /* Start text marking (GNU nano: ^^ Set Mark) */
+    case META_('a'):
+    case META_('A'): /* Start text marking (GNU nano: M-A Set Mark) */
         if (ec.mode != MODE_SELECT) {
             mode_set(MODE_SELECT);
             ui_set_message(
@@ -3286,76 +3331,8 @@ static void editor_process_key(void)
         if (ec.cursor_y < ec.num_rows)
             editor_copy(0);
         break;
-    case CTRL_('k'): /* Cut from cursor to end of line (GNU nano: ^K) */
-        if (ec.cursor_y < ec.num_rows) {
-            editor_row_t *row = &ec.row[ec.cursor_y];
-            if (ec.cursor_x < row->size) {
-                /* Cut from cursor to end of line */
-                int len = row->size - ec.cursor_x;
-                char *text = malloc(len + 1);
-                if (text) {
-                    memcpy(text, &row->chars[ec.cursor_x], len);
-                    text[len] = '\0';
-
-                    /* Store in copied_char_buffer */
-                    free(ec.copied_char_buffer);
-                    ec.copied_char_buffer = text;
-
-                    /* Delete from cursor to end using gap buffer */
-                    size_t pos = 0;
-                    for (int i = 0; i < ec.cursor_y; i++)
-                        pos += ec.row[i].size + 1;
-                    pos += ec.cursor_x;
-
-                    if (ec.gb)
-                        gap_delete_with_undo(ec.gb, ec.undo_stack, pos, len);
-
-                    /* Update row */
-                    row->size = ec.cursor_x;
-                    row->chars[row->size] = '\0';
-                    row_update(row);
-                    ec.modified = true;
-                    ui_set_message("Cut to end of line");
-                }
-            } else if (ec.cursor_x == row->size &&
-                       ec.cursor_y < ec.num_rows - 1) {
-                /* At end of line, join with next line by deleting newline */
-                size_t pos = 0;
-                for (int i = 0; i < ec.cursor_y; i++)
-                    pos += ec.row[i].size + 1;
-                pos += row->size;
-
-                if (ec.gb) {
-                    /* Delete the newline character */
-                    gap_delete_with_undo(ec.gb, ec.undo_stack, pos, 1);
-                }
-
-                /* Join rows */
-                int next_len = ec.row[ec.cursor_y + 1].size;
-                row->chars = realloc(row->chars, row->size + next_len + 1);
-                memcpy(&row->chars[row->size], ec.row[ec.cursor_y + 1].chars,
-                       next_len);
-                row->size += next_len;
-                row->chars[row->size] = '\0';
-                row_update(row);
-
-                /* Delete the next row using memmove */
-                free(ec.row[ec.cursor_y + 1].chars);
-                free(ec.row[ec.cursor_y + 1].render);
-                free(ec.row[ec.cursor_y + 1].highlight);
-                if (ec.cursor_y + 1 < ec.num_rows - 1) {
-                    memmove(
-                        &ec.row[ec.cursor_y + 1], &ec.row[ec.cursor_y + 2],
-                        sizeof(editor_row_t) * (ec.num_rows - ec.cursor_y - 2));
-                }
-                ec.num_rows--;
-                ec.modified = true;
-                ui_set_message("Lines joined");
-            } else {
-                /* Empty line - cut whole line */
-                editor_cut();
-            }
-        }
+    case CTRL_('k'): /* Cut current line (GNU nano: ^K Cut Line) */
+        editor_cut();
         break;
     case CTRL_('u'): /* Paste/uncut (GNU nano: ^U Uncut) */
         editor_paste();
@@ -3434,7 +3411,7 @@ static void editor_process_key(void)
             help_generate(help_buffer, sizeof(help_buffer));
             ui_set_message(
                 "Press any key to close. Key bindings: ^X=Exit ^O=Save ^W=Find "
-                "^^=Mark M-6=Copy ^K=Cut ^U=Paste M-U=Undo M-E=Redo");
+                "M-A=Mark M-6=Copy ^K=Cut ^U=Paste M-U=Undo M-E=Redo");
         }
         break;
     case BACKSPACE:
