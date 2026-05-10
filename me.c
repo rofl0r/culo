@@ -6,6 +6,10 @@
 #define _DARWIN_C_SOURCE /* Enable SIGWINCH on macOS */
 #endif
 
+#ifndef _GNU_SOURCE
+#define _GNU_SOURCE /* strcasestr */
+#endif
+
 /* Standard library headers */
 #include <ctype.h>
 #include <errno.h>
@@ -754,6 +758,8 @@ struct {
     selection_state_t selection; /* Text selection state */
     bool show_line_numbers;      /* Toggle line numbers display */
     bool last_was_cut;           /* True if previous key was ^K (for appending cuts) */
+    char *search_last_query;     /* Persists search term across ^W invocations */
+    bool search_case_sensitive;  /* M-C toggle: true = case-sensitive (strstr) */
 } ec = {
     .cursor_x = 0,
     .cursor_y = 0,
@@ -783,6 +789,8 @@ struct {
         },
     .show_line_numbers = false,
     .last_was_cut = false,
+    .search_last_query = NULL,
+    .search_case_sensitive = false,
 };
 
 typedef struct {
@@ -864,6 +872,14 @@ static void mode_set(editor_mode_t new_mode)
     /* Clean up old mode state */
     switch (ec.mode) {
     case MODE_SEARCH:
+        /* Persist query for the next ^W invocation */
+        if (ec.mode_state.search.query && ec.mode_state.search.query_len > 0) {
+            char *saved = strdup(ec.mode_state.search.query);
+            if (saved) {
+                free(ec.search_last_query);
+                ec.search_last_query = saved;
+            }
+        }
         free(ec.mode_state.search.query);
         ec.mode_state.search.query = NULL;
         /* Restore saved highlight if leaving search mode */
@@ -906,14 +922,20 @@ static void mode_set(editor_mode_t new_mode)
         ui_set_message("-- SELECT MODE -- Use arrows to extend, ESC to cancel");
         break;
     case MODE_SEARCH: {
-        size_t cap = 128;
+        /* Start with the last used query if available */
+        const char *prev = ec.search_last_query ? ec.search_last_query : "";
+        size_t prev_len = strlen(prev);
+        size_t cap = prev_len + 128;
         char *q = calloc(cap, 1);
         ec.mode_state.search.query_cap = 0;
+        ec.mode_state.search.query_len = 0;
         if (q) {
+            if (prev_len)
+                memcpy(q, prev, prev_len);
             ec.mode_state.search.query = q;
             ec.mode_state.search.query_cap = cap;
+            ec.mode_state.search.query_len = prev_len;
         }
-        ec.mode_state.search.query_len = 0;
         ec.mode_state.search.highlight_line = -1;
         ec.mode_state.search.saved_highlight = NULL;
         break;
@@ -967,6 +989,7 @@ static const char * const help_lines[] = {
     "",
     "Search:",
     "  ^W      Find text (Where is)",
+    "  M-C     Toggle case sensitivity (default: case-insensitive)",
     "",
     "Navigation:",
     "  Arrows  Move cursor",
@@ -2204,19 +2227,6 @@ static void file_save(void)
     ui_set_message("Error: %s", strerror(errno));
 }
 
-/* Case-insensitive substring search */
-static char *str_casestr(const char *haystack, const char *needle)
-{
-    if (!*needle)
-        return (char *)haystack;
-    size_t nlen = strlen(needle);
-    for (; *haystack; haystack++) {
-        if (strncasecmp(haystack, needle, nlen) == 0)
-            return (char *)haystack;
-    }
-    return NULL;
-}
-
 /* Highlight the match at (row_idx, match_offset, match_len), saving the
  * previous highlight so it can be restored when leaving search mode. */
 static void search_highlight_match(int row_idx, int match_offset, int match_len)
@@ -2254,8 +2264,9 @@ static void search_highlight_match(int row_idx, int match_offset, int match_len)
     /* else: match extends past render_size; skip highlight silently */
 }
 
-/* Execute case-insensitive search from cursor_y+1 downward (wrapping).
- * Returns true if a match was found. */
+/* Execute search from cursor_y+1 downward (wrapping).
+ * Uses strcasestr (case-insensitive) or strstr (case-sensitive) depending on
+ * ec.search_case_sensitive.  Returns true if a match was found. */
 static bool search_do(const char *query)
 {
     if (!query || !*query)
@@ -2267,7 +2278,9 @@ static bool search_do(const char *query)
         editor_row_t *r = &ec.row[ri];
         if (!r->render)
             continue;
-        char *match = str_casestr(r->render, query);
+        char *match = ec.search_case_sensitive
+                          ? strstr(r->render, query)
+                          : strcasestr(r->render, query);
         if (match) {
             ec.cursor_y = ri;
             ec.cursor_x = row_renderx_to_cursorx(r, match - r->render);
@@ -2351,9 +2364,12 @@ static void ui_draw_statusbar(editor_buf_t *eb)
 
     int len, r_len;
     if (ec.mode == MODE_SEARCH) {
-        /* In search mode: show [SEARCH] and the query text being typed */
+        /* In search mode: show [SEARCH] [case sensitive] and the query text */
         const char *q = ec.mode_state.search.query ? ec.mode_state.search.query : "";
-        len = snprintf(status, sizeof(status), " [SEARCH] %s", q);
+        if (ec.search_case_sensitive)
+            len = snprintf(status, sizeof(status), " [SEARCH] [case sensitive] %s", q);
+        else
+            len = snprintf(status, sizeof(status), " [SEARCH] %s", q);
         r_len = 0;
         r_status[0] = '\0';
     } else {
@@ -3210,6 +3226,8 @@ static void editor_cleanup(void)
     ec.mode_state.search.saved_highlight = NULL;
     free(ec.mode_state.prompt.buffer);
     ec.mode_state.prompt.buffer = NULL;
+    free(ec.search_last_query);
+    ec.search_last_query = NULL;
     browser_free_entries();
 }
 
@@ -3414,6 +3432,9 @@ static void editor_process_key(void)
             ec.col_offset = ec.mode_state.search.saved_col;
             ec.row_offset = ec.mode_state.search.saved_row;
             mode_set(MODE_NORMAL);
+        } else if (c == META_('c') || c == META_('C')) {
+            /* Toggle case sensitivity */
+            ec.search_case_sensitive = !ec.search_case_sensitive;
         } else if (c == BACKSPACE || c == DEL_KEY || c == CTRL_('h')) {
             if (ec.mode_state.search.query_len > 0)
                 ec.mode_state.search.query[--ec.mode_state.search.query_len] = '\0';
