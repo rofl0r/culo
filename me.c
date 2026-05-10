@@ -929,7 +929,7 @@ static void mode_set(editor_mode_t new_mode)
     }
     case MODE_HELP:
         ec.mode_state.help.offset = 0;
-        ui_set_message("^X ^G ^C to exit, arrows/PgUp/PgDn to scroll");
+        ui_set_message("^X or ^G or ^C to exit, arrows/PgUp/PgDn to scroll");
         break;
     case MODE_NORMAL:
         ec.selection.active = false;
