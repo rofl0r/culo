@@ -6,11 +6,6 @@
 #define _DARWIN_C_SOURCE /* Enable SIGWINCH on macOS */
 #endif
 
-/* Timer feature: Set to 1 to enable automatic clock updates, 0 to disable */
-#ifndef ENABLE_TIMER
-#define ENABLE_TIMER 1
-#endif
-
 /* Standard library headers */
 #include <ctype.h>
 #include <errno.h>
@@ -36,15 +31,7 @@
 #define PATH_MAX 4096
 #endif
 
-/* Timer-specific headers */
-#if ENABLE_TIMER
-#include <poll.h>
-#include <sys/time.h>
 #include <time.h>
-#else
-/* time() is still needed for status messages even without timer */
-#include <time.h>
-#endif
 
 #define CTRL_(k) ((k) & (0x1f))
 #define META_(k) (0x800 | (unsigned char)(k))
@@ -760,10 +747,6 @@ struct {
     mode_data_t mode_state;      /* Mode-specific state data */
     selection_state_t selection; /* Text selection state */
     bool show_line_numbers;      /* Toggle line numbers display */
-#if ENABLE_TIMER
-    /* Timer support for time update */
-    time_t last_update_time;
-#endif
 } ec = {
     .cursor_x = 0,
     .cursor_y = 0,
@@ -792,9 +775,6 @@ struct {
             .active = false,
         },
     .show_line_numbers = false,
-#if ENABLE_TIMER
-    .last_update_time = 0,
-#endif
 };
 
 typedef struct {
@@ -2337,23 +2317,11 @@ static void ui_draw_statusbar(editor_buf_t *eb)
     int col_size =
         ec.row && ec.cursor_y <= ec.num_rows - 1 ? ec.row[ec.cursor_y].size : 0;
 
-#if ENABLE_TIMER
-    /* Display time when timer is enabled */
-    time_t now = time(NULL);
-    struct tm currtime_buf;
-    struct tm *currtime = localtime_r(&now, &currtime_buf);
-    int r_len = snprintf(
-        r_status, sizeof(r_status), "%d/%d lines  %d/%d cols [ %2d:%2d:%2d ]",
-        (ec.cursor_y + 1 > ec.num_rows) ? ec.num_rows : ec.cursor_y + 1,
-        ec.num_rows, ec.cursor_x + 1, col_size, currtime->tm_hour,
-        currtime->tm_min, currtime->tm_sec);
-#else
-    /* No time display when timer is disabled */
+    /* No time display */
     int r_len = snprintf(
         r_status, sizeof(r_status), "%d/%d lines  %d/%d cols",
         (ec.cursor_y + 1 > ec.num_rows) ? ec.num_rows : ec.cursor_y + 1,
         ec.num_rows, ec.cursor_x + 1, col_size);
-#endif
     if (len > ec.screen_cols)
         len = ec.screen_cols;
     buf_append(eb, status, len);
@@ -2661,12 +2629,12 @@ static int ui_confirm(const char *msg)
             break;
         case 'y':
         case 'Y':
-            choice = 1; /* Quick key for Yes */
-            break;
+            ui_set_message("");
+            return 1; /* Immediate Yes */
         case 'n':
         case 'N':
-            choice = 0; /* Quick key for No */
-            break;
+            ui_set_message("");
+            return 0; /* Immediate No */
         }
     }
 }
@@ -3092,20 +3060,10 @@ static void browser_render(void)
     int len = snprintf(status, sizeof(status), " [BROWSER] %s",
                        ec.mode_state.browser.current_dir);
 
-    /* Right side: file count and time */
-#if ENABLE_TIMER
-    time_t now = time(NULL);
-    struct tm currtime_buf;
-    struct tm *currtime = localtime_r(&now, &currtime_buf);
-    int r_len = snprintf(
-        r_status, sizeof(r_status), "%d/%d files [ %2d:%2d:%2d ]",
-        ec.mode_state.browser.selected + 1, ec.mode_state.browser.num_entries,
-        currtime->tm_hour, currtime->tm_min, currtime->tm_sec);
-#else
+    /* Right side: file count */
     int r_len = snprintf(r_status, sizeof(r_status), "%d/%d files",
                          ec.mode_state.browser.selected + 1,
                          ec.mode_state.browser.num_entries);
-#endif
 
     if (len > ec.screen_cols)
         len = ec.screen_cols;
@@ -3491,18 +3449,6 @@ static void editor_process_key(void)
     }
 }
 
-#if ENABLE_TIMER
-static bool timer_check_update(void)
-{
-    time_t current_time = time(NULL);
-    if (current_time != ec.last_update_time) {
-        ec.last_update_time = current_time;
-        return true; /* Need refresh */
-    }
-    return false;
-}
-#endif
-
 static void editor_init(void)
 {
     term_update_size();
@@ -3513,11 +3459,6 @@ static void editor_init(void)
     ec.gb = gap_init(GAP_INITIAL_SIZE);
     if (ec.gb)
         ec.undo_stack = undo_init(MAX_UNDO_LEVELS);
-
-#if ENABLE_TIMER
-    /* Initialize time tracking */
-    ec.last_update_time = time(NULL);
-#endif
 }
 
 int main(int argc, char *argv[])
@@ -3531,30 +3472,9 @@ int main(int argc, char *argv[])
 
     /* Main event loop */
     while (1) {
-#if ENABLE_TIMER
-        /* Check if timer needs refresh */
-        if (timer_check_update() && ec.mode != MODE_BROWSER)
-            editor_refresh();
-
-        /* Use poll for non-blocking keyboard input */
-        struct pollfd fds[1];
-        fds[0].fd = STDIN_FILENO;
-        fds[0].events = POLLIN;
-
-        /* Poll with 100ms timeout */
-        int ret = poll(fds, 1, 100);
-
-        if (ret > 0 && (fds[0].revents & POLLIN)) {
-            editor_process_key();
-            if (ec.mode != MODE_BROWSER)
-                editor_refresh();
-        }
-#else
-        /* Simple blocking read when timer is disabled */
         editor_process_key();
         if (ec.mode != MODE_BROWSER)
             editor_refresh();
-#endif
     }
     /* not reachable */
     return 0;
