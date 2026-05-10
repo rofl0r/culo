@@ -1021,9 +1021,10 @@ static int term_read_key(void)
     /* If a previous lone ESC was recorded, combine it with this character */
     if (meta_pending) {
         meta_pending = false;
-        if (c != '\x1b')
+        /* Only META printable characters; leave control chars for their normal handlers */
+        if (c != '\x1b' && (unsigned char)c >= 0x20)
             return META_((unsigned char)c);
-        /* Two ESCs in a row: treat this one as a fresh ESC below */
+        /* Two ESCs in a row, or a control char: fall through to handle normally */
     }
     if (c == '\x1b') {
         char seq[3];
@@ -2349,42 +2350,28 @@ static const char *skip_csi(const char *p)
 }
 
 /*
- * Count visible (non-escape-sequence) characters in s, stopping at
- * max_visible.  Returns the number of bytes that should be written to the
- * terminal to display exactly that many visible characters.  CSI sequences of
- * the form ESC [ ... <final 0x40–0x7E> are skipped transparently.
+ * Scan string s counting visible (non-escape-sequence) characters.
+ * Stops after max_visible visible characters; if max_visible < 0, scans to
+ * the end of the string.  Returns the byte offset reached.  If vis_out is
+ * non-NULL it receives the visible character count seen.
  */
-static int str_visible_bytes(const char *s, int max_visible)
+static int str_visible_scan(const char *s, int max_visible, int *vis_out)
 {
     const char *p = s;
-    int visible = 0;
+    int vis = 0;
     while (*p) {
         if ((unsigned char)*p == '\x1b' && *(p + 1) == '[') {
             p = skip_csi(p + 1);
         } else {
-            if (visible >= max_visible)
+            if (max_visible >= 0 && vis >= max_visible)
                 break;
-            visible++;
+            vis++;
             p++;
         }
     }
+    if (vis_out)
+        *vis_out = vis;
     return (int)(p - s);
-}
-
-/* Count the total number of visible characters in s. */
-static int str_visible_len(const char *s)
-{
-    const char *p = s;
-    int len = 0;
-    while (*p) {
-        if ((unsigned char)*p == '\x1b' && *(p + 1) == '[') {
-            p = skip_csi(p + 1);
-        } else {
-            len++;
-            p++;
-        }
-    }
-    return len;
 }
 
 static void ui_draw_messagebar(editor_buf_t *eb)
@@ -2394,25 +2381,19 @@ static void ui_draw_messagebar(editor_buf_t *eb)
 
     /* For search messages, try to show as much as possible */
     if (strstr(ec.status_msg, "Search:")) {
-        int vlen = str_visible_len(ec.status_msg);
-        if (vlen > ec.screen_cols)
-            vlen = ec.screen_cols;
-        int blen = str_visible_bytes(ec.status_msg, vlen);
+        int vlen;
+        int blen = str_visible_scan(ec.status_msg, ec.screen_cols, &vlen);
         buf_append(eb, ec.status_msg, blen);
         displayed_len = vlen;
     } else if (strstr(ec.status_msg, "File Browser:")) {
-        int vlen = str_visible_len(ec.status_msg);
-        if (vlen > ec.screen_cols)
-            vlen = ec.screen_cols;
-        int blen = str_visible_bytes(ec.status_msg, vlen);
+        int vlen;
+        int blen = str_visible_scan(ec.status_msg, ec.screen_cols, &vlen);
         buf_append(eb, ec.status_msg, blen);
         displayed_len = vlen;
     } else {
         /* Regular messages: truncate to screen width and show for 5 seconds */
-        int vlen = str_visible_len(ec.status_msg);
-        if (vlen > ec.screen_cols)
-            vlen = ec.screen_cols;
-        int blen = str_visible_bytes(ec.status_msg, vlen);
+        int vlen;
+        int blen = str_visible_scan(ec.status_msg, ec.screen_cols, &vlen);
         if (blen && time(NULL) - ec.status_msg_time < 5) {
             buf_append(eb, ec.status_msg, blen);
             displayed_len = vlen;
@@ -3167,6 +3148,8 @@ static void editor_process_key(void)
             return;
         case '\r': /* Enter - open file/directory */
             browser_open_selected();
+            if (ec.mode == MODE_BROWSER)
+                browser_render();
             return;
         case ARROW_UP:
             if (ec.mode_state.browser.selected > 0) {
