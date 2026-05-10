@@ -1411,10 +1411,11 @@ static void editor_cut(void)
     if (!ec.gb || ec.cursor_y >= ec.num_rows)
         return;
 
-    /* Copy line text including trailing newline (if not the last line) */
-    bool has_nl = (ec.cursor_y < ec.num_rows - 1);
+    bool is_last_line = (ec.cursor_y == ec.num_rows - 1);
+
+    /* Always include trailing newline in clipboard (matches GNU nano) */
     size_t line_size = ec.row[ec.cursor_y].size;
-    size_t buf_size = line_size + (has_nl ? 1 : 0) + 1; /* text + \n + \0 */
+    size_t buf_size = line_size + 2; /* text + \n + \0 */
     char *new_buf = realloc(ec.copied_char_buffer, buf_size);
     if (!new_buf) {
         ui_set_message("Memory allocation failed");
@@ -1422,9 +1423,8 @@ static void editor_cut(void)
     }
     ec.copied_char_buffer = new_buf;
     memcpy(ec.copied_char_buffer, ec.row[ec.cursor_y].chars, line_size);
-    if (has_nl)
-        ec.copied_char_buffer[line_size] = '\n';
-    ec.copied_char_buffer[buf_size - 1] = '\0';
+    ec.copied_char_buffer[line_size] = '\n';
+    ec.copied_char_buffer[line_size + 1] = '\0';
     ui_set_message("Text cut");
 
     /* Calculate line position in gap buffer */
@@ -1432,29 +1432,52 @@ static void editor_cut(void)
     for (int i = 0; i < ec.cursor_y; i++)
         line_start += ec.row[i].size + 1;
 
-    /* Delete entire line including newline */
+    /* Delete entire line including newline (for non-last lines only).
+     * For the last line we only delete the text; the preceding row's \n
+     * remains, creating an implicit empty last line in the gap buffer. */
     size_t line_len = ec.row[ec.cursor_y].size;
-    if (ec.cursor_y < ec.num_rows - 1)
+    if (!is_last_line)
         line_len++; /* Include newline */
 
     gap_delete_with_undo(ec.gb, ec.undo_stack, line_start, line_len);
 
-    /* Remove row from display structure */
+    /* Update row display structure */
     editor_row_t *row = &ec.row[ec.cursor_y];
     free(row->render);
     free(row->chars);
     free(row->highlight);
 
-    if (ec.num_rows > 1) {
+    if (is_last_line && ec.num_rows > 1) {
+        /* Last line of a multi-line file: replace with empty row so cursor
+         * stays at the same position (GNU nano behaviour). The preceding
+         * row's \n now represents the empty last line in the gap buffer. */
+        ec.row[ec.cursor_y].size = 0;
+        ec.row[ec.cursor_y].chars = malloc(1);
+        if (!ec.row[ec.cursor_y].chars) {
+            ui_set_message("Memory allocation failed");
+            ec.modified = true;
+            return;
+        }
+        ec.row[ec.cursor_y].chars[0] = '\0';
+        ec.row[ec.cursor_y].render = NULL;
+        ec.row[ec.cursor_y].render_size = 0;
+        ec.row[ec.cursor_y].highlight = NULL;
+        row_update(&ec.row[ec.cursor_y]);
+    } else if (ec.num_rows > 1) {
         memmove(&ec.row[ec.cursor_y], &ec.row[ec.cursor_y + 1],
                 sizeof(editor_row_t) * (ec.num_rows - ec.cursor_y - 1));
         for (int j = ec.cursor_y; j < ec.num_rows - 1; j++)
             ec.row[j].idx--;
         ec.num_rows--;
     } else {
-        /* Last row - replace with empty row */
+        /* Only row - replace with empty row */
         ec.row[0].size = 0;
         ec.row[0].chars = malloc(1);
+        if (!ec.row[0].chars) {
+            ui_set_message("Memory allocation failed");
+            ec.modified = true;
+            return;
+        }
         ec.row[0].chars[0] = '\0';
         ec.row[0].render = NULL;
         ec.row[0].render_size = 0;
@@ -3315,8 +3338,13 @@ static void editor_process_key(void)
         break;
     case CTRL_('x'): /* Exit editor (GNU nano: ^X) */
         if (ec.modified) {
-            if (ui_confirm("File has been modified. Quit without saving?") != 1)
-                return;
+            int r = ui_confirm(
+                "Save modified buffer? (Answering \"No\" will DISCARD changes)");
+            if (r == -1)
+                return; /* Cancel: stay in editor */
+            if (r == 1)
+                file_save(); /* Yes: save then quit */
+            /* No (r == 0): discard changes and quit */
         }
         term_clear();
         term_close_buffer();
