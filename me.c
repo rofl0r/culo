@@ -30,12 +30,22 @@
 #include <sys/types.h>
 #include <termios.h>
 #include <unistd.h>
+#include <regex.h>
 
 #ifndef PATH_MAX
 #define PATH_MAX 4096
 #endif
 
 #include <time.h>
+
+/* Search mode flags (bitmask) */
+typedef enum {
+    SM_NONE           = 0,
+    SM_CASE_SENSITIVE = 1,
+    SM_BACKWARDS      = 2,
+    SM_REPLACE        = 4,
+    SM_REGEX          = 8,
+} search_mode_t;
 
 #define CTRL_(k) ((k) & (0x1f))
 #define META_(k) (0x800 | (unsigned char)(k))
@@ -759,7 +769,7 @@ struct {
         char *query;             /* Persists across ^W invocations; NULL until first search */
         size_t query_len;
         size_t query_cap;
-        bool case_sensitive;     /* M-C toggle: true = case-sensitive (strstr) */
+        int mode;                /* search_mode_t bitmask */
     } search;
 } ec = {
     .cursor_x = 0,
@@ -790,7 +800,7 @@ struct {
         },
     .show_line_numbers = false,
     .last_was_cut = false,
-    .search = { .query = NULL, .query_len = 0, .query_cap = 0, .case_sensitive = false },
+    .search = { .query = NULL, .query_len = 0, .query_cap = 0, .mode = SM_NONE },
 };
 
 typedef struct {
@@ -860,6 +870,7 @@ editor_syntax_t DB[] = {
 
 static char *ui_prompt(const char *msg, void (*callback)(char *, int));
 static void editor_refresh(void);
+static int get_line_number_width(void);
 
 /* Mode management implementation */
 static void mode_set(editor_mode_t new_mode)
@@ -977,6 +988,8 @@ static const char * const help_lines[] = {
     "Search:",
     "  ^W      Find text (Where is)",
     "  M-C     Toggle case sensitivity (default: case-insensitive)",
+    "  M-B     Toggle backwards search",
+    "  M-R     Toggle regex mode (clears case/backwards flags when enabled)",
     "",
     "Navigation:",
     "  Arrows  Move cursor",
@@ -2251,33 +2264,97 @@ static void search_highlight_match(int row_idx, int match_offset, int match_len)
     /* else: match extends past render_size; skip highlight silently */
 }
 
-/* Execute search from cursor_y+1 downward (wrapping).
- * Uses strcasestr (case-insensitive) or strstr (case-sensitive) depending on
- * ec.search.case_sensitive.  Returns true if a match was found. */
+/* Execute search forward (from cursor_y+1) or backward (from cursor_y-1),
+ * wrapping around.  Uses strstr/strcasestr or a compiled regex depending on
+ * ec.search.mode.  Returns true if a match was found. */
 static bool search_do(const char *query)
 {
     if (!query || !*query)
         return false;
-    size_t qlen = strlen(query);
-    int start = ec.cursor_y + 1;
-    for (int i = 0; i < ec.num_rows; i++) {
-        int ri = (start + i) % ec.num_rows;
+    int n = ec.num_rows;
+    bool backwards = (ec.search.mode & SM_BACKWARDS) != 0;
+    bool use_regex  = (ec.search.mode & SM_REGEX)    != 0;
+    bool case_sens  = (ec.search.mode & SM_CASE_SENSITIVE) != 0;
+
+    /* Compile regex if needed */
+    regex_t re;
+    if (use_regex) {
+        int flags = REG_EXTENDED | (case_sens ? 0 : REG_ICASE);
+        if (regcomp(&re, query, flags) != 0)
+            return false; /* bad pattern */
+    }
+
+    size_t qlen = use_regex ? 0 : strlen(query);
+    bool found = false;
+
+    for (int i = 0; i < n; i++) {
+        int ri;
+        if (backwards)
+            ri = ((ec.cursor_y - 1 - i) % n + n) % n;
+        else
+            ri = (ec.cursor_y + 1 + i) % n;
+
         editor_row_t *r = &ec.row[ri];
         if (!r->render)
             continue;
-        char *match = ec.search.case_sensitive
-                          ? strstr(r->render, query)
-                          : strcasestr(r->render, query);
-        if (match) {
+
+        int match_off = -1, match_len = -1;
+        if (use_regex) {
+            regmatch_t m;
+            if (regexec(&re, r->render, 1, &m, 0) == 0) {
+                match_off = (int)m.rm_so;
+                match_len = (int)(m.rm_eo - m.rm_so);
+            }
+        } else {
+            char *match = case_sens ? strstr(r->render, query)
+                                    : strcasestr(r->render, query);
+            if (match) {
+                match_off = (int)(match - r->render);
+                match_len = (int)qlen;
+            }
+        }
+
+        if (match_off >= 0) {
             ec.cursor_y = ri;
-            ec.cursor_x = row_renderx_to_cursorx(r, match - r->render);
-            ec.row_offset = ec.num_rows; /* Trigger scroll recalc */
-            search_highlight_match(ri, match - r->render, qlen);
-            return true;
+            ec.cursor_x = row_renderx_to_cursorx(r, match_off);
+            ec.row_offset = n; /* Trigger scroll recalc */
+            search_highlight_match(ri, match_off, match_len > 0 ? match_len : 1);
+            found = true;
+            break;
         }
     }
-    ui_set_message("Pattern not found: %s", query);
-    return false;
+
+    if (use_regex)
+        regfree(&re);
+
+    return found;
+}
+
+/* Draw the "not found" overlay centered on the last content row (above
+ * the status bar) using inverse video.  Called after editor_refresh(). */
+static void draw_notfound_overlay(const char *query)
+{
+    char msg[100];
+    int msglen = snprintf(msg, sizeof(msg), "[ \"%.*s\" not found ]",
+                          (int)(sizeof(msg) - 20), query);
+    if (msglen >= (int)sizeof(msg))
+        msglen = (int)sizeof(msg) - 1;
+    int col = (ec.screen_cols - msglen) / 2;
+    if (col < 0) col = 0;
+    int avail = ec.screen_cols - col;
+    if (avail > msglen) avail = msglen;
+    /* Position on last content row (1-indexed: screen_rows) */
+    char buf[32];
+    snprintf(buf, sizeof(buf), "\x1b[%d;%dH\x1b[7m", ec.screen_rows, col + 1);
+    write(STDOUT_FILENO, buf, strlen(buf));
+    write(STDOUT_FILENO, msg, avail);
+    write(STDOUT_FILENO, "\x1b[m", 3);
+    /* Reposition cursor to editor cursor location */
+    int lnw = get_line_number_width();
+    snprintf(buf, sizeof(buf), "\x1b[%d;%dH",
+             (ec.cursor_y - ec.row_offset) + 1,
+             (ec.render_x - ec.col_offset) + 1 + lnw);
+    write(STDOUT_FILENO, buf, strlen(buf));
 }
 
 static void search_find(void)
@@ -2351,12 +2428,16 @@ static void ui_draw_statusbar(editor_buf_t *eb)
 
     int len, r_len;
     if (ec.mode == MODE_SEARCH) {
-        /* In search mode: show [SEARCH] [case sensitive] and the query text */
+        /* In search mode: show [SEARCH] and active flags, then the query */
         const char *q = ec.search.query ? ec.search.query : "";
-        if (ec.search.case_sensitive)
-            len = snprintf(status, sizeof(status), " [SEARCH] [case sensitive] %s", q);
-        else
-            len = snprintf(status, sizeof(status), " [SEARCH] %s", q);
+        char flags[40] = "";
+        if (ec.search.mode & SM_CASE_SENSITIVE)
+            strncat(flags, " [Case Sensitive]", sizeof(flags) - strlen(flags) - 1);
+        if (ec.search.mode & SM_BACKWARDS)
+            strncat(flags, " [Backwards]", sizeof(flags) - strlen(flags) - 1);
+        if (ec.search.mode & SM_REGEX)
+            strncat(flags, " [Regex]", sizeof(flags) - strlen(flags) - 1);
+        len = snprintf(status, sizeof(status), " [SEARCH]%s %s", flags, q);
         r_len = 0;
         r_status[0] = '\0';
     } else {
@@ -3403,9 +3484,13 @@ static void editor_process_key(void)
         if (c == '\r') {
             /* Execute the search on Enter */
             if (ec.search.query && ec.search.query_len > 0) {
+                char saved_query[512];
+                snprintf(saved_query, sizeof(saved_query), "%s", ec.search.query);
                 if (!search_do(ec.search.query)) {
-                    /* "not found" message already set; stay in SEARCH mode */
+                    /* Not found: switch to normal mode and show overlay */
+                    mode_set(MODE_NORMAL);
                     editor_refresh();
+                    draw_notfound_overlay(saved_query);
                     return;
                 }
             }
@@ -3418,8 +3503,19 @@ static void editor_process_key(void)
             ec.row_offset = ec.mode_state.search.saved_row;
             mode_set(MODE_NORMAL);
         } else if (c == META_('c') || c == META_('C')) {
-            /* Toggle case sensitivity */
-            ec.search.case_sensitive = !ec.search.case_sensitive;
+            /* Toggle case sensitivity (ignored in regex mode) */
+            if (!(ec.search.mode & SM_REGEX))
+                ec.search.mode ^= SM_CASE_SENSITIVE;
+        } else if (c == META_('b') || c == META_('B')) {
+            /* Toggle backwards search (ignored in regex mode) */
+            if (!(ec.search.mode & SM_REGEX))
+                ec.search.mode ^= SM_BACKWARDS;
+        } else if (c == META_('r') || c == META_('R')) {
+            /* Toggle regex mode; enabling it clears other flags except SM_REPLACE */
+            if (ec.search.mode & SM_REGEX)
+                ec.search.mode &= ~SM_REGEX; /* turn off regex */
+            else
+                ec.search.mode = SM_REGEX | (ec.search.mode & SM_REPLACE);
         } else if (c == BACKSPACE || c == DEL_KEY || c == CTRL_('h')) {
             if (ec.search.query_len > 0)
                 ec.search.query[--ec.search.query_len] = '\0';
