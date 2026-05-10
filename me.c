@@ -1411,7 +1411,21 @@ static void editor_cut(void)
     if (!ec.gb || ec.cursor_y >= ec.num_rows)
         return;
 
-    editor_copy(-1);
+    /* Copy line text including trailing newline (if not the last line) */
+    bool has_nl = (ec.cursor_y < ec.num_rows - 1);
+    size_t line_size = ec.row[ec.cursor_y].size;
+    size_t buf_size = line_size + (has_nl ? 1 : 0) + 1; /* text + \n + \0 */
+    char *new_buf = realloc(ec.copied_char_buffer, buf_size);
+    if (!new_buf) {
+        ui_set_message("Memory allocation failed");
+        return;
+    }
+    ec.copied_char_buffer = new_buf;
+    memcpy(ec.copied_char_buffer, ec.row[ec.cursor_y].chars, line_size);
+    if (has_nl)
+        ec.copied_char_buffer[line_size] = '\n';
+    ec.copied_char_buffer[buf_size - 1] = '\0';
+    ui_set_message("Text cut");
 
     /* Calculate line position in gap buffer */
     size_t line_start = 0;
@@ -3397,6 +3411,16 @@ static void editor_process_key(void)
         ui_set_message("File Browser: Enter to open, ESC to cancel");
         browser_render();
         return;      /* Don't continue to normal refresh */
+    case META_('\\'): /* M-\ Go to first line (GNU nano: M-\) */
+        ec.cursor_y = 0;
+        ec.cursor_x = 0;
+        break;
+    case META_('/'): /* M-/ Go to last line (GNU nano: M-/) */
+        if (ec.num_rows > 0) {
+            ec.cursor_y = ec.num_rows - 1;
+            ec.cursor_x = 0;
+        }
+        break;
     case CTRL_('g'): /* Show help (GNU nano: ^G) */
         mode_set(MODE_HELP);
         /* Generate comprehensive help */
@@ -3405,7 +3429,7 @@ static void editor_process_key(void)
             help_generate(help_buffer, sizeof(help_buffer));
             ui_set_message(
                 "Press any key to close. Key bindings: ^X=Exit ^O=Save ^W=Find "
-                "M-A=Mark M-6=Copy ^K=Cut ^U=Paste M-U=Undo M-E=Redo");
+                "M-A=Mark M-6=Copy ^K=Cut ^U=Paste M-U=Undo M-E=Redo M-\\=First M-/=Last");
         }
         break;
     case BACKSPACE:
