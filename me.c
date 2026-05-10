@@ -47,6 +47,7 @@
 #endif
 
 #define CTRL_(k) ((k) & (0x1f))
+#define META_(k) (0x800 | (unsigned char)(k))
 #define TAB_STOP 4
 
 /* UTF-8 handling functions */
@@ -684,7 +685,7 @@ typedef struct {
 /* X-macro for editor modes */
 #define EDITOR_MODES                                  \
     _(NORMAL, "NORMAL", "Default editing mode")       \
-    _(SEARCH, "SEARCH", "Search mode (Ctrl-F)")       \
+    _(SEARCH, "SEARCH", "Search mode (Ctrl-W)")       \
     _(PROMPT, "PROMPT", "Generic prompt mode")        \
     _(SELECT, "SELECT", "Text selection mode")        \
     _(CONFIRM, "CONFIRM", "Confirmation dialog mode") \
@@ -692,18 +693,14 @@ typedef struct {
     _(BROWSER, "BROWSER", "File browser mode")
 
 /* X-macro for key bindings - centralizes all shortcuts */
-#define KEY_BINDINGS                    \
-    _(QUIT, 'q', "Exit editor")         \
-    _(SAVE, 's', "Save file")           \
-    _(FIND, 'f', "Search text")         \
-    _(OPEN, 'o', "Open file browser")   \
-    _(MARK, 'x', "Start marking text")  \
-    _(COPY, 'c', "Copy marked text")    \
-    _(CUT, 'k', "Cut line/marked text") \
-    _(PASTE, 'v', "Paste/uncut")        \
-    _(UNDO, 'z', "Undo last action")    \
-    _(REDO, 'r', "Redo last undo")      \
-    _(HELP, '?', "Show help")
+#define KEY_BINDINGS                      \
+    _(QUIT, 'x', "Exit editor")           \
+    _(SAVE, 'o', "Save file")             \
+    _(FIND, 'w', "Search text")           \
+    _(MARK, '^', "Start marking text")    \
+    _(CUT, 'k', "Cut line/marked text")   \
+    _(PASTE, 'u', "Paste/uncut")          \
+    _(HELP, 'g', "Show help")
 
 /* clang-format off */
 typedef enum {
@@ -955,6 +952,12 @@ static void help_generate(char *buffer, size_t size)
     KEY_BINDINGS
 #undef _
 
+    offset += snprintf(buffer + offset, size - offset,
+                       "  M-6 - Copy marked text\n"
+                       "  M-U - Undo last action\n"
+                       "  M-E - Redo last undo\n"
+                       "  M-B - Open file browser\n");
+
     offset += snprintf(buffer + offset, size - offset, "\nEditor Modes:\n");
 
 #define _(mode, name, desc) \
@@ -1016,8 +1019,12 @@ static int term_read_key(void)
     }
     if (c == '\x1b') {
         char seq[3];
-        if ((read(STDIN_FILENO, &seq[0], 1) != 1) ||
-            (read(STDIN_FILENO, &seq[1], 1) != 1))
+        if (read(STDIN_FILENO, &seq[0], 1) != 1)
+            return '\x1b';
+        /* If next byte is not '[' or 'O', treat as Meta+key */
+        if (seq[0] != '[' && seq[0] != 'O')
+            return META_((unsigned char)seq[0]);
+        if (read(STDIN_FILENO, &seq[1], 1) != 1)
             return '\x1b';
         if (seq[0] == '[') {
             if (isdigit(seq[1])) {
@@ -2563,7 +2570,7 @@ static bool ui_confirm(const char *msg)
             ui_set_message("");
             return choice;
         case '\x1b': /* ESC key */
-        case CTRL_('q'):
+        case CTRL_('x'):
             ui_set_message("");
             return false; /* Cancel = No */
         case ARROW_LEFT:
@@ -3090,7 +3097,7 @@ static void editor_process_key(void)
         /* File browser mode */
         switch (c) {
         case '\x1b': /* ESC - cancel */
-        case CTRL_('q'):
+        case CTRL_('x'):
             browser_free_entries();
             mode_set(MODE_NORMAL);
             editor_refresh_full(); /* Full redraw the editor */
@@ -3193,7 +3200,7 @@ static void editor_process_key(void)
             ec.selection.end_y = ec.cursor_y;
             return;
         }
-        case CTRL_('c'): /* Copy marked text and exit marking */
+        case META_('6'): /* Copy marked text and exit marking */
             selection_copy();
             mode_set(MODE_NORMAL);
             ui_set_message("Copied marked text");
@@ -3203,7 +3210,7 @@ static void editor_process_key(void)
             mode_set(MODE_NORMAL);
             ui_set_message("Cut marked text");
             return;
-        case CTRL_('v'): /* Paste over selection */
+        case CTRL_('u'): /* Paste over selection */
             selection_delete();
             editor_paste();
             mode_set(MODE_NORMAL);
@@ -3243,7 +3250,7 @@ static void editor_process_key(void)
         for (int i = 0; i < indent_level; i++)
             editor_insert_char('\t');
         break;
-    case CTRL_('q'):
+    case CTRL_('x'): /* Exit editor (GNU nano: ^X) */
         if (ec.modified) {
             if (!ui_confirm("File has been modified. Quit without saving?"))
                 return;
@@ -3253,22 +3260,22 @@ static void editor_process_key(void)
         editor_cleanup();
         exit(0);
         break;
-    case CTRL_('s'):
+    case CTRL_('o'): /* Save file (GNU nano: ^O Write Out) */
         file_save();
         break;
-    case CTRL_('x'): /* Start text marking */
+    case CTRL_('^'): /* Start text marking (GNU nano: ^^ Set Mark) */
         if (ec.mode != MODE_SELECT) {
             mode_set(MODE_SELECT);
             ui_set_message(
-                "Mark set - Move cursor to select, ^C=Copy, ^K=Cut, "
+                "Mark set - Move cursor to select, M-6=Copy, ^K=Cut, "
                 "ESC=Cancel");
         }
         break;
-    case CTRL_('c'): /* Copy current line (no marking in normal mode) */
+    case META_('6'): /* Copy current line (GNU nano: M-6 Copy) */
         if (ec.cursor_y < ec.num_rows)
             editor_copy(0);
         break;
-    case CTRL_('k'): /* Cut from cursor to end of line */
+    case CTRL_('k'): /* Cut from cursor to end of line (GNU nano: ^K) */
         if (ec.cursor_y < ec.num_rows) {
             editor_row_t *row = &ec.row[ec.cursor_y];
             if (ec.cursor_x < row->size) {
@@ -3339,11 +3346,12 @@ static void editor_process_key(void)
             }
         }
         break;
-    case CTRL_('v'): /* Paste/uncut */
+    case CTRL_('u'): /* Paste/uncut (GNU nano: ^U Uncut) */
         editor_paste();
         break;
-    case CTRL_('z'):
-        /* Undo last operation */
+    case META_('u'):
+    case META_('U'):
+        /* Undo last operation (GNU nano: M-U) */
         if (ec.gb && ec.undo_stack) {
             if (undo_perform(ec.gb, ec.undo_stack)) {
                 ec.modified = ec.gb->modified;
@@ -3355,8 +3363,9 @@ static void editor_process_key(void)
             ui_set_message("Undo system not initialized");
         }
         break;
-    case CTRL_('r'):
-        /* Redo last undone operation */
+    case META_('e'):
+    case META_('E'):
+        /* Redo last undone operation (GNU nano: M-E) */
         if (ec.gb && ec.undo_stack) {
             if (undo_redo(ec.gb, ec.undo_stack)) {
                 ec.modified = ec.gb->modified;
@@ -3391,7 +3400,7 @@ static void editor_process_key(void)
         if (ec.cursor_y < ec.num_rows)
             ec.cursor_x = ec.row[ec.cursor_y].size;
         break;
-    case CTRL_('f'):
+    case CTRL_('w'): /* Find/search (GNU nano: ^W Where Is) */
         search_find();
         break;
     case CTRL_('n'): /* Toggle line numbers */
@@ -3399,21 +3408,22 @@ static void editor_process_key(void)
         ui_set_message("Line numbers %s",
                        ec.show_line_numbers ? "enabled" : "disabled");
         break;
-    case CTRL_('o'): /* Open file browser */
+    case META_('b'):
+    case META_('B'): /* Open file browser (M-B) */
         mode_set(MODE_BROWSER);
         browser_load_directory(".");
         ui_set_message("File Browser: Enter to open, ESC to cancel");
         browser_render();
         return;      /* Don't continue to normal refresh */
-    case CTRL_('?'): /* Show help */
+    case CTRL_('g'): /* Show help (GNU nano: ^G) */
         mode_set(MODE_HELP);
         /* Generate comprehensive help */
         {
             static char help_buffer[256];
             help_generate(help_buffer, sizeof(help_buffer));
             ui_set_message(
-                "Press any key to close. Key bindings: ^Q=Quit ^S=Save ^F=Find "
-                "^X=Mark ^C=Copy ^K=Cut ^V=Paste ^Z=Undo");
+                "Press any key to close. Key bindings: ^X=Exit ^O=Save ^W=Find "
+                "^^=Mark M-6=Copy ^K=Cut ^U=Paste M-U=Undo M-E=Redo");
         }
         break;
     case BACKSPACE:
@@ -3482,7 +3492,7 @@ int main(int argc, char *argv[])
     if (argc >= 2)
         file_open(argv[1]);
     term_enable_raw();
-    ui_set_message("Mazu Editor | Ctrl-? Help");
+    ui_set_message("Mazu Editor | ^G Help");
     editor_refresh();
 
     /* Main event loop */
