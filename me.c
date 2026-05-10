@@ -711,9 +711,6 @@ typedef struct {
 /* Mode-specific state data */
 typedef union {
     struct {
-        char *query;
-        size_t query_len;
-        size_t query_cap;
         int saved_x, saved_y, saved_col, saved_row;
         int highlight_line;    /* Row index with search highlight (-1 = none) */
         char *saved_highlight; /* Saved highlight data for highlight_line */
@@ -758,8 +755,12 @@ struct {
     selection_state_t selection; /* Text selection state */
     bool show_line_numbers;      /* Toggle line numbers display */
     bool last_was_cut;           /* True if previous key was ^K (for appending cuts) */
-    char *search_last_query;     /* Persists search term across ^W invocations */
-    bool search_case_sensitive;  /* M-C toggle: true = case-sensitive (strstr) */
+    struct {
+        char *query;             /* Persists across ^W invocations; NULL until first search */
+        size_t query_len;
+        size_t query_cap;
+        bool case_sensitive;     /* M-C toggle: true = case-sensitive (strstr) */
+    } search;
 } ec = {
     .cursor_x = 0,
     .cursor_y = 0,
@@ -789,8 +790,7 @@ struct {
         },
     .show_line_numbers = false,
     .last_was_cut = false,
-    .search_last_query = NULL,
-    .search_case_sensitive = false,
+    .search = { .query = NULL, .query_len = 0, .query_cap = 0, .case_sensitive = false },
 };
 
 typedef struct {
@@ -872,16 +872,7 @@ static void mode_set(editor_mode_t new_mode)
     /* Clean up old mode state */
     switch (ec.mode) {
     case MODE_SEARCH:
-        /* Persist query for the next ^W invocation */
-        if (ec.mode_state.search.query && ec.mode_state.search.query_len > 0) {
-            char *saved = strdup(ec.mode_state.search.query);
-            if (saved) {
-                free(ec.search_last_query);
-                ec.search_last_query = saved;
-            }
-        }
-        free(ec.mode_state.search.query);
-        ec.mode_state.search.query = NULL;
+        /* ec.search.query is persistent — do NOT free it here */
         /* Restore saved highlight if leaving search mode */
         if (ec.mode_state.search.saved_highlight &&
             ec.mode_state.search.highlight_line >= 0 &&
@@ -919,22 +910,18 @@ static void mode_set(editor_mode_t new_mode)
         ec.selection.end_x = ec.cursor_x;
         ec.selection.end_y = ec.cursor_y;
         ec.selection.active = true;
-        ui_set_message("-- SELECT MODE -- Use arrows to extend, ESC to cancel");
+        ui_set_message("-- SELECT MODE -- Use arrows to extend, ^C to cancel");
         break;
     case MODE_SEARCH: {
-        /* Start with the last used query if available */
-        const char *prev = ec.search_last_query ? ec.search_last_query : "";
-        size_t prev_len = strlen(prev);
-        size_t cap = prev_len + 128;
-        char *q = calloc(cap, 1);
-        ec.mode_state.search.query_cap = 0;
-        ec.mode_state.search.query_len = 0;
-        if (q) {
-            if (prev_len)
-                memcpy(q, prev, prev_len);
-            ec.mode_state.search.query = q;
-            ec.mode_state.search.query_cap = cap;
-            ec.mode_state.search.query_len = prev_len;
+        /* Allocate the query buffer the first time; subsequent ^W reuses it */
+        if (!ec.search.query) {
+            size_t cap = 128;
+            char *q = calloc(cap, 1);
+            if (q) {
+                ec.search.query = q;
+                ec.search.query_cap = cap;
+                ec.search.query_len = 0;
+            }
         }
         ec.mode_state.search.highlight_line = -1;
         ec.mode_state.search.saved_highlight = NULL;
@@ -942,7 +929,7 @@ static void mode_set(editor_mode_t new_mode)
     }
     case MODE_HELP:
         ec.mode_state.help.offset = 0;
-        ui_set_message("^X or ^G to exit, arrows/PgUp/PgDn to scroll");
+        ui_set_message("^X ^G ^C to exit, arrows/PgUp/PgDn to scroll");
         break;
     case MODE_NORMAL:
         ec.selection.active = false;
@@ -974,7 +961,7 @@ static const char *mode_get_name(editor_mode_t mode)
 
 /* Static help content shown by ^G */
 static const char * const help_lines[] = {
-    "Help  (^X or ^G to exit, arrows/PgUp/PgDn to scroll)",
+    "Help  (^X or ^G or ^C to exit, arrows/PgUp/PgDn to scroll)",
     "",
     "File:",
     "  ^X      Exit (prompts to save if modified)",
@@ -2200,7 +2187,7 @@ static void file_open(const char *file_name)
 static void file_save(void)
 {
     if (!ec.file_name) {
-        ec.file_name = ui_prompt("Save as: %s (ESC to cancel)", NULL);
+        ec.file_name = ui_prompt("Save as: %s (^C to cancel)", NULL);
         if (!ec.file_name) {
             ui_set_message("Save aborted");
             return;
@@ -2266,7 +2253,7 @@ static void search_highlight_match(int row_idx, int match_offset, int match_len)
 
 /* Execute search from cursor_y+1 downward (wrapping).
  * Uses strcasestr (case-insensitive) or strstr (case-sensitive) depending on
- * ec.search_case_sensitive.  Returns true if a match was found. */
+ * ec.search.case_sensitive.  Returns true if a match was found. */
 static bool search_do(const char *query)
 {
     if (!query || !*query)
@@ -2278,7 +2265,7 @@ static bool search_do(const char *query)
         editor_row_t *r = &ec.row[ri];
         if (!r->render)
             continue;
-        char *match = ec.search_case_sensitive
+        char *match = ec.search.case_sensitive
                           ? strstr(r->render, query)
                           : strcasestr(r->render, query);
         if (match) {
@@ -2365,8 +2352,8 @@ static void ui_draw_statusbar(editor_buf_t *eb)
     int len, r_len;
     if (ec.mode == MODE_SEARCH) {
         /* In search mode: show [SEARCH] [case sensitive] and the query text */
-        const char *q = ec.mode_state.search.query ? ec.mode_state.search.query : "";
-        if (ec.search_case_sensitive)
+        const char *q = ec.search.query ? ec.search.query : "";
+        if (ec.search.case_sensitive)
             len = snprintf(status, sizeof(status), " [SEARCH] [case sensitive] %s", q);
         else
             len = snprintf(status, sizeof(status), " [SEARCH] %s", q);
@@ -2671,10 +2658,10 @@ static int ui_confirm(const char *msg)
         char status_msg[256];
         if (!choice) {
             snprintf(status_msg, sizeof(status_msg),
-                     "%s  \x1b[7m[ No ]\x1b[m   Yes   (ESC: cancel)", msg);
+                     "%s  \x1b[7m[ No ]\x1b[m   Yes   (^C: cancel)", msg);
         } else {
             snprintf(status_msg, sizeof(status_msg),
-                     "%s   No   \x1b[7m[ Yes ]\x1b[m  (ESC: cancel)", msg);
+                     "%s   No   \x1b[7m[ Yes ]\x1b[m  (^C: cancel)", msg);
         }
 
         ui_set_message("%s", status_msg);
@@ -2685,7 +2672,7 @@ static int ui_confirm(const char *msg)
         case '\r': /* Enter key */
             ui_set_message("");
             return choice;
-        case '\x1b': /* ESC key */
+        case CTRL_('c'): /* ^C - cancel */
         case CTRL_('x'):
             ui_set_message("");
             return -1; /* Cancel */
@@ -2723,7 +2710,7 @@ static char *ui_prompt(const char *msg, void (*callback)(char *, int))
         if ((c == DEL_KEY) || (c == CTRL_('h')) || (c == BACKSPACE)) {
             if (buf_len != 0)
                 buf[--buf_len] = '\0';
-        } else if (c == '\x1b') {
+        } else if (c == CTRL_('c')) {
             ui_set_message("");
             if (callback)
                 callback(buf, c);
@@ -3220,14 +3207,12 @@ static void editor_cleanup(void)
     }
 
     /* Free mode state */
-    free(ec.mode_state.search.query);
-    ec.mode_state.search.query = NULL;
+    free(ec.search.query);
+    ec.search.query = NULL;
     free(ec.mode_state.search.saved_highlight);
     ec.mode_state.search.saved_highlight = NULL;
     free(ec.mode_state.prompt.buffer);
     ec.mode_state.prompt.buffer = NULL;
-    free(ec.search_last_query);
-    ec.search_last_query = NULL;
     browser_free_entries();
 }
 
@@ -3245,7 +3230,7 @@ static void editor_process_key(void)
     case MODE_BROWSER:
         /* File browser mode */
         switch (c) {
-        case '\x1b': /* ESC - cancel */
+        case CTRL_('c'): /* ^C - cancel */
         case CTRL_('x'):
             browser_free_entries();
             mode_set(MODE_NORMAL);
@@ -3308,7 +3293,7 @@ static void editor_process_key(void)
 
     case MODE_SELECT:
         switch (c) {
-        case '\x1b': /* ESC - abort selection */
+        case CTRL_('c'): /* ^C - abort selection */
             ec.selection.active = false;
             mode_set(MODE_NORMAL);
             ui_set_message("Mark cancelled");
@@ -3385,7 +3370,7 @@ static void editor_process_key(void)
         switch (c) {
         case CTRL_('g'):
         case CTRL_('x'):
-        case '\x1b':
+        case CTRL_('c'):
             mode_restore();
             editor_refresh_full();
             return;
@@ -3417,15 +3402,15 @@ static void editor_process_key(void)
     case MODE_SEARCH: {
         if (c == '\r') {
             /* Execute the search on Enter */
-            if (ec.mode_state.search.query && ec.mode_state.search.query_len > 0) {
-                if (!search_do(ec.mode_state.search.query)) {
+            if (ec.search.query && ec.search.query_len > 0) {
+                if (!search_do(ec.search.query)) {
                     /* "not found" message already set; stay in SEARCH mode */
                     editor_refresh();
                     return;
                 }
             }
             mode_set(MODE_NORMAL);
-        } else if (c == '\x1b' || c == CTRL_('x') || c == CTRL_('w')) {
+        } else if (c == CTRL_('c') || c == CTRL_('x') || c == CTRL_('w')) {
             /* Cancel: restore cursor */
             ec.cursor_x = ec.mode_state.search.saved_x;
             ec.cursor_y = ec.mode_state.search.saved_y;
@@ -3434,25 +3419,25 @@ static void editor_process_key(void)
             mode_set(MODE_NORMAL);
         } else if (c == META_('c') || c == META_('C')) {
             /* Toggle case sensitivity */
-            ec.search_case_sensitive = !ec.search_case_sensitive;
+            ec.search.case_sensitive = !ec.search.case_sensitive;
         } else if (c == BACKSPACE || c == DEL_KEY || c == CTRL_('h')) {
-            if (ec.mode_state.search.query_len > 0)
-                ec.mode_state.search.query[--ec.mode_state.search.query_len] = '\0';
+            if (ec.search.query_len > 0)
+                ec.search.query[--ec.search.query_len] = '\0';
         } else if (c < 0x100 && isprint(c)) {
             /* Append character to query */
-            if (ec.mode_state.search.query &&
-                ec.mode_state.search.query_len + 2 > ec.mode_state.search.query_cap) {
-                size_t new_cap = ec.mode_state.search.query_cap * 2;
-                char *nq = realloc(ec.mode_state.search.query, new_cap);
+            if (ec.search.query &&
+                ec.search.query_len + 2 > ec.search.query_cap) {
+                size_t new_cap = ec.search.query_cap * 2;
+                char *nq = realloc(ec.search.query, new_cap);
                 if (nq) {
-                    ec.mode_state.search.query = nq;
-                    ec.mode_state.search.query_cap = new_cap;
+                    ec.search.query = nq;
+                    ec.search.query_cap = new_cap;
                 }
             }
-            if (ec.mode_state.search.query &&
-                ec.mode_state.search.query_len + 2 <= ec.mode_state.search.query_cap) {
-                ec.mode_state.search.query[ec.mode_state.search.query_len++] = (char)c;
-                ec.mode_state.search.query[ec.mode_state.search.query_len] = '\0';
+            if (ec.search.query &&
+                ec.search.query_len + 2 <= ec.search.query_cap) {
+                ec.search.query[ec.search.query_len++] = (char)c;
+                ec.search.query[ec.search.query_len] = '\0';
             }
         }
         editor_refresh();
@@ -3500,7 +3485,7 @@ static void editor_process_key(void)
             mode_set(MODE_SELECT);
             ui_set_message(
                 "Mark set - Move cursor to select, M-6=Copy, ^K=Cut, "
-                "ESC=Cancel");
+                "^C=Cancel");
         }
         break;
     case META_('6'): /* Copy current line (GNU nano: M-6 Copy) */
@@ -3577,7 +3562,7 @@ static void editor_process_key(void)
     case META_('B'): /* Open file browser (M-B) */
         mode_set(MODE_BROWSER);
         browser_load_directory(".");
-        ui_set_message("File Browser: Enter to open, ESC to cancel");
+        ui_set_message("File Browser: Enter to open, ^C to cancel");
         browser_render();
         return;      /* Don't continue to normal refresh */
     case META_('\\'): /* M-\ Go to first line (GNU nano: M-\) */
