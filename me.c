@@ -2332,10 +2332,27 @@ static void ui_draw_statusbar(editor_buf_t *eb)
 }
 
 /*
+ * Advance p past a CSI escape sequence (already past the opening ESC).
+ * On entry p must point at the '[' of "ESC [".  Skips parameter bytes
+ * (0x30–0x3F), intermediate bytes (0x20–0x2F) and the final byte (0x40–0x7E).
+ */
+static const char *skip_csi(const char *p)
+{
+    p++; /* skip '[' */
+    /* Skip parameter and intermediate bytes (all bytes before the final) */
+    while (*p && (unsigned char)*p < 0x40)
+        p++;
+    /* Skip the final byte (0x40–0x7E) */
+    if (*p && (unsigned char)*p <= 0x7e)
+        p++;
+    return p;
+}
+
+/*
  * Count visible (non-escape-sequence) characters in s, stopping at
  * max_visible.  Returns the number of bytes that should be written to the
  * terminal to display exactly that many visible characters.  CSI sequences of
- * the form ESC [ ... <final 0x40-0x7e> are skipped transparently.
+ * the form ESC [ ... <final 0x40–0x7E> are skipped transparently.
  */
 static int str_visible_bytes(const char *s, int max_visible)
 {
@@ -2343,12 +2360,7 @@ static int str_visible_bytes(const char *s, int max_visible)
     int visible = 0;
     while (*p) {
         if ((unsigned char)*p == '\x1b' && *(p + 1) == '[') {
-            /* Skip the CSI sequence including its final byte */
-            p += 2;
-            while (*p && ((unsigned char)*p < 0x40 || (unsigned char)*p > 0x7e))
-                p++;
-            if (*p)
-                p++;
+            p = skip_csi(p + 1);
         } else {
             if (visible >= max_visible)
                 break;
@@ -2366,11 +2378,7 @@ static int str_visible_len(const char *s)
     int len = 0;
     while (*p) {
         if ((unsigned char)*p == '\x1b' && *(p + 1) == '[') {
-            p += 2;
-            while (*p && ((unsigned char)*p < 0x40 || (unsigned char)*p > 0x7e))
-                p++;
-            if (*p)
-                p++;
+            p = skip_csi(p + 1);
         } else {
             len++;
             p++;
