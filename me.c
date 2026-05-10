@@ -1011,16 +1011,27 @@ static void term_enable_raw(void)
 
 static int term_read_key(void)
 {
+    static bool meta_pending = false;
     int nread;
     char c;
     while ((nread = read(STDIN_FILENO, &c, 1)) != 1) {
         if ((nread == -1) && (errno != EAGAIN))
             panic("Error reading input");
     }
+    /* If a previous lone ESC was recorded, combine it with this character */
+    if (meta_pending) {
+        meta_pending = false;
+        if (c != '\x1b')
+            return META_((unsigned char)c);
+        /* Two ESCs in a row: treat this one as a fresh ESC below */
+    }
     if (c == '\x1b') {
         char seq[3];
-        if (read(STDIN_FILENO, &seq[0], 1) != 1)
+        if (read(STDIN_FILENO, &seq[0], 1) != 1) {
+            /* Lone ESC with no following byte — remember it for next call */
+            meta_pending = true;
             return '\x1b';
+        }
         /* If next byte is not '[' or 'O', treat as Meta+key */
         if (seq[0] != '[' && seq[0] != 'O')
             return META_((unsigned char)seq[0]);
