@@ -908,6 +908,7 @@ static void mode_set(editor_mode_t new_mode)
     case MODE_SEARCH: {
         size_t cap = 128;
         char *q = calloc(cap, 1);
+        ec.mode_state.search.query_cap = 0;
         if (q) {
             ec.mode_state.search.query = q;
             ec.mode_state.search.query_cap = cap;
@@ -2240,15 +2241,17 @@ static void search_highlight_match(int row_idx, int match_offset, int match_len)
     /* Save current row's highlight if not already saved */
     if (!ec.mode_state.search.saved_highlight) {
         ec.mode_state.search.saved_highlight = malloc(r->render_size);
-        if (ec.mode_state.search.saved_highlight) {
-            memcpy(ec.mode_state.search.saved_highlight, r->highlight,
-                   r->render_size);
-            ec.mode_state.search.highlight_line = row_idx;
-        }
+        if (!ec.mode_state.search.saved_highlight)
+            return; /* Can't save highlight; skip marking to avoid inconsistency */
+        memcpy(ec.mode_state.search.saved_highlight, r->highlight,
+               r->render_size);
+        ec.mode_state.search.highlight_line = row_idx;
     }
 
+    /* Bounds check: only mark if match fits within the render buffer */
     if (match_offset + match_len <= r->render_size)
         memset(&r->highlight[match_offset], MATCH, match_len);
+    /* else: match extends past render_size; skip highlight silently */
 }
 
 /* Execute case-insensitive search from cursor_y+1 downward (wrapping).
@@ -3414,7 +3417,7 @@ static void editor_process_key(void)
         } else if (c == BACKSPACE || c == DEL_KEY || c == CTRL_('h')) {
             if (ec.mode_state.search.query_len > 0)
                 ec.mode_state.search.query[--ec.mode_state.search.query_len] = '\0';
-        } else if (!iscntrl(c) && c < 0x100 && isprint(c)) {
+        } else if (c < 0x100 && isprint(c)) {
             /* Append character to query */
             if (ec.mode_state.search.query &&
                 ec.mode_state.search.query_len + 2 > ec.mode_state.search.query_cap) {
