@@ -770,7 +770,13 @@ struct {
         size_t query_len;
         size_t query_cap;
         int mode;                /* search_mode_t bitmask */
+        char *replace_query;     /* replacement text */
+        size_t replace_len;
+        size_t replace_cap;
+        int replace_phase;       /* 0=search_input, 1=replace_input, 2=confirming each */
+        int replace_count;       /* replacements made so far */
     } search;
+    char notfound_msg[200];      /* transient "not found" overlay; cleared on next keypress */
 } ec = {
     .cursor_x = 0,
     .cursor_y = 0,
@@ -800,7 +806,10 @@ struct {
         },
     .show_line_numbers = false,
     .last_was_cut = false,
-    .search = { .query = NULL, .query_len = 0, .query_cap = 0, .mode = SM_NONE },
+    .search = { .query = NULL, .query_len = 0, .query_cap = 0, .mode = SM_NONE,
+                .replace_query = NULL, .replace_len = 0, .replace_cap = 0,
+                .replace_phase = 0, .replace_count = 0 },
+    .notfound_msg = "",
 };
 
 typedef struct {
@@ -934,6 +943,9 @@ static void mode_set(editor_mode_t new_mode)
                 ec.search.query_len = 0;
             }
         }
+        /* Reset replace phase each time search mode is entered */
+        ec.search.replace_phase = 0;
+        ec.search.replace_count = 0;
         ec.mode_state.search.highlight_line = -1;
         ec.mode_state.search.saved_highlight = NULL;
         break;
@@ -987,9 +999,10 @@ static const char * const help_lines[] = {
     "",
     "Search:",
     "  ^W      Find text (Where is)",
+    "  ^R      Toggle replace mode (press Enter after search term to prompt for replacement)",
     "  M-C     Toggle case sensitivity (default: case-insensitive)",
     "  M-B     Toggle backwards search",
-    "  M-R     Toggle regex mode (clears case/backwards flags when enabled)",
+    "  M-R     Toggle regex mode",
     "",
     "Navigation:",
     "  Arrows  Move cursor",
@@ -2264,65 +2277,126 @@ static void search_highlight_match(int row_idx, int match_offset, int match_len)
     /* else: match extends past render_size; skip highlight silently */
 }
 
-/* Execute search forward (from cursor_y+1) or backward (from cursor_y-1),
- * wrapping around.  Uses strstr/strcasestr or a compiled regex depending on
- * ec.search.mode.  Returns true if a match was found. */
-static bool search_do(const char *query)
+/* Info about the last successful match, in chars space.  Populated by
+ * search_do_from() so that the replace code knows where to cut. */
+typedef struct {
+    int row;       /* row index */
+    int char_off;  /* byte offset in row->chars */
+    int char_len;  /* byte length of match */
+} search_match_t;
+static search_match_t g_last_match = { .row = -1, .char_off = 0, .char_len = 0 };
+
+/* Execute search starting from (start_row, start_char_off), wrapping around.
+ * Searches r->chars so char offsets map directly to the gap buffer.
+ * SM_CASE_SENSITIVE and SM_BACKWARDS apply even in regex mode.
+ * Returns true if a match was found; sets ec.cursor_y/cursor_x and
+ * highlights the match; also stores info in g_last_match for replace. */
+static bool search_do_from(const char *query, int start_row, int start_char_off)
 {
     if (!query || !*query)
         return false;
     int n = ec.num_rows;
-    bool backwards = (ec.search.mode & SM_BACKWARDS) != 0;
-    bool use_regex  = (ec.search.mode & SM_REGEX)    != 0;
-    bool case_sens  = (ec.search.mode & SM_CASE_SENSITIVE) != 0;
+    if (n == 0)
+        return false;
+    bool backwards  = (ec.search.mode & SM_BACKWARDS)      != 0;
+    bool use_regex  = (ec.search.mode & SM_REGEX)           != 0;
+    bool case_sens  = (ec.search.mode & SM_CASE_SENSITIVE)  != 0;
 
-    /* Compile regex if needed */
     regex_t re;
     if (use_regex) {
         int flags = REG_EXTENDED | (case_sens ? 0 : REG_ICASE);
         if (regcomp(&re, query, flags) != 0)
-            return false; /* bad pattern */
+            return false;
     }
 
     size_t qlen = use_regex ? 0 : strlen(query);
     bool found = false;
 
-    for (int i = 0; i < n; i++) {
+    for (int i = 0; i < n && !found; i++) {
         int ri;
         if (backwards)
-            /* Double modulo with +n handles negative values from C's truncated division */
-            ri = ((ec.cursor_y - 1 - i) % n + n) % n;
+            ri = ((start_row - i) % n + n) % n;
         else
-            ri = (ec.cursor_y + 1 + i) % n;
+            ri = (start_row + i) % n;
 
         editor_row_t *r = &ec.row[ri];
-        if (!r->render)
+        if (!r->chars)
             continue;
 
-        int match_off = -1, match_len = -1;
+        int search_off = (i == 0) ? start_char_off : 0;
+        if (backwards && i > 0)
+            search_off = r->size; /* include all positions in the row */
+
+        int match_char_off = -1, match_char_len = -1;
+
         if (use_regex) {
-            regmatch_t m;
-            if (regexec(&re, r->render, 1, &m, 0) == 0) {
-                match_off = (int)m.rm_so;
-                match_len = (int)(m.rm_eo - m.rm_so);
+            if (backwards) {
+                /* Scan for last match at or before search_off */
+                const char *s = r->chars;
+                regmatch_t best; best.rm_so = -1; best.rm_eo = 0;
+                while ((int)(s - r->chars) <= search_off) {
+                    regmatch_t mm;
+                    if (regexec(&re, s, 1, &mm, 0) != 0) break;
+                    int abs_so = (int)(s - r->chars) + (int)mm.rm_so;
+                    if (abs_so > search_off) break;
+                    best.rm_so = abs_so;
+                    best.rm_eo = (int)(s - r->chars) + (int)mm.rm_eo;
+                    s = r->chars + abs_so + 1;
+                    if (abs_so + 1 > r->size) break;
+                }
+                if (best.rm_so >= 0) {
+                    match_char_off = best.rm_so;
+                    match_char_len = (int)(best.rm_eo - best.rm_so);
+                }
+            } else {
+                regmatch_t m;
+                if (regexec(&re, r->chars + search_off, 1, &m, 0) == 0) {
+                    match_char_off = search_off + (int)m.rm_so;
+                    match_char_len = (int)(m.rm_eo - m.rm_so);
+                }
             }
         } else {
-            char *match = case_sens ? strstr(r->render, query)
-                                    : strcasestr(r->render, query);
-            if (match) {
-                match_off = (int)(match - r->render);
-                match_len = (int)qlen;
+            if (backwards) {
+                const char *hay = r->chars;
+                const char *best = NULL;
+                const char *p = hay;
+                while ((int)(p - hay) <= search_off) {
+                    const char *hit = case_sens ? strstr(p, query)
+                                                : strcasestr(p, query);
+                    if (!hit || (int)(hit - hay) > search_off) break;
+                    best = hit;
+                    p = hit + 1;
+                }
+                if (best) {
+                    match_char_off = (int)(best - hay);
+                    match_char_len = (int)qlen;
+                }
+            } else {
+                const char *src = r->chars + search_off;
+                const char *hit = case_sens ? strstr(src, query)
+                                            : strcasestr(src, query);
+                if (hit) {
+                    match_char_off = search_off + (int)(hit - src);
+                    match_char_len = (int)qlen;
+                }
             }
         }
 
-        if (match_off >= 0) {
+        if (match_char_off >= 0) {
             ec.cursor_y = ri;
-            ec.cursor_x = row_renderx_to_cursorx(r, match_off);
+            ec.cursor_x = match_char_off;
             ec.row_offset = n; /* Trigger scroll recalc */
-            if (match_len > 0)
-                search_highlight_match(ri, match_off, match_len);
+            g_last_match.row      = ri;
+            g_last_match.char_off = match_char_off;
+            g_last_match.char_len = match_char_len;
+            /* Convert to render offsets for highlighting */
+            int render_off = row_cursorx_to_renderx(r, match_char_off);
+            int render_end = row_cursorx_to_renderx(r, match_char_off + match_char_len);
+            int render_len = render_end - render_off;
+            if (render_len <= 0 && match_char_len > 0) render_len = 1;
+            if (render_len > 0)
+                search_highlight_match(ri, render_off, render_len);
             found = true;
-            break;
         }
     }
 
@@ -2332,31 +2406,50 @@ static bool search_do(const char *query)
     return found;
 }
 
-/* Draw the "not found" overlay centered on the last content row (above
- * the status bar) using inverse video.  Called after editor_refresh(). */
-static void draw_notfound_overlay(const char *query)
+/* Convenience wrapper: search forward from cursor_y+1 or backward from cursor_y-1 */
+static bool search_do(const char *query)
 {
-    char msg[100];
-    int msglen = snprintf(msg, sizeof(msg), "[ \"%.*s\" not found ]",
-                          (int)(sizeof(msg) - 20), query);
-    if (msglen >= (int)sizeof(msg))
-        msglen = (int)sizeof(msg) - 1;
-    int col = (ec.screen_cols - msglen) / 2;
-    if (col < 0) col = 0;
-    int avail = ec.screen_cols - col;
-    if (avail > msglen) avail = msglen;
-    /* Position on last content row (1-indexed: screen_rows) */
-    char buf[32];
-    snprintf(buf, sizeof(buf), "\x1b[%d;%dH\x1b[7m", ec.screen_rows, col + 1);
-    write(STDOUT_FILENO, buf, strlen(buf));
-    write(STDOUT_FILENO, msg, avail);
-    write(STDOUT_FILENO, "\x1b[m", 3);
-    /* Reposition cursor to editor cursor location */
-    int lnw = get_line_number_width();
-    snprintf(buf, sizeof(buf), "\x1b[%d;%dH",
-             (ec.cursor_y - ec.row_offset) + 1,
-             (ec.render_x - ec.col_offset) + 1 + lnw);
-    write(STDOUT_FILENO, buf, strlen(buf));
+    if (!query || !*query || ec.num_rows == 0)
+        return false;
+    bool backwards = (ec.search.mode & SM_BACKWARDS) != 0;
+    int n = ec.num_rows;
+    if (backwards) {
+        int start_row = ((ec.cursor_y - 1) % n + n) % n;
+        int start_off = (ec.row[start_row].size > 0) ? ec.row[start_row].size - 1 : 0;
+        return search_do_from(query, start_row, start_off);
+    } else {
+        return search_do_from(query, (ec.cursor_y + 1) % n, 0);
+    }
+}
+
+/* Perform one text replacement at g_last_match.
+ * Updates the gap buffer and resyncs rows.  Returns true on success. */
+static bool do_replace_one(const char *replacement, size_t repl_len)
+{
+    if (g_last_match.row < 0 || g_last_match.row >= ec.num_rows)
+        return false;
+    size_t pos = 0;
+    for (int i = 0; i < g_last_match.row; i++)
+        pos += (size_t)ec.row[i].size + 1; /* +1 for newline */
+    pos += (size_t)g_last_match.char_off;
+    if (g_last_match.char_len > 0)
+        gap_delete_with_undo(ec.gb, ec.undo_stack, pos, (size_t)g_last_match.char_len);
+    if (repl_len > 0) {
+        if (!gap_insert_with_undo(ec.gb, ec.undo_stack, pos, replacement, repl_len))
+            return false;
+    }
+    gap_sync_to_rows(ec.gb);
+    ec.modified = true;
+    return true;
+}
+
+/* Set the transient overlay message (cleared at the start of the next keypress). */
+static void set_overlay_msg(const char *fmt, ...)
+{
+    va_list ap;
+    va_start(ap, fmt);
+    vsnprintf(ec.notfound_msg, sizeof(ec.notfound_msg), fmt, ap);
+    va_end(ap);
 }
 
 static void search_find(void)
@@ -2385,6 +2478,21 @@ static void buf_append(editor_buf_t *eb, const char *s, int len)
 static void buf_destroy(editor_buf_t *eb)
 {
     free(eb->buf);
+}
+
+/* Append the overlay message to an editor_buf_t (called at end of refresh). */
+static void buf_append_overlay(editor_buf_t *eb)
+{
+    if (!ec.notfound_msg[0])
+        return;
+    int msglen = (int)strlen(ec.notfound_msg);
+    int col = (ec.screen_cols - msglen) / 2;
+    if (col < 0) col = 0;
+    char posbuf[32];
+    snprintf(posbuf, sizeof(posbuf), "\x1b[%d;%dH\x1b[7m", ec.screen_rows, col + 1);
+    buf_append(eb, posbuf, strlen(posbuf));
+    buf_append(eb, ec.notfound_msg, msglen);
+    buf_append(eb, "\x1b[m", 3);
 }
 
 /* Calculate line number display width */
@@ -2430,19 +2538,25 @@ static void ui_draw_statusbar(editor_buf_t *eb)
 
     int len, r_len;
     if (ec.mode == MODE_SEARCH) {
-        /* In search mode: show [SEARCH] and active flags, then the query */
-        const char *q = ec.search.query ? ec.search.query : "";
-        char flags[40];
-        int flen = 0;
-        if (ec.search.mode & SM_CASE_SENSITIVE)
-            flen += snprintf(flags + flen, sizeof(flags) - flen, " [Case Sensitive]");
-        if (ec.search.mode & SM_BACKWARDS)
-            flen += snprintf(flags + flen, sizeof(flags) - flen, " [Backwards]");
-        if (ec.search.mode & SM_REGEX)
-            flen += snprintf(flags + flen, sizeof(flags) - flen, " [Regex]");
-        if (flen == 0)
-            flags[0] = '\0';
-        len = snprintf(status, sizeof(status), " [SEARCH]%s %s", flags, q);
+        if (ec.search.replace_phase == 1) {
+            /* Phase 1: entering replacement text */
+            const char *rq = ec.search.replace_query ? ec.search.replace_query : "";
+            len = snprintf(status, sizeof(status), " Replace with: %s", rq);
+        } else {
+            /* Phase 0 and 2: show [SEARCH] / [REPLACE] with active flags and query */
+            const char *q = ec.search.query ? ec.search.query : "";
+            char flags[60];
+            int flen = 0;
+            const char *mode_label = (ec.search.mode & SM_REPLACE) ? "REPLACE" : "SEARCH";
+            if (ec.search.mode & SM_CASE_SENSITIVE)
+                flen += snprintf(flags + flen, sizeof(flags) - flen, " [Case Sensitive]");
+            if (ec.search.mode & SM_BACKWARDS)
+                flen += snprintf(flags + flen, sizeof(flags) - flen, " [Backwards]");
+            if (ec.search.mode & SM_REGEX)
+                flen += snprintf(flags + flen, sizeof(flags) - flen, " [Regex]");
+            if (flen == 0) flags[0] = '\0';
+            len = snprintf(status, sizeof(status), " [%s]%s %s", mode_label, flags, q);
+        }
         r_len = 0;
         r_status[0] = '\0';
     } else {
@@ -2522,12 +2636,20 @@ static void ui_draw_messagebar(editor_buf_t *eb)
     int displayed_len = 0;
 
     if (ec.mode == MODE_SEARCH) {
-        /* In search mode always show the keybinding hints */
-        static const char search_help[] =
-            "M-C:Case Sens  M-B:Backwards  M-R:Regexp  ^R:Replace";
+        const char *hint;
+        if (ec.search.replace_phase == 2) {
+            /* Confirm-each phase: show interactive replace dialog */
+            hint = "Replace this instance?  \x1b[7m[ Yes ]\x1b[m  No  All  ^C:Cancel";
+        } else if (ec.search.replace_phase == 1) {
+            /* Entering replacement text */
+            hint = "Enter replacement text, then press Enter  ^C:Cancel";
+        } else {
+            /* Phase 0: show search keybinding hints */
+            hint = "M-C:Case Sens  M-B:Backwards  M-R:Regexp  ^R:Replace";
+        }
         int vlen;
-        int blen = str_visible_scan(search_help, ec.screen_cols, &vlen);
-        buf_append(eb, search_help, blen);
+        int blen = str_visible_scan(hint, ec.screen_cols, &vlen);
+        buf_append(eb, hint, blen);
         displayed_len = vlen;
     } else if (strstr(ec.status_msg, "File Browser:")) {
         int vlen;
@@ -2679,6 +2801,7 @@ static void editor_refresh(void)
     ui_draw_rows(&eb);
     ui_draw_statusbar(&eb);
     ui_draw_messagebar(&eb);
+    buf_append_overlay(&eb); /* transient notfound/replaced overlay */
 
     /* Adjust cursor position for line numbers */
     int line_num_width = get_line_number_width();
@@ -2702,6 +2825,7 @@ static void editor_refresh_full(void)
     ui_draw_rows(&eb);
     ui_draw_statusbar(&eb);
     ui_draw_messagebar(&eb);
+    buf_append_overlay(&eb); /* transient notfound/replaced overlay */
 
     /* Adjust cursor position for line numbers */
     int line_num_width = get_line_number_width();
@@ -3295,6 +3419,8 @@ static void editor_cleanup(void)
     /* Free mode state */
     free(ec.search.query);
     ec.search.query = NULL;
+    free(ec.search.replace_query);
+    ec.search.replace_query = NULL;
     free(ec.mode_state.search.saved_highlight);
     ec.mode_state.search.saved_highlight = NULL;
     free(ec.mode_state.prompt.buffer);
@@ -3305,6 +3431,8 @@ static void editor_cleanup(void)
 static void editor_process_key(void)
 {
     static int indent_level = 0;
+    /* Clear the transient overlay message from the previous keypress */
+    ec.notfound_msg[0] = '\0';
     /* Save and clear the consecutive-cut flag before reading the new key.
      * editor_cut() will check this to decide whether to append or replace. */
     bool consecutive_cut = ec.last_was_cut;
@@ -3486,20 +3614,167 @@ static void editor_process_key(void)
     }
 
     case MODE_SEARCH: {
-        if (c == '\r') {
-            /* Execute the search on Enter */
-            if (ec.search.query && ec.search.query_len > 0) {
-                char saved_query[512];
-                snprintf(saved_query, sizeof(saved_query), "%s", ec.search.query);
-                if (!search_do(ec.search.query)) {
-                    /* Not found: switch to normal mode and show overlay */
+        /* Phase 2: confirming each replacement */
+        if (ec.search.replace_phase == 2) {
+            const char *rq = ec.search.replace_query ? ec.search.replace_query : "";
+            size_t rqlen = ec.search.replace_len;
+            if (c == 'y' || c == 'Y' || c == '\r') {
+                /* Replace this instance */
+                int prev_off = g_last_match.char_off;
+                do_replace_one(rq, rqlen);
+                ec.search.replace_count++;
+                /* Find next match from position after replacement */
+                int next_off = prev_off + (int)rqlen;
+                if (next_off <= prev_off) next_off = prev_off + 1;
+                bool next = search_do_from(ec.search.query,
+                                           ec.cursor_y, next_off);
+                if (!next) {
+                    /* No more matches */
+                    int cnt = ec.search.replace_count;
+                    ec.search.replace_phase = 0;
+                    ec.search.replace_count = 0;
                     mode_set(MODE_NORMAL);
-                    editor_refresh();
-                    draw_notfound_overlay(saved_query);
-                    return;
+                    set_overlay_msg("[ Replaced %d occurrence%s ]",
+                                    cnt, cnt == 1 ? "" : "s");
+                }
+                editor_refresh();
+                return;
+            } else if (c == 'n' || c == 'N') {
+                /* Skip this instance, find next */
+                bool next = search_do_from(ec.search.query,
+                                           ec.cursor_y,
+                                           g_last_match.char_off + 1);
+                if (!next) {
+                    int cnt = ec.search.replace_count;
+                    ec.search.replace_phase = 0;
+                    ec.search.replace_count = 0;
+                    mode_set(MODE_NORMAL);
+                    if (cnt > 0)
+                        set_overlay_msg("[ Replaced %d occurrence%s ]",
+                                        cnt, cnt == 1 ? "" : "s");
+                }
+                editor_refresh();
+                return;
+            } else if (c == 'a' || c == 'A') {
+                /* Replace all remaining */
+                do {
+                    int prev_off = g_last_match.char_off;
+                    do_replace_one(rq, rqlen);
+                    ec.search.replace_count++;
+                    /* Advance past replacement (or at least 1 char for zero-width matches) */
+                    int next_off = prev_off + (int)rqlen;
+                    if (next_off <= prev_off) next_off = prev_off + 1;
+                    if (!search_do_from(ec.search.query,
+                                        ec.cursor_y, next_off))
+                        break;
+                } while (1);
+                int cnt = ec.search.replace_count;
+                ec.search.replace_phase = 0;
+                ec.search.replace_count = 0;
+                mode_set(MODE_NORMAL);
+                set_overlay_msg("[ Replaced %d occurrence%s ]",
+                                cnt, cnt == 1 ? "" : "s");
+                editor_refresh();
+                return;
+            } else if (c == CTRL_('c') || c == CTRL_('x') || c == CTRL_('w')) {
+                int cnt = ec.search.replace_count;
+                ec.search.replace_phase = 0;
+                ec.search.replace_count = 0;
+                mode_set(MODE_NORMAL);
+                if (cnt > 0)
+                    set_overlay_msg("[ Replaced %d occurrence%s ]",
+                                    cnt, cnt == 1 ? "" : "s");
+                editor_refresh();
+                return;
+            }
+            editor_refresh();
+            return;
+        }
+
+        /* Phase 1: entering replacement text */
+        if (ec.search.replace_phase == 1) {
+            if (c == '\r') {
+                /* Execute: find first match from saved position */
+                int sx = ec.mode_state.search.saved_x;
+                int sy = ec.mode_state.search.saved_y;
+                ec.cursor_x = sx; ec.cursor_y = sy;
+                bool found = search_do(ec.search.query);
+                if (!found) {
+                    ec.search.replace_phase = 0;
+                    ec.search.replace_count = 0;
+                    const char *q = ec.search.query ? ec.search.query : "";
+                    mode_set(MODE_NORMAL);
+                    set_overlay_msg("[ \"%.*s\" not found ]",
+                                    (int)(sizeof(ec.notfound_msg) - 20), q);
+                } else {
+                    ec.search.replace_phase = 2;
+                }
+                editor_refresh();
+                return;
+            } else if (c == CTRL_('c') || c == CTRL_('x') || c == CTRL_('w')) {
+                ec.search.replace_phase = 0;
+                ec.search.replace_count = 0;
+                ec.cursor_x = ec.mode_state.search.saved_x;
+                ec.cursor_y = ec.mode_state.search.saved_y;
+                ec.col_offset = ec.mode_state.search.saved_col;
+                ec.row_offset = ec.mode_state.search.saved_row;
+                mode_set(MODE_NORMAL);
+                editor_refresh();
+                return;
+            } else if (c == BACKSPACE || c == DEL_KEY || c == CTRL_('h')) {
+                if (ec.search.replace_len > 0) {
+                    ec.search.replace_query[--ec.search.replace_len] = '\0';
+                }
+            } else if (c < 0x100 && isprint(c)) {
+                /* Ensure replace buffer is allocated */
+                if (!ec.search.replace_query) {
+                    size_t cap = 128;
+                    ec.search.replace_query = calloc(cap, 1);
+                    ec.search.replace_cap = cap;
+                    ec.search.replace_len = 0;
+                }
+                if (ec.search.replace_query &&
+                    ec.search.replace_len + 2 > ec.search.replace_cap) {
+                    size_t new_cap = ec.search.replace_cap * 2;
+                    char *nq = realloc(ec.search.replace_query, new_cap);
+                    if (nq) {
+                        ec.search.replace_query = nq;
+                        ec.search.replace_cap = new_cap;
+                    }
+                }
+                if (ec.search.replace_query &&
+                    ec.search.replace_len + 2 <= ec.search.replace_cap) {
+                    ec.search.replace_query[ec.search.replace_len++] = (char)c;
+                    ec.search.replace_query[ec.search.replace_len] = '\0';
                 }
             }
-            mode_set(MODE_NORMAL);
+            editor_refresh();
+            return;
+        }
+
+        /* Phase 0: entering search term (default) */
+        if (c == '\r') {
+            if (ec.search.query && ec.search.query_len > 0) {
+                if (ec.search.mode & SM_REPLACE) {
+                    /* Switch to replacement text entry */
+                    ec.search.replace_phase = 1;
+                    ec.search.replace_len = 0;
+                    if (ec.search.replace_query)
+                        ec.search.replace_query[0] = '\0';
+                } else {
+                    /* Plain search */
+                    if (!search_do(ec.search.query)) {
+                        const char *q = ec.search.query;
+                        mode_set(MODE_NORMAL);
+                        set_overlay_msg("[ \"%.*s\" not found ]",
+                                        (int)(sizeof(ec.notfound_msg) - 20), q);
+                    } else {
+                        mode_set(MODE_NORMAL);
+                    }
+                }
+            } else {
+                mode_set(MODE_NORMAL);
+            }
         } else if (c == CTRL_('c') || c == CTRL_('x') || c == CTRL_('w')) {
             /* Cancel: restore cursor */
             ec.cursor_x = ec.mode_state.search.saved_x;
@@ -3508,21 +3783,13 @@ static void editor_process_key(void)
             ec.row_offset = ec.mode_state.search.saved_row;
             mode_set(MODE_NORMAL);
         } else if (c == META_('c') || c == META_('C')) {
-            if (ec.search.mode & SM_REGEX)
-                ui_set_message("Case sensitivity not available in regex mode");
-            else
-                ec.search.mode ^= SM_CASE_SENSITIVE;
+            ec.search.mode ^= SM_CASE_SENSITIVE;
         } else if (c == META_('b') || c == META_('B')) {
-            if (ec.search.mode & SM_REGEX)
-                ui_set_message("Backwards search not available in regex mode");
-            else
-                ec.search.mode ^= SM_BACKWARDS;
+            ec.search.mode ^= SM_BACKWARDS;
         } else if (c == META_('r') || c == META_('R')) {
-            /* Toggle regex mode; enabling it clears other flags except SM_REPLACE */
-            if (ec.search.mode & SM_REGEX)
-                ec.search.mode &= ~SM_REGEX; /* turn off regex */
-            else
-                ec.search.mode = SM_REGEX | (ec.search.mode & SM_REPLACE);
+            ec.search.mode ^= SM_REGEX;
+        } else if (c == CTRL_('r')) {
+            ec.search.mode ^= SM_REPLACE;
         } else if (c == BACKSPACE || c == DEL_KEY || c == CTRL_('h')) {
             if (ec.search.query_len > 0)
                 ec.search.query[--ec.search.query_len] = '\0';
