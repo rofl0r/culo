@@ -2290,6 +2290,7 @@ static bool search_do(const char *query)
     for (int i = 0; i < n; i++) {
         int ri;
         if (backwards)
+            /* Double modulo with +n handles negative values from C's truncated division */
             ri = ((ec.cursor_y - 1 - i) % n + n) % n;
         else
             ri = (ec.cursor_y + 1 + i) % n;
@@ -2318,7 +2319,8 @@ static bool search_do(const char *query)
             ec.cursor_y = ri;
             ec.cursor_x = row_renderx_to_cursorx(r, match_off);
             ec.row_offset = n; /* Trigger scroll recalc */
-            search_highlight_match(ri, match_off, match_len > 0 ? match_len : 1);
+            if (match_len > 0)
+                search_highlight_match(ri, match_off, match_len);
             found = true;
             break;
         }
@@ -2430,13 +2432,16 @@ static void ui_draw_statusbar(editor_buf_t *eb)
     if (ec.mode == MODE_SEARCH) {
         /* In search mode: show [SEARCH] and active flags, then the query */
         const char *q = ec.search.query ? ec.search.query : "";
-        char flags[40] = "";
+        char flags[40];
+        int flen = 0;
         if (ec.search.mode & SM_CASE_SENSITIVE)
-            strncat(flags, " [Case Sensitive]", sizeof(flags) - strlen(flags) - 1);
+            flen += snprintf(flags + flen, sizeof(flags) - flen, " [Case Sensitive]");
         if (ec.search.mode & SM_BACKWARDS)
-            strncat(flags, " [Backwards]", sizeof(flags) - strlen(flags) - 1);
+            flen += snprintf(flags + flen, sizeof(flags) - flen, " [Backwards]");
         if (ec.search.mode & SM_REGEX)
-            strncat(flags, " [Regex]", sizeof(flags) - strlen(flags) - 1);
+            flen += snprintf(flags + flen, sizeof(flags) - flen, " [Regex]");
+        if (flen == 0)
+            flags[0] = '\0';
         len = snprintf(status, sizeof(status), " [SEARCH]%s %s", flags, q);
         r_len = 0;
         r_status[0] = '\0';
@@ -3503,12 +3508,14 @@ static void editor_process_key(void)
             ec.row_offset = ec.mode_state.search.saved_row;
             mode_set(MODE_NORMAL);
         } else if (c == META_('c') || c == META_('C')) {
-            /* Toggle case sensitivity (ignored in regex mode) */
-            if (!(ec.search.mode & SM_REGEX))
+            if (ec.search.mode & SM_REGEX)
+                ui_set_message("Case sensitivity not available in regex mode");
+            else
                 ec.search.mode ^= SM_CASE_SENSITIVE;
         } else if (c == META_('b') || c == META_('B')) {
-            /* Toggle backwards search (ignored in regex mode) */
-            if (!(ec.search.mode & SM_REGEX))
+            if (ec.search.mode & SM_REGEX)
+                ui_set_message("Backwards search not available in regex mode");
+            else
                 ec.search.mode ^= SM_BACKWARDS;
         } else if (c == META_('r') || c == META_('R')) {
             /* Toggle regex mode; enabling it clears other flags except SM_REPLACE */
