@@ -708,8 +708,11 @@ typedef struct {
 typedef union {
     struct {
         char *query;
-        int last_match;
-        int direction;
+        size_t query_len;
+        size_t query_cap;
+        int saved_x, saved_y, saved_col, saved_row;
+        int highlight_line;    /* Row index with search highlight (-1 = none) */
+        char *saved_highlight; /* Saved highlight data for highlight_line */
     } search;
     struct {
         char *buffer;
@@ -848,6 +851,7 @@ editor_syntax_t DB[] = {
 #define DB_ENTRIES (sizeof(DB) / sizeof(DB[0]))
 
 static char *ui_prompt(const char *msg, void (*callback)(char *, int));
+static void editor_refresh(void);
 
 /* Mode management implementation */
 static void mode_set(editor_mode_t new_mode)
@@ -862,6 +866,17 @@ static void mode_set(editor_mode_t new_mode)
     case MODE_SEARCH:
         free(ec.mode_state.search.query);
         ec.mode_state.search.query = NULL;
+        /* Restore saved highlight if leaving search mode */
+        if (ec.mode_state.search.saved_highlight &&
+            ec.mode_state.search.highlight_line >= 0 &&
+            ec.mode_state.search.highlight_line < ec.num_rows &&
+            ec.row[ec.mode_state.search.highlight_line].highlight) {
+            memcpy(ec.row[ec.mode_state.search.highlight_line].highlight,
+                   ec.mode_state.search.saved_highlight,
+                   ec.row[ec.mode_state.search.highlight_line].render_size);
+        }
+        free(ec.mode_state.search.saved_highlight);
+        ec.mode_state.search.saved_highlight = NULL;
         break;
     case MODE_PROMPT:
         free(ec.mode_state.prompt.buffer);
@@ -890,10 +905,18 @@ static void mode_set(editor_mode_t new_mode)
         ec.selection.active = true;
         ui_set_message("-- SELECT MODE -- Use arrows to extend, ESC to cancel");
         break;
-    case MODE_SEARCH:
-        ec.mode_state.search.direction = 1;
-        ec.mode_state.search.last_match = -1;
+    case MODE_SEARCH: {
+        size_t cap = 128;
+        char *q = calloc(cap, 1);
+        if (q) {
+            ec.mode_state.search.query = q;
+            ec.mode_state.search.query_cap = cap;
+        }
+        ec.mode_state.search.query_len = 0;
+        ec.mode_state.search.highlight_line = -1;
+        ec.mode_state.search.saved_highlight = NULL;
         break;
+    }
     case MODE_HELP:
         ec.mode_state.help.offset = 0;
         ui_set_message("^X or ^G to exit, arrows/PgUp/PgDn to scroll");
@@ -2180,120 +2203,91 @@ static void file_save(void)
     ui_set_message("Error: %s", strerror(errno));
 }
 
-/* Global variables for search state - needed for prompt display */
-static int search_last_match = -1;
-static int search_total_matches = 0;
-static int search_current_match = 0;
-
-static void search_callback(char *query, int key)
+/* Case-insensitive substring search */
+static char *str_casestr(const char *haystack, const char *needle)
 {
-    static int direction = 1;
-    static int saved_highlight_line;
-    static char *saved_hightlight = NULL;
+    if (!*needle)
+        return (char *)haystack;
+    size_t nlen = strlen(needle);
+    for (; *haystack; haystack++) {
+        if (strncasecmp(haystack, needle, nlen) == 0)
+            return (char *)haystack;
+    }
+    return NULL;
+}
 
-    /* Restore previous highlighting safely */
-    if (saved_hightlight && saved_highlight_line >= 0 &&
-        saved_highlight_line < ec.num_rows &&
-        ec.row[saved_highlight_line].highlight) {
-        memcpy(ec.row[saved_highlight_line].highlight, saved_hightlight,
-               ec.row[saved_highlight_line].render_size);
-        free(saved_hightlight);
-        saved_hightlight = NULL;
-    }
-    if (key == '\r' || key == '\x1b') {
-        search_last_match = -1;
-        direction = 1;
-        search_total_matches = 0;
-        search_current_match = 0;
+/* Highlight the match at (row_idx, match_offset, match_len), saving the
+ * previous highlight so it can be restored when leaving search mode. */
+static void search_highlight_match(int row_idx, int match_offset, int match_len)
+{
+    editor_row_t *r = &ec.row[row_idx];
+    if (!r->highlight || r->render_size <= 0)
         return;
+
+    /* Restore previous highlight if we've moved to a different row */
+    if (ec.mode_state.search.saved_highlight &&
+        ec.mode_state.search.highlight_line != row_idx) {
+        int prev = ec.mode_state.search.highlight_line;
+        if (prev >= 0 && prev < ec.num_rows && ec.row[prev].highlight) {
+            memcpy(ec.row[prev].highlight, ec.mode_state.search.saved_highlight,
+                   ec.row[prev].render_size);
+        }
+        free(ec.mode_state.search.saved_highlight);
+        ec.mode_state.search.saved_highlight = NULL;
+        ec.mode_state.search.highlight_line = -1;
     }
-    if ((key == ARROW_RIGHT) || (key == ARROW_DOWN))
-        direction = 1;
-    else if ((key == ARROW_LEFT) || (key == ARROW_UP)) {
-        if (search_last_match == -1)
-            return;
-        direction = -1;
-    } else {
-        search_last_match = -1;
-        direction = 1;
-        /* Count total matches when search term changes */
-        search_total_matches = 0;
-        search_current_match = 0;
-        if (query && strlen(query) > 0) {
-            for (int i = 0; i < ec.num_rows; i++) {
-                if (!ec.row[i].render)
-                    continue;
-                char *p = ec.row[i].render;
-                while ((p = strstr(p, query)) != NULL) {
-                    search_total_matches++;
-                    p++;
-                }
-            }
+
+    /* Save current row's highlight if not already saved */
+    if (!ec.mode_state.search.saved_highlight) {
+        ec.mode_state.search.saved_highlight = malloc(r->render_size);
+        if (ec.mode_state.search.saved_highlight) {
+            memcpy(ec.mode_state.search.saved_highlight, r->highlight,
+                   r->render_size);
+            ec.mode_state.search.highlight_line = row_idx;
         }
     }
-    /* Only search if we have a valid query */
-    if (!query || strlen(query) == 0)
-        return;
 
-    int current = search_last_match;
+    if (match_offset + match_len <= r->render_size)
+        memset(&r->highlight[match_offset], MATCH, match_len);
+}
+
+/* Execute case-insensitive search from cursor_y+1 downward (wrapping).
+ * Returns true if a match was found. */
+static bool search_do(const char *query)
+{
+    if (!query || !*query)
+        return false;
+    size_t qlen = strlen(query);
+    int start = ec.cursor_y + 1;
     for (int i = 0; i < ec.num_rows; i++) {
-        current += direction;
-        if (current == -1)
-            current = ec.num_rows - 1;
-        else if (current == ec.num_rows)
-            current = 0;
-        editor_row_t *row = &ec.row[current];
-        if (!row->render)
+        int ri = (start + i) % ec.num_rows;
+        editor_row_t *r = &ec.row[ri];
+        if (!r->render)
             continue;
-        char *match = strstr(row->render, query);
+        char *match = str_casestr(r->render, query);
         if (match) {
-            search_last_match = current;
-            ec.cursor_y = current;
-            ec.cursor_x = row_renderx_to_cursorx(row, match - row->render);
-            ec.row_offset = ec.num_rows;
-            saved_highlight_line = current;
-            saved_hightlight = malloc(row->render_size);
-            if (saved_hightlight)
-                memcpy(saved_hightlight, row->highlight, row->render_size);
-            memset(&row->highlight[match - row->render], MATCH, strlen(query));
-
-            /* Update match counter safely */
-            if (search_total_matches > 0) {
-                if (direction == 1)
-                    search_current_match =
-                        (search_current_match % search_total_matches) + 1;
-                else
-                    search_current_match = (search_current_match - 1) > 0
-                                               ? search_current_match - 1
-                                               : search_total_matches;
-            }
-            break;
+            ec.cursor_y = ri;
+            ec.cursor_x = row_renderx_to_cursorx(r, match - r->render);
+            ec.row_offset = ec.num_rows; /* Trigger scroll recalc */
+            search_highlight_match(ri, match - r->render, qlen);
+            return true;
         }
     }
+    ui_set_message("Pattern not found: %s", query);
+    return false;
 }
 
 static void search_find(void)
 {
-    int saved_x = ec.cursor_x, saved_y = ec.cursor_y;
-    int saved_col = ec.col_offset, saved_row = ec.row_offset;
-
-    /* Reset search state for new search */
-    search_last_match = -1;
-    search_total_matches = 0;
-    search_current_match = 0;
-
-    char *query = ui_prompt("Search", search_callback);
-    if (query)
-        free(query);
-    else {
-        ec.cursor_x = saved_x;
-        ec.cursor_y = saved_y;
-        ec.col_offset = saved_col;
-        ec.row_offset = saved_row;
-    }
-
-    /* Return to normal mode after search completes */
-    mode_set(MODE_NORMAL);
+    /* Save cursor position before mode_set() clears mode_state */
+    int sx = ec.cursor_x, sy = ec.cursor_y;
+    int sc = ec.col_offset, sr = ec.row_offset;
+    mode_set(MODE_SEARCH);
+    ec.mode_state.search.saved_x = sx;
+    ec.mode_state.search.saved_y = sy;
+    ec.mode_state.search.saved_col = sc;
+    ec.mode_state.search.saved_row = sr;
+    editor_refresh(); /* Show the [SEARCH] statusbar immediately */
 }
 
 static void buf_append(editor_buf_t *eb, const char *s, int len)
@@ -2352,24 +2346,32 @@ static void ui_draw_statusbar(editor_buf_t *eb)
     buf_append(eb, "\x1b[100m", 6); /* Dark gray */
     char status[80], r_status[80];
 
-    /* Include mode in status line */
-    const char *mode_name = mode_get_name(ec.mode);
-    int len = snprintf(status, sizeof(status), " [%s] File: %.20s %s",
+    int len, r_len;
+    if (ec.mode == MODE_SEARCH) {
+        /* In search mode: show [SEARCH] and the query text being typed */
+        const char *q = ec.mode_state.search.query ? ec.mode_state.search.query : "";
+        len = snprintf(status, sizeof(status), " [SEARCH] %s", q);
+        r_len = 0;
+        r_status[0] = '\0';
+    } else {
+        /* Include mode in status line */
+        const char *mode_name = mode_get_name(ec.mode);
+        len = snprintf(status, sizeof(status), " [%s] File: %.20s %s",
                        mode_name, ec.file_name ? ec.file_name : "< New >",
                        ec.modified ? "(modified)" : "");
-    int col_size =
-        ec.row && ec.cursor_y <= ec.num_rows - 1 ? ec.row[ec.cursor_y].size : 0;
+        int col_size =
+            ec.row && ec.cursor_y <= ec.num_rows - 1 ? ec.row[ec.cursor_y].size : 0;
+        r_len = snprintf(
+            r_status, sizeof(r_status), "%d/%d lines  %d/%d cols",
+            (ec.cursor_y + 1 > ec.num_rows) ? ec.num_rows : ec.cursor_y + 1,
+            ec.num_rows, ec.cursor_x + 1, col_size);
+    }
 
-    /* No time display */
-    int r_len = snprintf(
-        r_status, sizeof(r_status), "%d/%d lines  %d/%d cols",
-        (ec.cursor_y + 1 > ec.num_rows) ? ec.num_rows : ec.cursor_y + 1,
-        ec.num_rows, ec.cursor_x + 1, col_size);
     if (len > ec.screen_cols)
         len = ec.screen_cols;
     buf_append(eb, status, len);
     while (len < ec.screen_cols) {
-        if (ec.screen_cols - len == r_len) {
+        if (r_len > 0 && ec.screen_cols - len == r_len) {
             buf_append(eb, r_status, r_len);
             break;
         }
@@ -2427,11 +2429,13 @@ static void ui_draw_messagebar(editor_buf_t *eb)
     buf_append(eb, "\x1b[93m\x1b[44m\x1b[K", 13);
     int displayed_len = 0;
 
-    /* For search messages, try to show as much as possible */
-    if (strstr(ec.status_msg, "Search:")) {
+    if (ec.mode == MODE_SEARCH) {
+        /* In search mode always show the keybinding hints */
+        static const char search_help[] =
+            "M-C:Case Sens  M-B:Backwards  M-R:Regexp  ^R:Replace";
         int vlen;
-        int blen = str_visible_scan(ec.status_msg, ec.screen_cols, &vlen);
-        buf_append(eb, ec.status_msg, blen);
+        int blen = str_visible_scan(search_help, ec.screen_cols, &vlen);
+        buf_append(eb, search_help, blen);
         displayed_len = vlen;
     } else if (strstr(ec.status_msg, "File Browser:")) {
         int vlen;
@@ -2691,35 +2695,10 @@ static char *ui_prompt(const char *msg, void (*callback)(char *, int))
     size_t buf_len = 0;
     buf[0] = '\0';
 
-    /* Check if this is a search prompt */
-    bool is_search = (callback == search_callback);
-
     while (1) {
-        /* Special formatting for search prompt */
-        if (is_search) {
-            /* Build the complete search message with help text */
-            char display_msg[512];
-
-            /* Format: "Search: [query] [match info] (help text)" */
-            if (search_total_matches > 0 && buf_len > 0) {
-                snprintf(display_msg, sizeof(display_msg),
-                         "Search: %s [%d/%d] (arrows: navigate, Enter: exit, "
-                         "ESC: cancel)",
-                         buf, search_current_match, search_total_matches);
-            } else {
-                snprintf(
-                    display_msg, sizeof(display_msg),
-                    "Search: %s (arrows: navigate, Enter: exit, ESC: cancel)",
-                    buf);
-            }
-
-            ui_set_message("%s", display_msg);
-        } else {
-            /* For non-search prompts, use the format string */
-            char formatted_msg[256];
-            snprintf(formatted_msg, sizeof(formatted_msg), msg, buf);
-            ui_set_message("%s", formatted_msg);
-        }
+        char formatted_msg[256];
+        snprintf(formatted_msg, sizeof(formatted_msg), msg, buf);
+        ui_set_message("%s", formatted_msg);
         editor_refresh();
         int c = term_read_key();
         if ((c == DEL_KEY) || (c == CTRL_('h')) || (c == BACKSPACE)) {
@@ -3224,6 +3203,8 @@ static void editor_cleanup(void)
     /* Free mode state */
     free(ec.mode_state.search.query);
     ec.mode_state.search.query = NULL;
+    free(ec.mode_state.search.saved_highlight);
+    ec.mode_state.search.saved_highlight = NULL;
     free(ec.mode_state.prompt.buffer);
     ec.mode_state.prompt.buffer = NULL;
     browser_free_entries();
@@ -3412,7 +3393,48 @@ static void editor_process_key(void)
         return;
     }
 
-    case MODE_SEARCH:
+    case MODE_SEARCH: {
+        if (c == '\r') {
+            /* Execute the search on Enter */
+            if (ec.mode_state.search.query && ec.mode_state.search.query_len > 0) {
+                if (!search_do(ec.mode_state.search.query)) {
+                    /* "not found" message already set; stay in SEARCH mode */
+                    editor_refresh();
+                    return;
+                }
+            }
+            mode_set(MODE_NORMAL);
+        } else if (c == '\x1b' || c == CTRL_('x') || c == CTRL_('w')) {
+            /* Cancel: restore cursor */
+            ec.cursor_x = ec.mode_state.search.saved_x;
+            ec.cursor_y = ec.mode_state.search.saved_y;
+            ec.col_offset = ec.mode_state.search.saved_col;
+            ec.row_offset = ec.mode_state.search.saved_row;
+            mode_set(MODE_NORMAL);
+        } else if (c == BACKSPACE || c == DEL_KEY || c == CTRL_('h')) {
+            if (ec.mode_state.search.query_len > 0)
+                ec.mode_state.search.query[--ec.mode_state.search.query_len] = '\0';
+        } else if (!iscntrl(c) && c < 0x100 && isprint(c)) {
+            /* Append character to query */
+            if (ec.mode_state.search.query &&
+                ec.mode_state.search.query_len + 2 > ec.mode_state.search.query_cap) {
+                size_t new_cap = ec.mode_state.search.query_cap * 2;
+                char *nq = realloc(ec.mode_state.search.query, new_cap);
+                if (nq) {
+                    ec.mode_state.search.query = nq;
+                    ec.mode_state.search.query_cap = new_cap;
+                }
+            }
+            if (ec.mode_state.search.query &&
+                ec.mode_state.search.query_len + 2 <= ec.mode_state.search.query_cap) {
+                ec.mode_state.search.query[ec.mode_state.search.query_len++] = (char)c;
+                ec.mode_state.search.query[ec.mode_state.search.query_len] = '\0';
+            }
+        }
+        editor_refresh();
+        return;
+    }
+
     case MODE_PROMPT:
     case MODE_CONFIRM:
         /* These modes handle their own input */
@@ -3521,7 +3543,7 @@ static void editor_process_key(void)
         break;
     case CTRL_('w'): /* Find/search (GNU nano: ^W Where Is) */
         search_find();
-        break;
+        return; /* editor_refresh() already called inside search_find */
     case CTRL_('n'): /* Toggle line numbers */
         ec.show_line_numbers = !ec.show_line_numbers;
         ui_set_message("Line numbers %s",
@@ -3603,7 +3625,8 @@ int main(int argc, char *argv[])
     /* Main event loop */
     while (1) {
         editor_process_key();
-        if (ec.mode != MODE_BROWSER && ec.mode != MODE_HELP)
+        if (ec.mode != MODE_BROWSER && ec.mode != MODE_HELP &&
+            ec.mode != MODE_SEARCH)
             editor_refresh();
     }
     /* not reachable */
