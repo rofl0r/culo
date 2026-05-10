@@ -2333,7 +2333,9 @@ static bool search_do_from(const char *query, int start_row, int start_char_off)
             if (backwards) {
                 /* Scan for last match at or before search_off */
                 const char *s = r->chars;
-                regmatch_t best; best.rm_so = -1; best.rm_eo = 0;
+                regmatch_t best;
+                best.rm_so = -1;
+                best.rm_eo = 0;
                 while ((int)(s - r->chars) <= search_off) {
                     regmatch_t mm;
                     if (regexec(&re, s, 1, &mm, 0) != 0) break;
@@ -2415,7 +2417,8 @@ static bool search_do(const char *query)
     int n = ec.num_rows;
     if (backwards) {
         int start_row = ((ec.cursor_y - 1) % n + n) % n;
-        int start_off = (ec.row[start_row].size > 0) ? ec.row[start_row].size - 1 : 0;
+        /* Use full row size to include matches ending at the last character */
+        int start_off = ec.row[start_row].size;
         return search_do_from(query, start_row, start_off);
     } else {
         return search_do_from(query, (ec.cursor_y + 1) % n, 0);
@@ -3621,10 +3624,13 @@ static void editor_process_key(void)
             if (c == 'y' || c == 'Y' || c == '\r') {
                 /* Replace this instance */
                 int prev_off = g_last_match.char_off;
+                int prev_len = g_last_match.char_len;
                 do_replace_one(rq, rqlen);
                 ec.search.replace_count++;
-                /* Find next match from position after replacement */
-                int next_off = prev_off + (int)rqlen;
+                /* Advance past the longer of the replacement or the original match
+                 * to avoid re-matching overlapping patterns. */
+                int advance = (int)rqlen > prev_len ? (int)rqlen : prev_len;
+                int next_off = prev_off + advance;
                 if (next_off <= prev_off) next_off = prev_off + 1;
                 bool next = search_do_from(ec.search.query,
                                            ec.cursor_y, next_off);
@@ -3659,10 +3665,12 @@ static void editor_process_key(void)
                 /* Replace all remaining */
                 do {
                     int prev_off = g_last_match.char_off;
+                    int prev_len = g_last_match.char_len;
                     do_replace_one(rq, rqlen);
                     ec.search.replace_count++;
-                    /* Advance past replacement (or at least 1 char for zero-width matches) */
-                    int next_off = prev_off + (int)rqlen;
+                    /* Advance past the longer of replacement or original match */
+                    int advance = (int)rqlen > prev_len ? (int)rqlen : prev_len;
+                    int next_off = prev_off + advance;
                     if (next_off <= prev_off) next_off = prev_off + 1;
                     if (!search_do_from(ec.search.query,
                                         ec.cursor_y, next_off))
