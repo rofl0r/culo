@@ -278,7 +278,7 @@ static char *gap_ptr(gap_buffer_t *gb, size_t pos)
 {
     size_t front_size = gb->gap - gb->buffer;
 
-    if (pos <= front_size)
+    if (pos < front_size)
         return gb->buffer + pos;
     return gb->egap + (pos - front_size);
 }
@@ -2590,9 +2590,10 @@ static void sig_cont_handler(int sig)
     editor_refresh();
 }
 
-static bool ui_confirm(const char *msg)
+/* Returns 1 = Yes, 0 = No, -1 = Cancel (ESC/^X) */
+static int ui_confirm(const char *msg)
 {
-    bool choice = false; /* false = No (default), true = Yes */
+    int choice = 0; /* 0 = No (default), 1 = Yes */
 
     while (1) {
         /* Build the message with highlighted options */
@@ -2616,18 +2617,18 @@ static bool ui_confirm(const char *msg)
         case '\x1b': /* ESC key */
         case CTRL_('x'):
             ui_set_message("");
-            return false; /* Cancel = No */
+            return -1; /* Cancel */
         case ARROW_LEFT:
         case ARROW_RIGHT:
-            choice = !choice; /* Toggle between Yes and No */
+            choice = 1 - choice; /* Toggle between Yes and No */
             break;
         case 'y':
         case 'Y':
-            choice = true; /* Quick key for Yes */
+            choice = 1; /* Quick key for Yes */
             break;
         case 'n':
         case 'N':
-            choice = false; /* Quick key for No */
+            choice = 0; /* Quick key for No */
             break;
         }
     }
@@ -2940,11 +2941,13 @@ static void browser_open_selected(void)
 
         /* Save current file if modified */
         if (ec.modified) {
-            if (!ui_confirm("Current file has been modified. Save before "
-                            "opening new file?")) {
-                return;
-            }
-            file_save();
+            int r = ui_confirm("Current file has been modified. Save before "
+                               "opening new file?");
+            if (r == -1)
+                return; /* Cancel: stay in browser */
+            if (r == 1)
+                file_save(); /* Yes: save then open */
+            /* No (r == 0): discard changes and open */
         }
 
         /* Open the new file */
@@ -3298,7 +3301,7 @@ static void editor_process_key(void)
         break;
     case CTRL_('x'): /* Exit editor (GNU nano: ^X) */
         if (ec.modified) {
-            if (!ui_confirm("File has been modified. Quit without saving?"))
+            if (ui_confirm("File has been modified. Quit without saving?") != 1)
                 return;
         }
         term_clear();
