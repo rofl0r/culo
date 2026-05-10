@@ -3587,7 +3587,7 @@ int main(int argc, char *argv[])
     /* Main event loop */
     while (1) {
         editor_process_key();
-        if (ec.mode != MODE_BROWSER)
+        if (ec.mode != MODE_BROWSER && ec.mode != MODE_HELP)
             editor_refresh();
     }
     /* not reachable */
