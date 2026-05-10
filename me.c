@@ -747,6 +747,7 @@ struct {
     mode_data_t mode_state;      /* Mode-specific state data */
     selection_state_t selection; /* Text selection state */
     bool show_line_numbers;      /* Toggle line numbers display */
+    bool last_was_cut;           /* True if previous key was ^K (for appending cuts) */
 } ec = {
     .cursor_x = 0,
     .cursor_y = 0,
@@ -775,6 +776,7 @@ struct {
             .active = false,
         },
     .show_line_numbers = false,
+    .last_was_cut = false,
 };
 
 typedef struct {
@@ -1386,25 +1388,41 @@ static void editor_copy(int cut)
     ui_set_message(cut ? "Text cut" : "Text copied");
 }
 
-static void editor_cut(void)
+static void editor_cut(bool append)
 {
     if (!ec.gb || ec.cursor_y >= ec.num_rows)
         return;
 
     bool is_last_line = (ec.cursor_y == ec.num_rows - 1);
 
-    /* Always include trailing newline in clipboard (matches GNU nano) */
+    /* Build the new clipboard text for this line */
     size_t line_size = ec.row[ec.cursor_y].size;
-    size_t buf_size = line_size + 2; /* text + \n + \0 */
-    char *new_buf = realloc(ec.copied_char_buffer, buf_size);
-    if (!new_buf) {
-        ui_set_message("Memory allocation failed");
-        return;
+    size_t new_len = line_size + 1; /* text + \n */
+
+    if (append && ec.copied_char_buffer) {
+        /* Append this line to the existing clipboard */
+        size_t old_len = strlen(ec.copied_char_buffer);
+        char *new_buf = realloc(ec.copied_char_buffer, old_len + new_len + 1);
+        if (!new_buf) {
+            ui_set_message("Memory allocation failed");
+            return;
+        }
+        ec.copied_char_buffer = new_buf;
+        memcpy(ec.copied_char_buffer + old_len, ec.row[ec.cursor_y].chars, line_size);
+        ec.copied_char_buffer[old_len + line_size] = '\n';
+        ec.copied_char_buffer[old_len + line_size + 1] = '\0';
+    } else {
+        /* Replace clipboard with this line */
+        char *new_buf = realloc(ec.copied_char_buffer, new_len + 1);
+        if (!new_buf) {
+            ui_set_message("Memory allocation failed");
+            return;
+        }
+        ec.copied_char_buffer = new_buf;
+        memcpy(ec.copied_char_buffer, ec.row[ec.cursor_y].chars, line_size);
+        ec.copied_char_buffer[line_size] = '\n';
+        ec.copied_char_buffer[line_size + 1] = '\0';
     }
-    ec.copied_char_buffer = new_buf;
-    memcpy(ec.copied_char_buffer, ec.row[ec.cursor_y].chars, line_size);
-    ec.copied_char_buffer[line_size] = '\n';
-    ec.copied_char_buffer[line_size + 1] = '\0';
     ui_set_message("Text cut");
 
     /* Calculate line position in gap buffer */
@@ -3131,6 +3149,10 @@ static void editor_cleanup(void)
 static void editor_process_key(void)
 {
     static int indent_level = 0;
+    /* Save and clear the consecutive-cut flag before reading the new key.
+     * editor_cut() will check this to decide whether to append or replace. */
+    bool consecutive_cut = ec.last_was_cut;
+    ec.last_was_cut = false;
     int c = term_read_key();
 
     /* Handle mode-specific keys first */
@@ -3326,7 +3348,8 @@ static void editor_process_key(void)
             editor_copy(0);
         break;
     case CTRL_('k'): /* Cut current line (GNU nano: ^K Cut Line) */
-        editor_cut();
+        editor_cut(consecutive_cut);
+        ec.last_was_cut = true;
         break;
     case CTRL_('u'): /* Paste/uncut (GNU nano: ^U Uncut) */
         editor_paste();
