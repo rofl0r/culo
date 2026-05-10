@@ -2103,9 +2103,25 @@ static void file_open(const char *file_name)
     free(ec.file_name);
     ec.file_name = strdup(file_name);
     syntax_select();
+    /* Clear undo/redo stacks for new file */
+    if (ec.undo_stack) {
+        undo_destroy(ec.undo_stack);
+        ec.undo_stack = undo_init(100);
+    }
+
     FILE *file = fopen(file_name, "r+");
-    if (!file)
-        panic("Failed to open the file");
+    if (!file) {
+        if (errno != ENOENT)
+            panic("Failed to open the file");
+        /* File does not exist yet — start with empty buffer.
+           The filename is already stored; it will be used when saving. */
+        if (ec.gb) {
+            gap_destroy(ec.gb);
+            ec.gb = gap_init(1024);
+        }
+        ec.modified = false;
+        return;
+    }
 
     /* Load file into gap buffer if available */
     if (ec.gb) {
@@ -2118,12 +2134,6 @@ static void file_open(const char *file_name)
 
         /* Rewind for row loading */
         fseek(file, 0, SEEK_SET);
-    }
-
-    /* Clear undo/redo stacks for new file */
-    if (ec.undo_stack) {
-        undo_destroy(ec.undo_stack);
-        ec.undo_stack = undo_init(100);
     }
 
     char *line = NULL;
@@ -3006,13 +3016,19 @@ static void help_render(void)
     buf_append(&eb, "\x1b[2J", 4);
     buf_append(&eb, "\x1b[H", 3);
 
-    /* Title bar */
+    /* Title bar: pad "  Help" with spaces to fill the entire row */
     buf_append(&eb, "\x1b[7m", 4);
-    buf_append(&eb, "  Help\x1b[K", 8);
+    {
+        const char *title_text = "  Help";
+        int tlen = (int)strlen(title_text);
+        buf_append(&eb, title_text, tlen);
+        for (int i = tlen; i < ec.screen_cols; i++)
+            buf_append(&eb, " ", 1);
+    }
     buf_append(&eb, "\x1b[0m", 4);
     buf_append(&eb, "\r\n", 2);
 
-    int visible = ec.screen_rows - 2; /* title + status */
+    int visible = ec.screen_rows - 1; /* ec.screen_rows already excludes status+messagebar; subtract 1 for title */
     int offset  = ec.mode_state.help.offset;
 
     for (int i = 0; i < visible; i++) {
@@ -3360,7 +3376,7 @@ static void editor_process_key(void)
         break;
 
     case MODE_HELP: {
-        int visible   = ec.screen_rows - 2;
+        int visible   = ec.screen_rows - 1;
         int max_offset = HELP_NUM_LINES - visible;
         if (max_offset < 0)
             max_offset = 0;
