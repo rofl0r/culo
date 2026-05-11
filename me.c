@@ -1198,19 +1198,21 @@ static void syntax_highlight(editor_row_t *row)
     int mcs_len = mcs ? strlen(mcs) : 0;
     int mce_len = mce ? strlen(mce) : 0;
 
-    /* Precompute keyword lengths and type flags once before the character loop
-     * to avoid repeated strlen() calls for every separator position. */
+    /* Precompute keyword metadata once before the character scan loop to avoid
+     * repeated strlen() calls inside the hot path (one per separator char × keyword).
+     * kw_meta[j]: bits 0-7 = effective length (max 255), bit 8 = kw_2 (type2 keyword
+     * ending in '|'), bit 9 = kw_3 (preprocessor keyword starting with '#'). */
+#define MAX_KEYWORDS 256
+    unsigned short kw_meta[MAX_KEYWORDS];
     int nkw = 0;
-    while (keywords[nkw]) nkw++;
-    /* kw_meta[j]: low 8 bits = length (excluding trailing '|'), bit 8 = kw_2, bit 9 = kw_3 */
-    unsigned short kw_meta[nkw];
-    for (int j = 0; j < nkw; j++) {
-        int len = (int)strlen(keywords[j]);
-        bool kw_2 = (keywords[j][len - 1] == '|');
-        bool kw_3 = (keywords[j][0] == '#');
-        kw_meta[j] = (unsigned short)((kw_2 ? len - 1 : len)
-                                      | (kw_2 ? 0x100 : 0)
-                                      | (kw_3 ? 0x200 : 0));
+    while (keywords[nkw] && nkw < MAX_KEYWORDS) {
+        int len = (int)strlen(keywords[nkw]);
+        bool kw_2 = (keywords[nkw][len - 1] == '|');
+        bool kw_3 = (keywords[nkw][0] == '#');
+        int eff = kw_2 ? len - 1 : len;
+        if (eff > 0xff) eff = 0xff;
+        kw_meta[nkw] = (unsigned short)(eff | (kw_2 ? 0x100 : 0) | (kw_3 ? 0x200 : 0));
+        nkw++;
     }
 
     bool prev_sep = true;
