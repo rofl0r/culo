@@ -673,11 +673,15 @@ typedef struct {
     bool hl_open_comment;
 } editor_row_t;
 
+/* One entry in a keyword table.  len is a compile-time sizeof(literal)-1 so
+ * the highlight loop never calls strlen(). */
+typedef struct { const char *str; int len; unsigned char type; } keyword_t;
+
 /* Syntax highlighting structure */
 typedef struct {
     char *file_type;
     char **file_match;
-    char **keywords;
+    const keyword_t *keywords;
     char *sl_comment_start;                  /* single line */
     char *ml_comment_start, *ml_comment_end; /* multiple lines */
     int flags;
@@ -851,17 +855,27 @@ typedef enum {
 
 char *C_extensions[] = {".c", ".cc", ".cxx", ".cpp", ".h", NULL};
 
-char *C_keywords[] = {
-    "switch",  "if",       "while",   "for",      "break",    "continue",
-    "return",  "else",     "struct",  "union",    "typedef",  "static",
-    "enum",    "class",    "case",    "volatile", "register", "sizeof",
-    "typedef", "union",    "goto",    "const",    "auto",     "#if",
-    "#endif",  "#error",   "#ifdef",  "#ifndef",  "#elif",    "#define",
-    "#undef",  "#include",
+/* Macros to build keyword table entries with compile-time lengths. */
+#define KW1(s) { s, sizeof(s)-1, KEYWORD_1 }
+#define KW2(s) { s, sizeof(s)-1, KEYWORD_2 }
+#define KW3(s) { s, sizeof(s)-1, KEYWORD_3 }
 
-    "int|",    "long|",    "double|", "float|",   "char|",    "unsigned|",
-    "signed|", "void|",    "bool|",   NULL,
+keyword_t C_keywords[] = {
+    KW1("switch"),   KW1("if"),       KW1("while"),    KW1("for"),      KW1("break"),
+    KW1("continue"), KW1("return"),   KW1("else"),     KW1("struct"),   KW1("union"),
+    KW1("typedef"),  KW1("static"),   KW1("enum"),     KW1("class"),    KW1("case"),
+    KW1("volatile"), KW1("register"), KW1("sizeof"),   KW1("goto"),     KW1("const"),
+    KW1("auto"),
+    KW3("#if"),      KW3("#endif"),   KW3("#error"),   KW3("#ifdef"),   KW3("#ifndef"),
+    KW3("#elif"),    KW3("#define"),  KW3("#undef"),   KW3("#include"),
+    KW2("int"),      KW2("long"),     KW2("double"),   KW2("float"),    KW2("char"),
+    KW2("unsigned"), KW2("signed"),   KW2("void"),     KW2("bool"),
+    { NULL, 0, 0 },
 };
+
+#undef KW1
+#undef KW2
+#undef KW3
 
 editor_syntax_t DB[] = {
     {
@@ -1190,31 +1204,13 @@ static void syntax_highlight(editor_row_t *row)
     memset(row->highlight, NORMAL, row->render_size);
     if (!ec.syntax)
         return;
-    char **keywords = ec.syntax->keywords;
+    const keyword_t *keywords = ec.syntax->keywords;
     char *scs = ec.syntax->sl_comment_start;
     char *mcs = ec.syntax->ml_comment_start;
     char *mce = ec.syntax->ml_comment_end;
     int scs_len = scs ? strlen(scs) : 0;
     int mcs_len = mcs ? strlen(mcs) : 0;
     int mce_len = mce ? strlen(mce) : 0;
-
-    /* Precompute keyword metadata once before the character scan loop to avoid
-     * repeated strlen() calls inside the hot path (one per separator char × keyword).
-     * kw_meta[j]: bits 0-7 = effective length (max 255), bit 8 = kw_2 (type2 keyword
-     * ending in '|'), bit 9 = kw_3 (preprocessor keyword starting with '#'). */
-#define MAX_KEYWORDS 256
-    unsigned short kw_meta[MAX_KEYWORDS];
-    int nkw = 0;
-    while (keywords[nkw] && nkw < MAX_KEYWORDS) {
-        int len = (int)strlen(keywords[nkw]);
-        bool kw_2 = (keywords[nkw][len - 1] == '|');
-        bool kw_3 = (keywords[nkw][0] == '#');
-        int eff = kw_2 ? len - 1 : len;
-        if (eff > 0xff) eff = 0xff;
-        kw_meta[nkw] = (unsigned short)(eff | (kw_2 ? 0x100 : 0) | (kw_3 ? 0x200 : 0));
-        nkw++;
-    }
-
     bool prev_sep = true;
     int in_string = 0;
     bool in_comment = (row->idx > 0 && ec.row[row->idx - 1].hl_open_comment);
@@ -1280,22 +1276,16 @@ static void syntax_highlight(editor_row_t *row)
             }
         }
         if (prev_sep) {
-            int j;
-            for (j = 0; j < nkw; j++) {
-                int kw_len = kw_meta[j] & 0xff;
-                bool kw_2 = (kw_meta[j] & 0x100) != 0;
-                /* FIXME: specific to C/C++, should be generic */
-                bool kw_3 = (kw_meta[j] & 0x200) != 0;
-                if (!strncmp(&row->render[i], keywords[j], kw_len) &&
-                    syntax_is_separator(row->render[i + kw_len])) {
-                    memset(&row->highlight[i],
-                           kw_2 ? KEYWORD_2 : (kw_3 ? KEYWORD_3 : KEYWORD_1),
-                           kw_len);
-                    i += kw_len;
+            const keyword_t *kw;
+            for (kw = keywords; kw->str; kw++) {
+                if (!strncmp(&row->render[i], kw->str, kw->len) &&
+                    syntax_is_separator(row->render[i + kw->len])) {
+                    memset(&row->highlight[i], kw->type, kw->len);
+                    i += kw->len;
                     break;
                 }
             }
-            if (j < nkw) {
+            if (kw->str) {
                 prev_sep = false;
                 continue;
             }
