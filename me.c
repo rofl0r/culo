@@ -1197,6 +1197,22 @@ static void syntax_highlight(editor_row_t *row)
     int scs_len = scs ? strlen(scs) : 0;
     int mcs_len = mcs ? strlen(mcs) : 0;
     int mce_len = mce ? strlen(mce) : 0;
+
+    /* Precompute keyword lengths and type flags once before the character loop
+     * to avoid repeated strlen() calls for every separator position. */
+    int nkw = 0;
+    while (keywords[nkw]) nkw++;
+    /* kw_meta[j]: low 8 bits = length (excluding trailing '|'), bit 8 = kw_2, bit 9 = kw_3 */
+    unsigned short kw_meta[nkw];
+    for (int j = 0; j < nkw; j++) {
+        int len = (int)strlen(keywords[j]);
+        bool kw_2 = (keywords[j][len - 1] == '|');
+        bool kw_3 = (keywords[j][0] == '#');
+        kw_meta[j] = (unsigned short)((kw_2 ? len - 1 : len)
+                                      | (kw_2 ? 0x100 : 0)
+                                      | (kw_3 ? 0x200 : 0));
+    }
+
     bool prev_sep = true;
     int in_string = 0;
     bool in_comment = (row->idx > 0 && ec.row[row->idx - 1].hl_open_comment);
@@ -1263,13 +1279,11 @@ static void syntax_highlight(editor_row_t *row)
         }
         if (prev_sep) {
             int j;
-            for (j = 0; keywords[j]; j++) {
-                int kw_len = strlen(keywords[j]);
-                bool kw_2 = keywords[j][kw_len - 1] == '|';
+            for (j = 0; j < nkw; j++) {
+                int kw_len = kw_meta[j] & 0xff;
+                bool kw_2 = (kw_meta[j] & 0x100) != 0;
                 /* FIXME: specific to C/C++, should be generic */
-                bool kw_3 = keywords[j][0] == '#';
-                if (kw_2)
-                    kw_len--;
+                bool kw_3 = (kw_meta[j] & 0x200) != 0;
                 if (!strncmp(&row->render[i], keywords[j], kw_len) &&
                     syntax_is_separator(row->render[i + kw_len])) {
                     memset(&row->highlight[i],
@@ -1279,7 +1293,7 @@ static void syntax_highlight(editor_row_t *row)
                     break;
                 }
             }
-            if (keywords[j]) {
+            if (j < nkw) {
                 prev_sep = false;
                 continue;
             }
@@ -2417,19 +2431,19 @@ static bool search_do_from(const char *query, int start_row, int start_char_off,
     return found;
 }
 
-/* Convenience wrapper: search forward from cursor_y+1 or backward from cursor_y-1,
- * wrapping through the whole file. */
+/* Convenience wrapper: search from just past the current cursor position,
+ * wrapping through the whole file.  Starts on the current line so that
+ * matches later on the same line are found before wrapping to the next/previous
+ * line.  Uses cursor_x+1 (forward) or cursor_x-1 (backward) to avoid
+ * re-finding a match the cursor is already sitting on. */
 static bool search_do(const char *query)
 {
     if (!query || !*query || ec.num_rows == 0) return false;
     bool backwards = (ec.search.mode & SM_BACKWARDS) != 0;
-    int n = ec.num_rows;
-    if (backwards) {
-        int start_row = ((ec.cursor_y - 1) % n + n) % n;
-        return search_do_from(query, start_row, ec.row[start_row].size, false);
-    } else {
-        return search_do_from(query, (ec.cursor_y + 1) % n, 0, false);
-    }
+    if (backwards)
+        return search_do_from(query, ec.cursor_y, ec.cursor_x - 1, false);
+    else
+        return search_do_from(query, ec.cursor_y, ec.cursor_x + 1, false);
 }
 
 /* Perform one text replacement at g_last_match.
@@ -2497,12 +2511,14 @@ static bool replace_skip(void)
     return search_do_from(ec.search.query, ec.cursor_y, skip_off, true /*no_wrap*/);
 }
 
-/* Finish a replace session: reset state, return to NORMAL, optionally show count. */
+/* Finish a replace session: reset state, return to NORMAL, optionally show count.
+ * SM_REPLACE is cleared so the next ^W launches a plain search. */
 static void replace_finish(bool always_show_msg)
 {
     int cnt = ec.search.replace_count;
     ec.search.replace_count = 0;
     ec.search.replace_phase = 0;
+    ec.search.mode &= ~SM_REPLACE;
     mode_set(MODE_NORMAL);
     if (always_show_msg || cnt > 0)
         set_overlay_msg("[ Replaced %d occurrence%s ]", cnt, cnt == 1 ? "" : "s");
@@ -3697,11 +3713,14 @@ static void editor_process_key(void)
         /* Phase 1: entering replacement text */
         if (ec.search.replace_phase == 1) {
             if (c == '\r') {
-                /* Execute: find first match from saved position (wrapping). */
+                /* Execute: find first match at or after the saved position (wrapping).
+                 * Use search_do_from directly with saved_x so we include any match
+                 * sitting exactly at the cursor rather than starting at saved_x+1. */
                 int sx = ec.mode_state.search.saved_x;
                 int sy = ec.mode_state.search.saved_y;
-                ec.cursor_x = sx; ec.cursor_y = sy;
-                bool found = search_do(ec.search.query);
+                bool backwards = (ec.search.mode & SM_BACKWARDS) != 0;
+                bool found = search_do_from(ec.search.query, sy,
+                                            backwards ? sx - 1 : sx, false);
                 if (!found) {
                     ec.search.replace_phase = 0;
                     ec.search.replace_count = 0;
