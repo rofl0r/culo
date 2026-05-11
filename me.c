@@ -813,6 +813,8 @@ struct {
     .last_was_cut = false,
     .search = { .query = NULL, .query_len = 0, .query_cap = 0, .mode = SM_NONE,
                 .replace_query = NULL, .replace_len = 0, .replace_cap = 0,
+                /* orig_row=-1 means "no active replace cycle"; orig_char is only
+                 * meaningful when orig_row >= 0, so 0 is a fine default. */
                 .replace_phase = 0, .replace_count = 0, .orig_row = -1, .orig_char = 0 },
     .notfound_msg = "",
 };
@@ -2484,7 +2486,18 @@ static void set_overlay_msg(const char *fmt, ...)
     va_end(ap);
 }
 
-/* Replace the current g_last_match and advance to the next occurrence without
+/* Returns true if, after wrapping, the current cursor position has gone at or
+ * past the original replace-start position (completing exactly one full cycle).
+ * Only meaningful when 'wrapped' is true and orig_row >= 0. */
+static bool replace_past_origin(bool wrapped, bool backwards)
+{
+    if (!wrapped || ec.search.orig_row < 0) return false;
+    int or = ec.search.orig_row, oc = ec.search.orig_char;
+    return backwards ? (ec.cursor_y < or || (ec.cursor_y == or && ec.cursor_x <= oc))
+                     : (ec.cursor_y > or || (ec.cursor_y == or && ec.cursor_x >= oc));
+}
+
+/* Replace the current g_last_match and advance to the next occurrence,
  * wrapping with a stop at the original replace-start position to avoid
  * cycling past the starting point.  Returns true if another match was found. */
 static bool replace_and_advance(const char *rq, size_t rqlen)
@@ -2509,15 +2522,7 @@ static bool replace_and_advance(const char *rq, size_t rqlen)
     bool wrapped = false;
     bool found = search_do_from(ec.search.query, ec.cursor_y, skip_off, false, &wrapped);
     if (!found) return false;
-    /* If the search wrapped past the file boundary, stop once we've gone at or
-     * past the original replace-start position (completing exactly one cycle). */
-    if (wrapped && ec.search.orig_row >= 0) {
-        int or = ec.search.orig_row, oc = ec.search.orig_char;
-        bool past = backwards ? (ec.cursor_y < or || (ec.cursor_y == or && ec.cursor_x <= oc))
-                              : (ec.cursor_y > or || (ec.cursor_y == or && ec.cursor_x >= oc));
-        if (past) return false;
-    }
-    return true;
+    return !replace_past_origin(wrapped, backwards);
 }
 
 /* Skip the current match without replacing and advance to the next occurrence. */
@@ -2529,13 +2534,7 @@ static bool replace_skip(void)
     bool wrapped = false;
     bool found = search_do_from(ec.search.query, ec.cursor_y, skip_off, false, &wrapped);
     if (!found) return false;
-    if (wrapped && ec.search.orig_row >= 0) {
-        int or = ec.search.orig_row, oc = ec.search.orig_char;
-        bool past = backwards ? (ec.cursor_y < or || (ec.cursor_y == or && ec.cursor_x <= oc))
-                              : (ec.cursor_y > or || (ec.cursor_y == or && ec.cursor_x >= oc));
-        if (past) return false;
-    }
-    return true;
+    return !replace_past_origin(wrapped, backwards);
 }
 
 /* Finish a replace session: reset state, return to NORMAL, optionally show count.
