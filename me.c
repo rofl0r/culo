@@ -2286,142 +2286,149 @@ typedef struct {
 } search_match_t;
 static search_match_t g_last_match = { .row = -1, .char_off = 0, .char_len = 0 };
 
-/* Execute search starting from (start_row, start_char_off), wrapping around.
- * Searches r->chars so char offsets map directly to the gap buffer.
- * SM_CASE_SENSITIVE and SM_BACKWARDS apply even in regex mode.
- * Returns true if a match was found; sets ec.cursor_y/cursor_x and
- * highlights the match; also stores info in g_last_match for replace. */
-static bool search_do_from(const char *query, int start_row, int start_char_off)
+/* Find the LAST match of query in r->chars[0..max_off].
+ * Because libc provides only "find first", we scan forward collecting every
+ * hit and keep the rightmost one that is still at or before max_off.
+ * Works for both plain-text and regex; set use_regex and pass a compiled re.
+ * Returns true and fills *out_off / *out_len on success. */
+static bool row_find_last_match(editor_row_t *r, int max_off,
+                                bool case_sens, bool use_regex,
+                                const char *query, size_t qlen, regex_t *re,
+                                int *out_off, int *out_len)
 {
-    if (!query || !*query)
-        return false;
+    if (max_off < 0) return false;
+    bool found = false;
+    const char *hay = r->chars;
+    const char *p = hay;
+    while (p <= hay + max_off) {
+        int mo, ml;
+        if (use_regex) {
+            regmatch_t mm;
+            if (regexec(re, p, 1, &mm, 0) != 0) break;
+            int abs_so = (int)(p - hay) + (int)mm.rm_so;
+            if (abs_so > max_off) break;
+            mo = abs_so;
+            ml = (int)(mm.rm_eo - mm.rm_so);
+            p = hay + abs_so + 1;
+            if ((int)(p - hay) > r->size) break;
+        } else {
+            const char *hit = case_sens ? strstr(p, query) : strcasestr(p, query);
+            if (!hit) break;
+            int abs_so = (int)(hit - hay);
+            if (abs_so > max_off) break;
+            mo = abs_so;
+            ml = (int)qlen;
+            p = hit + 1;
+        }
+        *out_off = mo;
+        *out_len = ml;
+        found = true;
+    }
+    return found;
+}
+
+/* Find the FIRST match of query in r->chars[min_off..].
+ * Returns true and fills *out_off / *out_len on success. */
+static bool row_find_first_match(editor_row_t *r, int min_off,
+                                 bool case_sens, bool use_regex,
+                                 const char *query, size_t qlen, regex_t *re,
+                                 int *out_off, int *out_len)
+{
+    if (min_off > r->size) return false;
+    if (use_regex) {
+        regmatch_t m;
+        if (regexec(re, r->chars + min_off, 1, &m, 0) != 0) return false;
+        *out_off = min_off + (int)m.rm_so;
+        *out_len = (int)(m.rm_eo - m.rm_so);
+    } else {
+        const char *src = r->chars + min_off;
+        const char *hit = case_sens ? strstr(src, query) : strcasestr(src, query);
+        if (!hit) return false;
+        *out_off = min_off + (int)(hit - src);
+        *out_len = (int)qlen;
+    }
+    return true;
+}
+
+/* Execute search starting from (start_row, start_char_off).
+ * If no_wrap is true, stops at the end (or beginning for backwards) of the
+ * file without cycling back — used during replace to avoid re-matching
+ * already-replaced text.  If no_wrap is false, wraps through all n rows.
+ * Searches r->chars so char offsets map directly to the gap buffer.
+ * SM_CASE_SENSITIVE, SM_BACKWARDS, and SM_REGEX are all honoured.
+ * Returns true if a match was found; updates ec.cursor_y/x and g_last_match. */
+static bool search_do_from(const char *query, int start_row, int start_char_off,
+                           bool no_wrap)
+{
+    if (!query || !*query) return false;
     int n = ec.num_rows;
-    if (n == 0)
-        return false;
-    bool backwards  = (ec.search.mode & SM_BACKWARDS)      != 0;
-    bool use_regex  = (ec.search.mode & SM_REGEX)           != 0;
-    bool case_sens  = (ec.search.mode & SM_CASE_SENSITIVE)  != 0;
+    if (n == 0) return false;
+    bool backwards = (ec.search.mode & SM_BACKWARDS)     != 0;
+    bool use_regex  = (ec.search.mode & SM_REGEX)         != 0;
+    bool case_sens  = (ec.search.mode & SM_CASE_SENSITIVE) != 0;
 
     regex_t re;
     if (use_regex) {
         int flags = REG_EXTENDED | (case_sens ? 0 : REG_ICASE);
-        if (regcomp(&re, query, flags) != 0)
-            return false;
+        if (regcomp(&re, query, flags) != 0) return false;
     }
 
     size_t qlen = use_regex ? 0 : strlen(query);
+    int dir = backwards ? -1 : 1;
+    /* Without wrap: scan only the rows reachable in the search direction
+     * before hitting the file boundary. */
+    int max_rows = no_wrap ? (backwards ? start_row + 1 : n - start_row) : n;
     bool found = false;
 
-    for (int i = 0; i < n && !found; i++) {
-        int ri;
-        if (backwards)
-            ri = ((start_row - i) % n + n) % n;
-        else
-            ri = (start_row + i) % n;
-
+    for (int i = 0; i < max_rows && !found; i++) {
+        int ri = no_wrap ? start_row + i * dir
+                         : ((start_row + i * dir) % n + n) % n;
         editor_row_t *r = &ec.row[ri];
-        if (!r->chars)
-            continue;
+        if (!r->chars) continue;
 
-        int search_off = (i == 0) ? start_char_off : 0;
-        if (backwards && i > 0)
-            search_off = r->size; /* include all positions in the row */
+        /* For the starting row honour start_char_off; for subsequent rows
+         * scan from the appropriate end based on direction. */
+        int search_off = (i == 0) ? start_char_off
+                                   : (backwards ? r->size : 0);
 
-        int match_char_off = -1, match_char_len = -1;
+        int match_off = -1, match_len = -1;
+        bool hit = backwards
+            ? row_find_last_match(r, search_off, case_sens, use_regex,
+                                  query, qlen, &re, &match_off, &match_len)
+            : row_find_first_match(r, search_off, case_sens, use_regex,
+                                   query, qlen, &re, &match_off, &match_len);
 
-        if (use_regex) {
-            if (backwards) {
-                /* Scan for last match at or before search_off */
-                const char *s = r->chars;
-                regmatch_t best;
-                best.rm_so = -1;
-                best.rm_eo = 0;
-                while ((int)(s - r->chars) <= search_off) {
-                    regmatch_t mm;
-                    if (regexec(&re, s, 1, &mm, 0) != 0) break;
-                    int abs_so = (int)(s - r->chars) + (int)mm.rm_so;
-                    if (abs_so > search_off) break;
-                    best.rm_so = abs_so;
-                    best.rm_eo = (int)(s - r->chars) + (int)mm.rm_eo;
-                    s = r->chars + abs_so + 1;
-                    if (abs_so + 1 > r->size) break;
-                }
-                if (best.rm_so >= 0) {
-                    match_char_off = best.rm_so;
-                    match_char_len = (int)(best.rm_eo - best.rm_so);
-                }
-            } else {
-                regmatch_t m;
-                if (regexec(&re, r->chars + search_off, 1, &m, 0) == 0) {
-                    match_char_off = search_off + (int)m.rm_so;
-                    match_char_len = (int)(m.rm_eo - m.rm_so);
-                }
-            }
-        } else {
-            if (backwards) {
-                const char *hay = r->chars;
-                const char *best = NULL;
-                const char *p = hay;
-                while ((int)(p - hay) <= search_off) {
-                    const char *hit = case_sens ? strstr(p, query)
-                                                : strcasestr(p, query);
-                    if (!hit || (int)(hit - hay) > search_off) break;
-                    best = hit;
-                    p = hit + 1;
-                }
-                if (best) {
-                    match_char_off = (int)(best - hay);
-                    match_char_len = (int)qlen;
-                }
-            } else {
-                const char *src = r->chars + search_off;
-                const char *hit = case_sens ? strstr(src, query)
-                                            : strcasestr(src, query);
-                if (hit) {
-                    match_char_off = search_off + (int)(hit - src);
-                    match_char_len = (int)qlen;
-                }
-            }
-        }
-
-        if (match_char_off >= 0) {
+        if (hit) {
             ec.cursor_y = ri;
-            ec.cursor_x = match_char_off;
-            ec.row_offset = n; /* Trigger scroll recalc */
-            g_last_match.row      = ri;
-            g_last_match.char_off = match_char_off;
-            g_last_match.char_len = match_char_len;
-            /* Convert to render offsets for highlighting */
-            int render_off = row_cursorx_to_renderx(r, match_char_off);
-            int render_end = row_cursorx_to_renderx(r, match_char_off + match_char_len);
+            ec.cursor_x = match_off;
+            ec.row_offset = n; /* trigger scroll recalc */
+            g_last_match = (search_match_t){ ri, match_off, match_len };
+            int render_off = row_cursorx_to_renderx(r, match_off);
+            int render_end = row_cursorx_to_renderx(r, match_off + match_len);
             int render_len = render_end - render_off;
-            if (render_len <= 0 && match_char_len > 0) render_len = 1;
+            if (render_len <= 0 && match_len > 0) render_len = 1;
             if (render_len > 0)
                 search_highlight_match(ri, render_off, render_len);
             found = true;
         }
     }
 
-    if (use_regex)
-        regfree(&re);
-
+    if (use_regex) regfree(&re);
     return found;
 }
 
-/* Convenience wrapper: search forward from cursor_y+1 or backward from cursor_y-1 */
+/* Convenience wrapper: search forward from cursor_y+1 or backward from cursor_y-1,
+ * wrapping through the whole file. */
 static bool search_do(const char *query)
 {
-    if (!query || !*query || ec.num_rows == 0)
-        return false;
+    if (!query || !*query || ec.num_rows == 0) return false;
     bool backwards = (ec.search.mode & SM_BACKWARDS) != 0;
     int n = ec.num_rows;
     if (backwards) {
         int start_row = ((ec.cursor_y - 1) % n + n) % n;
-        /* Use full row size to include matches ending at the last character */
-        int start_off = ec.row[start_row].size;
-        return search_do_from(query, start_row, start_off);
+        return search_do_from(query, start_row, ec.row[start_row].size, false);
     } else {
-        return search_do_from(query, (ec.cursor_y + 1) % n, 0);
+        return search_do_from(query, (ec.cursor_y + 1) % n, 0, false);
     }
 }
 
@@ -2453,6 +2460,49 @@ static void set_overlay_msg(const char *fmt, ...)
     va_start(ap, fmt);
     vsnprintf(ec.notfound_msg, sizeof(ec.notfound_msg), fmt, ap);
     va_end(ap);
+}
+
+/* Replace the current g_last_match and advance to the next occurrence without
+ * wrapping (no_wrap=true prevents re-matching already-replaced text when the
+ * replacement itself matches the search pattern, e.g. "bool" → "BOOL").
+ * Returns true if another match was found. */
+static bool replace_and_advance(const char *rq, size_t rqlen)
+{
+    bool backwards = (ec.search.mode & SM_BACKWARDS) != 0;
+    int prev_off   = g_last_match.char_off;
+    int prev_len   = g_last_match.char_len;
+    do_replace_one(rq, rqlen);
+    ec.search.replace_count++;
+    /* Advance past the replaced range so we don't re-match it. */
+    int skip_off;
+    if (backwards) {
+        skip_off = prev_off - 1; /* look strictly before the replaced position */
+    } else {
+        int advance = (int)rqlen > prev_len ? (int)rqlen : prev_len;
+        if (advance <= 0) advance = 1;
+        skip_off = prev_off + advance;
+    }
+    return search_do_from(ec.search.query, ec.cursor_y, skip_off, true /*no_wrap*/);
+}
+
+/* Skip the current match without replacing and advance to the next occurrence. */
+static bool replace_skip(void)
+{
+    bool backwards = (ec.search.mode & SM_BACKWARDS) != 0;
+    int skip_off = backwards ? g_last_match.char_off - 1
+                             : g_last_match.char_off + 1;
+    return search_do_from(ec.search.query, ec.cursor_y, skip_off, true /*no_wrap*/);
+}
+
+/* Finish a replace session: reset state, return to NORMAL, optionally show count. */
+static void replace_finish(bool always_show_msg)
+{
+    int cnt = ec.search.replace_count;
+    ec.search.replace_count = 0;
+    ec.search.replace_phase = 0;
+    mode_set(MODE_NORMAL);
+    if (always_show_msg || cnt > 0)
+        set_overlay_msg("[ Replaced %d occurrence%s ]", cnt, cnt == 1 ? "" : "s");
 }
 
 static void search_find(void)
@@ -3622,78 +3672,20 @@ static void editor_process_key(void)
             const char *rq = ec.search.replace_query ? ec.search.replace_query : "";
             size_t rqlen = ec.search.replace_len;
             if (c == 'y' || c == 'Y' || c == '\r') {
-                /* Replace this instance */
-                int prev_off = g_last_match.char_off;
-                int prev_len = g_last_match.char_len;
-                do_replace_one(rq, rqlen);
-                ec.search.replace_count++;
-                /* Advance past the longer of the replacement or the original match
-                 * to avoid re-matching overlapping patterns. */
-                int advance = (int)rqlen > prev_len ? (int)rqlen : prev_len;
-                int next_off = prev_off + advance;
-                if (next_off <= prev_off) next_off = prev_off + 1;
-                bool next = search_do_from(ec.search.query,
-                                           ec.cursor_y, next_off);
-                if (!next) {
-                    /* No more matches */
-                    int cnt = ec.search.replace_count;
-                    ec.search.replace_phase = 0;
-                    ec.search.replace_count = 0;
-                    mode_set(MODE_NORMAL);
-                    set_overlay_msg("[ Replaced %d occurrence%s ]",
-                                    cnt, cnt == 1 ? "" : "s");
-                }
-                editor_refresh();
-                return;
+                /* Replace this instance and find the next (no wrap). */
+                if (!replace_and_advance(rq, rqlen))
+                    replace_finish(true);
             } else if (c == 'n' || c == 'N') {
-                /* Skip this instance, find next */
-                bool next = search_do_from(ec.search.query,
-                                           ec.cursor_y,
-                                           g_last_match.char_off + 1);
-                if (!next) {
-                    int cnt = ec.search.replace_count;
-                    ec.search.replace_phase = 0;
-                    ec.search.replace_count = 0;
-                    mode_set(MODE_NORMAL);
-                    if (cnt > 0)
-                        set_overlay_msg("[ Replaced %d occurrence%s ]",
-                                        cnt, cnt == 1 ? "" : "s");
-                }
-                editor_refresh();
-                return;
+                /* Skip this instance and find the next (no wrap). */
+                if (!replace_skip())
+                    replace_finish(false);
             } else if (c == 'a' || c == 'A') {
-                /* Replace all remaining */
-                do {
-                    int prev_off = g_last_match.char_off;
-                    int prev_len = g_last_match.char_len;
-                    do_replace_one(rq, rqlen);
-                    ec.search.replace_count++;
-                    /* Advance past the longer of replacement or original match */
-                    int advance = (int)rqlen > prev_len ? (int)rqlen : prev_len;
-                    int next_off = prev_off + advance;
-                    if (next_off <= prev_off) next_off = prev_off + 1;
-                    if (!search_do_from(ec.search.query,
-                                        ec.cursor_y, next_off))
-                        break;
-                } while (1);
-                int cnt = ec.search.replace_count;
-                ec.search.replace_phase = 0;
-                ec.search.replace_count = 0;
-                mode_set(MODE_NORMAL);
-                set_overlay_msg("[ Replaced %d occurrence%s ]",
-                                cnt, cnt == 1 ? "" : "s");
-                editor_refresh();
-                return;
+                /* Replace all remaining — same loop as 'y', just no dialog pause. */
+                while (replace_and_advance(rq, rqlen))
+                    ;
+                replace_finish(true);
             } else if (c == CTRL_('c') || c == CTRL_('x') || c == CTRL_('w')) {
-                int cnt = ec.search.replace_count;
-                ec.search.replace_phase = 0;
-                ec.search.replace_count = 0;
-                mode_set(MODE_NORMAL);
-                if (cnt > 0)
-                    set_overlay_msg("[ Replaced %d occurrence%s ]",
-                                    cnt, cnt == 1 ? "" : "s");
-                editor_refresh();
-                return;
+                replace_finish(false);
             }
             editor_refresh();
             return;
@@ -3702,7 +3694,7 @@ static void editor_process_key(void)
         /* Phase 1: entering replacement text */
         if (ec.search.replace_phase == 1) {
             if (c == '\r') {
-                /* Execute: find first match from saved position */
+                /* Execute: find first match from saved position (wrapping). */
                 int sx = ec.mode_state.search.saved_x;
                 int sy = ec.mode_state.search.saved_y;
                 ec.cursor_x = sx; ec.cursor_y = sy;
