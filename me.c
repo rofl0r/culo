@@ -894,6 +894,7 @@ editor_syntax_t DB[] = {
         "/*",
         "*/",
         HIGHLIGHT_NUMBERS | HIGHLIGHT_STRINGS,
+        .kw_re_mask = 0,
     },
 };
 
