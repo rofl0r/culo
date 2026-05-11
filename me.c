@@ -671,6 +671,7 @@ typedef struct {
     char *render;
     unsigned char *highlight;
     bool hl_open_comment;
+    bool hl_valid;
 } editor_row_t;
 
 /* One entry in a keyword table.  len is a compile-time sizeof(literal)-1 so
@@ -685,6 +686,8 @@ typedef struct {
     char *sl_comment_start;                  /* single line */
     char *ml_comment_start, *ml_comment_end; /* multiple lines */
     int flags;
+    regex_t kw_re[3];  /* precompiled keyword regexes: [0]=KW1, [1]=KW2, [2]=KW3 */
+    int kw_re_mask;    /* bitmask: bit t is set if kw_re[t] is valid */
 } editor_syntax_t;
 
 /* X-macro for editor modes */
@@ -780,6 +783,7 @@ struct {
         int replace_phase;       /* 0=search_input, 1=replace_input, 2=confirming each */
         int replace_count;       /* replacements made so far */
         int orig_row, orig_char; /* cursor pos when replace phase 2 began; used to stop after one cycle */
+        bool has_wrapped;        /* true once any search_do_from call in this session returned wrapped=true */
     } search;
     char notfound_msg[200];      /* transient "not found" overlay; cleared on next keypress */
 } ec = {
@@ -815,7 +819,8 @@ struct {
                 .replace_query = NULL, .replace_len = 0, .replace_cap = 0,
                 /* orig_row=-1 means "no active replace cycle"; orig_char is only
                  * meaningful when orig_row >= 0, so 0 is a fine default. */
-                .replace_phase = 0, .replace_count = 0, .orig_row = -1, .orig_char = 0 },
+                .replace_phase = 0, .replace_count = 0, .orig_row = -1, .orig_char = 0,
+                .has_wrapped = false },
     .notfound_msg = "",
 };
 
@@ -1207,13 +1212,34 @@ static void syntax_highlight(editor_row_t *row)
     memset(row->highlight, NORMAL, row->render_size);
     if (!ec.syntax)
         return;
-    const keyword_t *keywords = ec.syntax->keywords;
     char *scs = ec.syntax->sl_comment_start;
     char *mcs = ec.syntax->ml_comment_start;
     char *mce = ec.syntax->ml_comment_end;
     int scs_len = scs ? strlen(scs) : 0;
     int mcs_len = mcs ? strlen(mcs) : 0;
     int mce_len = mce ? strlen(mce) : 0;
+
+    /* Phase 1: keyword highlights using precompiled regexes */
+    if (ec.syntax->kw_re_mask) {
+        static const highlight_type_t kw_types[3] = { KEYWORD_1, KEYWORD_2, KEYWORD_3 };
+        for (int t = 0; t < 3; t++) {
+            if (!(ec.syntax->kw_re_mask & (1 << t))) continue;
+            regmatch_t m;
+            int off = 0;
+            while (off < row->render_size) {
+                m.rm_so = off; m.rm_eo = row->render_size;
+                if (regexec(&ec.syntax->kw_re[t], row->render, 1, &m, REG_STARTEND) != 0) break;
+                bool at_start = (m.rm_so == 0 || syntax_is_separator(row->render[m.rm_so - 1]));
+                /* row->render[render_size] == '\0', and syntax_is_separator('\0') == true,
+                 * so this access is safe even when m.rm_eo == row->render_size. */
+                bool at_end = syntax_is_separator(row->render[m.rm_eo]);
+                if (at_start && at_end)
+                    memset(&row->highlight[m.rm_so], kw_types[t], m.rm_eo - m.rm_so);
+                off = m.rm_eo > m.rm_so ? m.rm_eo : m.rm_so + 1;
+            }
+        }
+    }
+
     bool prev_sep = true;
     int in_string = 0;
     bool in_comment = (row->idx > 0 && ec.row[row->idx - 1].hl_open_comment);
@@ -1278,24 +1304,10 @@ static void syntax_highlight(editor_row_t *row)
                 continue;
             }
         }
-        if (prev_sep) {
-            const keyword_t *kw;
-            for (kw = keywords; kw->str; kw++) {
-                if (!strncmp(&row->render[i], kw->str, kw->len) &&
-                    syntax_is_separator(row->render[i + kw->len])) {
-                    memset(&row->highlight[i], kw->type, kw->len);
-                    i += kw->len;
-                    break;
-                }
-            }
-            if (kw->str) {
-                prev_sep = false;
-                continue;
-            }
-        }
         prev_sep = syntax_is_separator(c);
         i++;
     }
+    row->hl_valid = true;
     bool changed = (row->hl_open_comment != in_comment);
     row->hl_open_comment = in_comment;
     if (changed && row->idx + 1 < ec.num_rows)
@@ -1317,6 +1329,49 @@ static int syntax_token_color(int highlight)
     return 97; /* Default white */
 }
 
+static void syntax_compile_keywords(editor_syntax_t *es)
+{
+    if (!es || !es->keywords || es->kw_re_mask)
+        return;
+    for (int t = 0; t < 3; t++) {
+        unsigned char ht = (t == 0) ? KEYWORD_1 : (t == 1) ? KEYWORD_2 : KEYWORD_3;
+        /* Count bytes needed: '(' + keywords + '|' separators + ')' + '\0' */
+        size_t need = 2; /* '(' and ')' */
+        int count = 0;
+        for (const keyword_t *kw = es->keywords; kw->str; kw++) {
+            if (kw->type != ht) continue;
+            need += kw->len + 1; /* keyword + '|' (last one replaced by ')') */
+            count++;
+        }
+        if (!count) continue;
+        char *pat = malloc(need);
+        if (!pat) continue;
+        char *p = pat;
+        *p++ = '(';
+        for (const keyword_t *kw = es->keywords; kw->str; kw++) {
+            if (kw->type != ht) continue;
+            memcpy(p, kw->str, kw->len);
+            p += kw->len;
+            *p++ = '|';
+        }
+        *(p - 1) = ')'; /* replace last '|' with ')' */
+        *p = '\0';
+        if (regcomp(&es->kw_re[t], pat, REG_EXTENDED) == 0)
+            es->kw_re_mask |= (1 << t);
+        free(pat);
+    }
+}
+
+static void syntax_compile_keywords_free(editor_syntax_t *es)
+{
+    if (!es) return;
+    for (int t = 0; t < 3; t++) {
+        if (es->kw_re_mask & (1 << t))
+            regfree(&es->kw_re[t]);
+    }
+    es->kw_re_mask = 0;
+}
+
 static void syntax_select(void)
 {
     ec.syntax = NULL;
@@ -1331,8 +1386,9 @@ static void syntax_select(void)
             int pat_len = strlen(es->file_match[i]);
             if ((es->file_match[i][0] != '.') || (p[pat_len] == '\0')) {
                 ec.syntax = es;
-                for (int file_row = 0; file_row < ec.num_rows; file_row++)
-                    syntax_highlight(&ec.row[file_row]);
+                syntax_compile_keywords(es);
+                for (int k = 0; k < ec.num_rows; k++)
+                    ec.row[k].hl_valid = false;
                 return;
             }
         }
@@ -1451,6 +1507,7 @@ static void row_insert(int at, const char *s, size_t line_len)
     ec.row[at].render_size = 0;
     ec.row[at].render = NULL;
     ec.row[at].highlight = NULL;
+    ec.row[at].hl_valid = false;
     ec.row[at].hl_open_comment = false;
     row_update(&ec.row[at]);
     ec.num_rows++;
@@ -2488,10 +2545,11 @@ static void set_overlay_msg(const char *fmt, ...)
 
 /* Returns true if, after wrapping, the current cursor position has gone at or
  * past the original replace-start position (completing exactly one full cycle).
- * Only meaningful when 'wrapped' is true and orig_row >= 0. */
-static bool replace_past_origin(bool wrapped, bool backwards)
+ * Uses ec.search.has_wrapped rather than a per-call flag so wrap is
+ * remembered across multiple search_do_from calls in the same session. */
+static bool replace_past_origin(bool backwards)
 {
-    if (!wrapped || ec.search.orig_row < 0) return false;
+    if (!ec.search.has_wrapped || ec.search.orig_row < 0) return false;
     int or = ec.search.orig_row, oc = ec.search.orig_char;
     return backwards ? (ec.cursor_y < or || (ec.cursor_y == or && ec.cursor_x <= oc))
                      : (ec.cursor_y > or || (ec.cursor_y == or && ec.cursor_x >= oc));
@@ -2521,8 +2579,9 @@ static bool replace_and_advance(const char *rq, size_t rqlen)
     }
     bool wrapped = false;
     bool found = search_do_from(ec.search.query, ec.cursor_y, skip_off, false, &wrapped);
+    if (wrapped) ec.search.has_wrapped = true;
     if (!found) return false;
-    return !replace_past_origin(wrapped, backwards);
+    return !replace_past_origin(backwards);
 }
 
 /* Skip the current match without replacing and advance to the next occurrence. */
@@ -2533,8 +2592,9 @@ static bool replace_skip(void)
                              : g_last_match.char_off + 1;
     bool wrapped = false;
     bool found = search_do_from(ec.search.query, ec.cursor_y, skip_off, false, &wrapped);
+    if (wrapped) ec.search.has_wrapped = true;
     if (!found) return false;
-    return !replace_past_origin(wrapped, backwards);
+    return !replace_past_origin(backwards);
 }
 
 /* Finish a replace session: reset state, return to NORMAL, optionally show count.
@@ -2545,6 +2605,7 @@ static void replace_finish(bool always_show_msg)
     ec.search.replace_count = 0;
     ec.search.replace_phase = 0;
     ec.search.orig_row = -1;
+    ec.search.has_wrapped = false;
     ec.search.mode &= ~SM_REPLACE;
     mode_set(MODE_NORMAL);
     if (always_show_msg || cnt > 0)
@@ -2787,6 +2848,17 @@ static void ui_draw_rows(editor_buf_t *eb)
 {
     /* Calculate line number width if enabled */
     int line_num_width = get_line_number_width();
+
+    /* Ensure rows from row 0 to last visible have syntax highlighting applied.
+     * We process from row 0 so that hl_open_comment propagates correctly. */
+    if (ec.syntax) {
+        int last_vis = ec.row_offset + ec.screen_rows;
+        if (last_vis > ec.num_rows) last_vis = ec.num_rows;
+        for (int i = 0; i < last_vis; i++) {
+            if (!ec.row[i].hl_valid)
+                syntax_highlight(&ec.row[i]);
+        }
+    }
 
     for (int y = 0; y < ec.screen_rows; y++) {
         int file_row = y + ec.row_offset;
@@ -3760,6 +3832,7 @@ static void editor_process_key(void)
                     /* Store original position so replace_and_advance stops after one cycle. */
                     ec.search.orig_row = sy;
                     ec.search.orig_char = sx;
+                    ec.search.has_wrapped = false;
                 }
                 editor_refresh();
                 return;
@@ -4044,8 +4117,15 @@ static void editor_init(void)
         ec.undo_stack = undo_init(MAX_UNDO_LEVELS);
 }
 
+static void syntax_cleanup_atexit(void)
+{
+    for (size_t j = 0; j < DB_ENTRIES; j++)
+        syntax_compile_keywords_free(&DB[j]);
+}
+
 int main(int argc, char *argv[])
 {
+    atexit(syntax_cleanup_atexit);
     editor_init();
     if (argc >= 2)
         file_open(argv[1]);
