@@ -671,6 +671,7 @@ typedef struct {
     char *render;
     unsigned char *highlight;
     bool hl_open_comment;
+    bool hl_valid;
 } editor_row_t;
 
 /* One entry in a keyword table.  len is a compile-time sizeof(literal)-1 so
@@ -780,6 +781,7 @@ struct {
         int replace_phase;       /* 0=search_input, 1=replace_input, 2=confirming each */
         int replace_count;       /* replacements made so far */
         int orig_row, orig_char; /* cursor pos when replace phase 2 began; used to stop after one cycle */
+        bool has_wrapped;        /* true once any search_do_from call in this session returned wrapped=true */
     } search;
     char notfound_msg[200];      /* transient "not found" overlay; cleared on next keypress */
 } ec = {
@@ -815,7 +817,8 @@ struct {
                 .replace_query = NULL, .replace_len = 0, .replace_cap = 0,
                 /* orig_row=-1 means "no active replace cycle"; orig_char is only
                  * meaningful when orig_row >= 0, so 0 is a fine default. */
-                .replace_phase = 0, .replace_count = 0, .orig_row = -1, .orig_char = 0 },
+                .replace_phase = 0, .replace_count = 0, .orig_row = -1, .orig_char = 0,
+                .has_wrapped = false },
     .notfound_msg = "",
 };
 
@@ -2488,10 +2491,11 @@ static void set_overlay_msg(const char *fmt, ...)
 
 /* Returns true if, after wrapping, the current cursor position has gone at or
  * past the original replace-start position (completing exactly one full cycle).
- * Only meaningful when 'wrapped' is true and orig_row >= 0. */
-static bool replace_past_origin(bool wrapped, bool backwards)
+ * Uses ec.search.has_wrapped rather than a per-call flag so wrap is
+ * remembered across multiple search_do_from calls in the same session. */
+static bool replace_past_origin(bool backwards)
 {
-    if (!wrapped || ec.search.orig_row < 0) return false;
+    if (!ec.search.has_wrapped || ec.search.orig_row < 0) return false;
     int or = ec.search.orig_row, oc = ec.search.orig_char;
     return backwards ? (ec.cursor_y < or || (ec.cursor_y == or && ec.cursor_x <= oc))
                      : (ec.cursor_y > or || (ec.cursor_y == or && ec.cursor_x >= oc));
@@ -2521,8 +2525,9 @@ static bool replace_and_advance(const char *rq, size_t rqlen)
     }
     bool wrapped = false;
     bool found = search_do_from(ec.search.query, ec.cursor_y, skip_off, false, &wrapped);
+    if (wrapped) ec.search.has_wrapped = true;
     if (!found) return false;
-    return !replace_past_origin(wrapped, backwards);
+    return !replace_past_origin(backwards);
 }
 
 /* Skip the current match without replacing and advance to the next occurrence. */
@@ -2533,8 +2538,9 @@ static bool replace_skip(void)
                              : g_last_match.char_off + 1;
     bool wrapped = false;
     bool found = search_do_from(ec.search.query, ec.cursor_y, skip_off, false, &wrapped);
+    if (wrapped) ec.search.has_wrapped = true;
     if (!found) return false;
-    return !replace_past_origin(wrapped, backwards);
+    return !replace_past_origin(backwards);
 }
 
 /* Finish a replace session: reset state, return to NORMAL, optionally show count.
@@ -2545,6 +2551,7 @@ static void replace_finish(bool always_show_msg)
     ec.search.replace_count = 0;
     ec.search.replace_phase = 0;
     ec.search.orig_row = -1;
+    ec.search.has_wrapped = false;
     ec.search.mode &= ~SM_REPLACE;
     mode_set(MODE_NORMAL);
     if (always_show_msg || cnt > 0)
@@ -3760,6 +3767,7 @@ static void editor_process_key(void)
                     /* Store original position so replace_and_advance stops after one cycle. */
                     ec.search.orig_row = sy;
                     ec.search.orig_char = sx;
+                    ec.search.has_wrapped = false;
                 }
                 editor_refresh();
                 return;
