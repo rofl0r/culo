@@ -2375,7 +2375,7 @@ static bool search_do_from(const char *query, int start_row, int start_char_off,
 
     size_t qlen = use_regex ? 0 : strlen(query);
     int dir = backwards ? -1 : 1;
-    /* Without wrap: scan only the rows reachable in the search direction
+    /* When no_wrap is true: scan only the rows reachable in the search direction
      * before hitting the file boundary. */
     int max_rows = no_wrap ? (backwards ? start_row + 1 : n - start_row) : n;
     bool found = false;
@@ -2479,6 +2479,9 @@ static bool replace_and_advance(const char *rq, size_t rqlen)
         skip_off = prev_off - 1; /* look strictly before the replaced position */
     } else {
         int advance = (int)rqlen > prev_len ? (int)rqlen : prev_len;
+        /* Guard against zero: rqlen==0 (empty replacement) and prev_len==0
+         * (zero-width regex match like ^) would leave skip_off==prev_off
+         * and cause an infinite loop. */
         if (advance <= 0) advance = 1;
         skip_off = prev_off + advance;
     }
