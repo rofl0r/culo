@@ -1514,11 +1514,14 @@ static void undo_record_replace(int row, int col, const char *old_text, size_t o
 {
     if (g_undo.replaying || g_undo.batching || !old_text || !new_text)
         return;
+    if (old_len > SIZE_MAX - new_len - 1)
+        return;
+    size_t total_len = old_len + new_len;
     undo_item_t item = {
         .type = EDIT_REPLACE,
         .row = row,
         .col = col,
-        .text = malloc(old_len + new_len + 1),
+        .text = malloc(total_len + 1),
         .len = old_len,
         .aux_len = new_len,
         .before_y = before_y,
@@ -1530,7 +1533,7 @@ static void undo_record_replace(int row, int col, const char *old_text, size_t o
         return;
     memcpy(item.text, old_text, old_len);
     memcpy(item.text + old_len, new_text, new_len);
-    item.text[old_len + new_len] = '\0';
+    item.text[total_len] = '\0';
     undo_stack_clear(g_undo.redo, &g_undo.redo_count);
     undo_stack_push(g_undo.undo, &g_undo.undo_count, item);
 }
@@ -2444,9 +2447,10 @@ static bool do_replace_one(const char *replacement, size_t repl_len)
     int off = g_last_match.char_off;
     int oldlen = g_last_match.char_len;
     int before_y = ec.cursor_y, before_x = ec.cursor_x;
-    char *old_text = xstrndup0(&row->chars[off], (size_t)oldlen);
+    char *old_text = NULL;
+    old_text = xstrndup0(&row->chars[off], (size_t)oldlen);
     if (!old_text)
-        return false;
+        goto out;
     size_t new_size = (size_t) row->size - (size_t) oldlen + repl_len;
     if (new_size > INT_MAX)
         goto out;
