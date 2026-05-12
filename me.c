@@ -2326,8 +2326,9 @@ static void ui_draw_messagebar(editor_buf_t *eb)
     if (ec.mode == MODE_SEARCH) {
         const char *hint;
         if (ec.search.replace_phase == 2) {
-            /* Confirm-each phase is handled by ui_dialog_ask(). */
-            hint = "Replace dialog active  (Arrows/Enter, ^C:Cancel)";
+            /* Confirm-each phase draws via ui_dialog_ask() status text. */
+            hint = ec.status_msg[0] ? ec.status_msg
+                                    : "Replace this instance?  [ Yes ]  [ No ]  [ All ]  ^C:Cancel";
         } else if (ec.search.replace_phase == 1) {
             /* Entering replacement text */
             hint = "Enter replacement text, then press Enter  ^C:Cancel";
