@@ -152,6 +152,7 @@ static inline const char *utf8_prev_char(const char *start, const char *s)
 
 /* Forward declaration needed early for debugging */
 static void ui_set_message(const char *msg, ...);
+static int ui_dialog_ask(const char *msg, char *const options[]);
 
 /* Validate UTF-8 byte sequence and return its length
  * Returns 0 if invalid, otherwise returns number of bytes (1-4)
@@ -2102,6 +2103,29 @@ static bool replace_skip(void)
     return !replace_past_origin(backwards);
 }
 
+static void replace_finish(bool always_show_msg);
+
+static void replace_confirm_step(void)
+{
+    const char *rq = ec.search.replace_query ? ec.search.replace_query : "";
+    size_t rqlen = ec.search.replace_len;
+    char *const options[] = {"Yes", "No", "All", NULL};
+    int r = ui_dialog_ask("Replace this instance?", options);
+    if (r == 0) {
+        if (!replace_and_advance(rq, rqlen))
+            replace_finish(true);
+    } else if (r == 1) {
+        if (!replace_skip())
+            replace_finish(false);
+    } else if (r == 2) {
+        while (replace_and_advance(rq, rqlen))
+            ;
+        replace_finish(true);
+    } else {
+        replace_finish(false);
+    }
+}
+
 /* Finish a replace session: reset state, return to NORMAL, optionally show count.
  * SM_REPLACE is cleared so the next ^W launches a plain search. */
 static void replace_finish(bool always_show_msg)
@@ -2302,8 +2326,8 @@ static void ui_draw_messagebar(editor_buf_t *eb)
     if (ec.mode == MODE_SEARCH) {
         const char *hint;
         if (ec.search.replace_phase == 2) {
-            /* Confirm-each phase: show interactive replace dialog */
-            hint = "Replace this instance?  \x1b[7m[ Yes ]\x1b[m  No  All  ^C:Cancel";
+            /* Confirm-each phase is handled by ui_dialog_ask(). */
+            hint = "Replace dialog active  (Arrows/Enter, ^C:Cancel)";
         } else if (ec.search.replace_phase == 1) {
             /* Entering replacement text */
             hint = "Enter replacement text, then press Enter  ^C:Cancel";
@@ -2522,21 +2546,26 @@ static void sig_cont_handler(int sig)
     editor_refresh();
 }
 
-/* Returns 1 = Yes, 0 = No, -1 = Cancel (ESC/^X) */
-static int ui_confirm(const char *msg)
+/* Ask a question with selectable options.
+ * Returns selected option index, or -1 on cancel (^C/^X/ESC). */
+static int ui_dialog_ask(const char *msg, char *const options[])
 {
-    int choice = 0; /* 0 = No (default), 1 = Yes */
+    int n = 0;
+    while (options[n]) n++;
+    if (n <= 0) return -1;
+    int choice = 0;
 
     while (1) {
-        /* Build the message with highlighted options */
-        char status_msg[256];
-        if (!choice) {
-            snprintf(status_msg, sizeof(status_msg),
-                     "%s  \x1b[7m[ No ]\x1b[m   Yes   (^C: cancel)", msg);
-        } else {
-            snprintf(status_msg, sizeof(status_msg),
-                     "%s   No   \x1b[7m[ Yes ]\x1b[m  (^C: cancel)", msg);
+        char status_msg[512];
+        int off = snprintf(status_msg, sizeof(status_msg), "%s  ", msg);
+        for (int i = 0; i < n && off > -1 && off < (int)sizeof(status_msg); i++) {
+            off += snprintf(status_msg + off, sizeof(status_msg) - (size_t)off,
+                            (i == choice) ? "\x1b[7m[ %s ]\x1b[m" : "%s", options[i]);
+            if (i + 1 < n)
+                off += snprintf(status_msg + off, sizeof(status_msg) - (size_t)off, "  ");
         }
+        if (off > -1 && off < (int)sizeof(status_msg))
+            snprintf(status_msg + off, sizeof(status_msg) - (size_t)off, "  ^C:Cancel");
 
         ui_set_message("%s", status_msg);
         editor_refresh();
@@ -2548,22 +2577,48 @@ static int ui_confirm(const char *msg)
             return choice;
         case CTRL_('c'): /* ^C - cancel */
         case CTRL_('x'):
+        case '\x1b':
             ui_set_message("");
             return -1; /* Cancel */
         case ARROW_LEFT:
-        case ARROW_RIGHT:
-            choice = 1 - choice; /* Toggle between Yes and No */
+        case ARROW_UP:
+            choice = (choice + n - 1) % n;
             break;
-        case 'y':
-        case 'Y':
-            ui_set_message("");
-            return 1; /* Immediate Yes */
-        case 'n':
-        case 'N':
-            ui_set_message("");
-            return 0; /* Immediate No */
+        case ARROW_RIGHT:
+        case ARROW_DOWN:
+            choice = (choice + 1) % n;
+            break;
+        case HOME_KEY:
+            choice = 0;
+            break;
+        case END_KEY:
+            choice = n - 1;
+            break;
+        default:
+            if (c >= 'A' && c <= 'Z')
+                c = c - 'A' + 'a';
+            for (int i = 0; i < n; i++) {
+                int ch = options[i][0];
+                if (ch >= 'A' && ch <= 'Z')
+                    ch = ch - 'A' + 'a';
+                if (c == ch) {
+                    ui_set_message("");
+                    return i;
+                }
+            }
+            break;
         }
     }
+}
+
+/* Returns 1 = Yes, 0 = No, -1 = Cancel (ESC/^X) */
+static int ui_confirm(const char *msg)
+{
+    char *const options[] = {"No", "Yes", NULL};
+    int r = ui_dialog_ask(msg, options);
+    if (r < 0)
+        return -1;
+    return r ? 1 : 0;
 }
 
 static char *ui_prompt(const char *msg, void (*callback)(char *, int))
@@ -2928,18 +2983,19 @@ static void browser_render(void)
 {
     editor_buf_t eb = {NULL, 0};
 
-    /* Clear entire screen */
+    /* Redraw from top-left; avoid full-screen clear to prevent visible flicker. */
     buf_append(&eb, "\x1b[?25l", 6); /* Hide cursor */
-    buf_append(&eb, "\x1b[2J", 4);   /* Clear entire screen */
     buf_append(&eb, "\x1b[H", 3);    /* Move cursor home */
 
     /* Title bar */
     char title[256];
-    snprintf(title, sizeof(title), "=== File Browser: %s ===\r\n",
+    snprintf(title, sizeof(title), "=== File Browser: %s ===",
              ec.mode_state.browser.current_dir);
     buf_append(&eb, "\x1b[7m", 4); /* Inverse video */
     buf_append(&eb, title, strlen(title));
+    buf_append(&eb, "\x1b[K", 3);   /* Clear rest of title line */
     buf_append(&eb, "\x1b[0m", 4); /* Reset */
+    buf_append(&eb, "\r\n", 2);
 
     /* Calculate visible entries */
     int visible_lines = ec.screen_rows - 1; /* Subtract title line */
@@ -3080,6 +3136,11 @@ static void editor_process_key(void)
     static int indent_level = 0;
     /* Clear the transient overlay message from the previous keypress */
     ec.notfound_msg[0] = '\0';
+    if (ec.mode == MODE_SEARCH && ec.search.replace_phase == 2) {
+        replace_confirm_step();
+        editor_refresh();
+        return;
+    }
     /* Save and clear the consecutive-cut flag before reading the new key.
      * editor_cut() will check this to decide whether to append or replace. */
     bool consecutive_cut = ec.last_was_cut;
@@ -3261,30 +3322,6 @@ static void editor_process_key(void)
     }
 
     case MODE_SEARCH: {
-        /* Phase 2: confirming each replacement */
-        if (ec.search.replace_phase == 2) {
-            const char *rq = ec.search.replace_query ? ec.search.replace_query : "";
-            size_t rqlen = ec.search.replace_len;
-            if (c == 'y' || c == 'Y' || c == '\r') {
-                /* Replace this instance and find the next (one full cycle). */
-                if (!replace_and_advance(rq, rqlen))
-                    replace_finish(true);
-            } else if (c == 'n' || c == 'N') {
-                /* Skip this instance and find the next (one full cycle). */
-                if (!replace_skip())
-                    replace_finish(false);
-            } else if (c == 'a' || c == 'A') {
-                /* Replace all remaining — same loop as 'y', just no dialog pause. */
-                while (replace_and_advance(rq, rqlen))
-                    ;
-                replace_finish(true);
-            } else if (c == CTRL_('c') || c == CTRL_('x') || c == CTRL_('w')) {
-                replace_finish(false);
-            }
-            editor_refresh();
-            return;
-        }
-
         /* Phase 1: entering replacement text */
         if (ec.search.replace_phase == 1) {
             if (c == '\r') {
