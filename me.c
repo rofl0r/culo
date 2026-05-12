@@ -224,222 +224,279 @@ static int utf8_to_codepoint(const char *s, size_t max_len)
     return -1;
 }
 
-/* tlist, aka treap list. (C) 2024 rofl0r. */
-typedef struct tlist_node {
-    struct tlist_node *left;
-    struct tlist_node *right;
-    size_t size;
-    uint32_t priority;
-    unsigned char item[];
-} tlist_node;
+/* tlist, aka treap list. (C) 2024 rofl0r.
 
-typedef struct tlist {
-    tlist_node *root;
-    unsigned item_size;
-} tlist;
+   the core's algorithm is based on the "implicit treap" described on
+   e-maxx.ru.
 
-static inline size_t tlist_node_size(const tlist_node *n)
+   tlist behaves like a dynamic array, but unlike a real array supports
+   insertion and deletion with O(log N) performance characteristics.
+
+   indexing is also O(log N), so if you don't need fast insertion and
+   deletion, only appending, picking a traditional dynamic array will be
+   faster for your usecase.
+
+   on a fast machine with plenty of cache, a traditional dynamic array
+   will also be faster if you need to insert or remove some items, and
+   the array is reasonably small (up to about 2k entries).
+   though even there the tlist is quite competitive.
+   for anything else, the tlist outperforms the traditional array by far.
+
+   its most appealing characteristic, aside from the above, is that it
+   can be implemented in less than 100 lines.
+   it comes at a cost though.
+   the memory consumption per node is 24 bytes on 64bit machines, and 16
+   on 32 bit. plus the size of the item being stored in it.
+
+   the list is initialized with the fixed size of a single item that
+   needs to be stored - it could be a single integer, a struct,
+   or a pointer.
+
+   on insertion, you pass a pointer to a single item, the object being
+   pointed to is then copied into the node.
+
+   for non-fixed size data items such as strings, you'd use the size
+   of a pointer for tlist_new(). then you need to allocate the strings
+   yourself and insert a pointer to the string - i.e. a char**.
+   the list can free the pointed to content automatically if you use
+   the _deep suffixed functions.
+
+   the list can hold a maximum of UINT_MAX items.
+
+   note that unlike in my dynamic array implementation "sblist", functions
+   taking an index receive it as second, not third argument.
+   it seems more natural to first pass the list, then the index, then the
+   value, as the index refers to the list.
+   apart from that, the api is almost identical, which allows for a quick
+   swap-out.
+*/
+
+struct tlist;
+typedef struct tlist tlist;
+
+/* allocates a new list prepared to store nodes of itemsize size.
+   may return NULL on resource exhaustion. */
+struct tlist *tlist_new(unsigned itemsize);
+
+/* return the number of items/nodes in the list. */
+size_t tlist_getsize(struct tlist* t);
+
+/* get the pointer to the data of idx'th item in the list.
+   may return NULL if the idx is equal or greater than list size,
+   you have to cast the return value to a pointer to the type
+   that you inserted. */
+void *tlist_get(struct tlist* t, size_t idx);
+
+/* insert value at position idx */
+/* returns 1 on success, 0 otherwise (i.e. not enough ram) */
+int tlist_insert(struct tlist* t, size_t idx, void* val);
+
+/* append value to the end of the list */
+int tlist_append(struct tlist* t, void *val);
+
+/* delete item as position idx */
+/* returns 1 on success, 0 otherwise (invalid index) */
+int tlist_delete(struct tlist *t, size_t idx);
+/* same as tlist_delete, but frees the stored pointer too - only use
+   if you initialized the list with sizeof(pointer) */
+int tlist_delete_deep(struct tlist *t, size_t idx);
+
+/* remove and free all items in list, but not the list itself. */
+void tlist_free_items(struct tlist *t);
+void tlist_free_items_deep(struct tlist *t);
+
+/* free the list and all items in it - returns NULL so you can do
+   mylist = tlist_free(mylist) instead of requiring 2 statements to
+   have your list freed and nulled. */
+void* tlist_free(struct tlist *t);
+void* tlist_free_deep(struct tlist *t);
+
+/* this is just a debug function that prints the node balance of
+   the tree. it's not built-in by default because it prints stuff
+   to stdout. */
+float tlist_getbalance(struct tlist *t);
+
+
+#ifndef UINT_MAX
+#define UINT_MAX 0xffffffffU
+#endif
+
+static int mrand(unsigned *seed)
 {
-    return n ? n->size : 0;
+       return ((*seed = (*seed+1) * 1103515245 + 12345 - 1)+1) & 0x7fffffff;
 }
 
-static inline void tlist_node_update(tlist_node *n)
-{
-    if (n)
-        n->size = 1 + tlist_node_size(n->left) + tlist_node_size(n->right);
+typedef struct item* pitem;
+struct item {
+	unsigned prior, cnt;
+	pitem l, r;
+};
+
+static unsigned cnt (pitem it) {
+	return it ? it->cnt : 0;
 }
 
-static tlist_node *tlist_node_new(unsigned item_size, const void *item)
-{
-    tlist_node *n = malloc(sizeof(*n) + item_size);
-    if (!n)
-        return NULL;
-    n->left = n->right = NULL;
-    n->size = 1;
-    n->priority = ((uint32_t)rand() << 16) ^ (uint32_t)rand();
-    if (item)
-        memcpy(n->item, item, item_size);
-    else
-        memset(n->item, 0, item_size);
-    return n;
+static void upd_cnt (pitem it) {
+	if (it)
+		it->cnt = cnt(it->l) + cnt(it->r) + 1;
 }
 
-static void tlist_split(tlist_node *root,
-                        size_t left_size,
-                        tlist_node **out_left,
-                        tlist_node **out_right)
-{
-    if (!root) {
-        *out_left = NULL;
-        *out_right = NULL;
-        return;
-    }
-
-    size_t lsz = tlist_node_size(root->left);
-    if (left_size <= lsz) {
-        tlist_split(root->left, left_size, out_left, &root->left);
-        tlist_node_update(root);
-        *out_right = root;
-    } else {
-        tlist_split(root->right, left_size - lsz - 1, &root->right, out_right);
-        tlist_node_update(root);
-        *out_left = root;
-    }
+static void merge (pitem *t, pitem l, pitem r) {
+	if (!l || !r)
+		*t = l ? l : r;
+	else if (l->prior > r->prior)
+		merge (&l->r, l->r, r),  *t = l;
+	else
+		merge (&r->l, l, r->l),  *t = r;
+	upd_cnt (*t);
 }
 
-static tlist_node *tlist_merge(tlist_node *left, tlist_node *right)
-{
-    if (!left)
-        return right;
-    if (!right)
-        return left;
-
-    if (left->priority > right->priority) {
-        left->right = tlist_merge(left->right, right);
-        tlist_node_update(left);
-        return left;
-    }
-
-    right->left = tlist_merge(left, right->left);
-    tlist_node_update(right);
-    return right;
+static void split (pitem t, pitem *l, pitem *r, unsigned key, unsigned add) {
+	if (!t) {
+		*l = *r = 0;
+		return;
+	}
+	unsigned cur_key = add + cnt(t->l);
+	if (key <= cur_key)
+		split (t->l, l, &t->l, key, add),  *r = t;
+	else
+		split (t->r, &t->r, r, key, add + 1 + cnt(t->l)),  *l = t;
+	upd_cnt (t);
 }
 
-static tlist_node *tlist_get_node(tlist_node *root, size_t idx)
-{
-    while (root) {
-        size_t lsz = tlist_node_size(root->left);
-        if (idx < lsz) {
-            root = root->left;
-        } else if (idx == lsz) {
-            return root;
-        } else {
-            idx -= lsz + 1;
-            root = root->right;
-        }
-    }
-    return NULL;
+static pitem getitem(pitem t, unsigned idx, unsigned add) {
+	if (!t) return t;
+	unsigned ls = cnt (t->l), cur_key = add + ls;
+	if (cur_key == idx) return t;
+	if (cur_key < idx)
+		return getitem (t->r, idx, add + 1 + ls);
+	else
+		return getitem (t->l, idx, add);
 }
 
-static void tlist_node_free(tlist_node *root)
-{
-    if (!root)
-        return;
-    tlist_node_free(root->left);
-    tlist_node_free(root->right);
-    free(root);
+static void insert(pitem *t, pitem n, unsigned idx) {
+	pitem t1, t2;
+	split (*t, &t1, &t2, idx, 0);
+	merge (t, t1, n);
+	merge (t, *t, t2);
 }
 
-static tlist *tlist_new(unsigned item_size)
-{
-    tlist *l = malloc(sizeof(*l));
-    if (!l)
-        return NULL;
-    l->root = NULL;
-    l->item_size = item_size;
-    return l;
+static void tremove(pitem *t, unsigned idx, unsigned add) {
+	pitem n;
+	if (!(*t)) return;
+	unsigned cur_key = add + cnt ((*t)->l), new_add = cur_key + 1;
+	unsigned rk, lk = rk = UINT_MAX;
+	if ((*t)->l) lk = cnt ((*t)->l->l) + add;
+	if ((*t)->r) rk = cnt ((*t)->r->l) + new_add;
+	if (cur_key == idx) {
+		merge (t, (*t)->l, (*t)->r);
+	} else if (lk == idx) {
+		merge (&n, (*t)->l->l, (*t)->l->r);
+		(*t)->l = n;
+		upd_cnt (*t);
+	} else if (rk == idx) {
+		merge (&n, (*t)->r->l, (*t)->r->r);
+		(*t)->r = n;
+		upd_cnt (*t);
+	} else if (cur_key < idx) {
+		tremove (&(*t)->r, idx, new_add);
+		upd_cnt (*t);
+	} else {
+		tremove (&(*t)->l, idx, add);
+		upd_cnt (*t);
+	}
 }
 
-static size_t tlist_getsize(tlist *l)
-{
-    return l ? tlist_node_size(l->root) : 0;
+static pitem new_item(void* value, unsigned valsz, unsigned *seed) {
+	pitem n = malloc(sizeof(struct item) + valsz);
+	if(!n) return n;
+	memcpy(n+1, value, valsz);
+	n->prior = mrand(seed);
+	n->cnt = 1;
+	n->l = n->r = 0;
+	return n;
 }
 
-static void *tlist_get(tlist *l, size_t idx)
-{
-    if (!l || idx >= tlist_getsize(l))
-        return NULL;
-    tlist_node *n = tlist_get_node(l->root, idx);
-    return n ? n->item : NULL;
+struct tlist {
+	unsigned seed;
+	unsigned itemsize;
+	pitem root;
+};
+
+struct tlist *tlist_new(unsigned itemsize) {
+	struct tlist* new = malloc(sizeof (struct tlist));
+	if(!new) return 0;
+	new->seed = 385-1;
+	new->itemsize = itemsize;
+	new->root = 0;
+	return new;
 }
 
-static int tlist_insert(tlist *l, size_t idx, void *item)
-{
-    if (!l || idx > tlist_getsize(l))
-        return 0;
-
-    tlist_node *n = tlist_node_new(l->item_size, item);
-    if (!n)
-        return 0;
-
-    tlist_node *a, *b;
-    tlist_split(l->root, idx, &a, &b);
-    l->root = tlist_merge(tlist_merge(a, n), b);
-    return 1;
+static void* data(pitem it) {
+	return it+1;
 }
 
-int tlist_append(tlist *l, void *item)
-{
-    return tlist_insert(l, tlist_getsize(l), item);
+size_t tlist_getsize(struct tlist* t) {
+	return cnt(t->root);
 }
 
-static int tlist_delete(tlist *l, size_t idx)
-{
-    if (!l || idx >= tlist_getsize(l))
-        return 0;
-
-    tlist_node *a, *b, *mid, *c;
-    tlist_split(l->root, idx, &a, &b);
-    tlist_split(b, 1, &mid, &c);
-    if (mid)
-        free(mid);
-    l->root = tlist_merge(a, c);
-    return 1;
+void* tlist_get(struct tlist* t, size_t idx) {
+	return data(getitem(t->root, idx, 0));
 }
 
-int tlist_delete_deep(tlist *l, size_t idx)
-{
-    void *item = tlist_get(l, idx);
-    if (!item)
-        return 0;
-    void *p = *(void **)item;
-    free(p);
-    return tlist_delete(l, idx);
+int tlist_insert(struct tlist* t, size_t idx, void *value) {
+	if(idx > cnt (t->root)) return 0;
+	pitem new = new_item(value, t->itemsize, &t->seed);
+	if(!new) return 0;
+	insert(&t->root, new, idx);
+	return 1;
 }
 
-static void tlist_free_items(tlist *l)
-{
-    if (!l)
-        return;
-    tlist_node_free(l->root);
-    l->root = NULL;
+int tlist_append(struct tlist* t, void *value) {
+	return tlist_insert(t, cnt(t->root), value);
 }
 
-static void tlist_free_items_deep(tlist *l)
-{
-    if (!l)
-        return;
-    size_t n = tlist_getsize(l);
-    for (size_t i = 0; i < n; i++) {
-        void *item = tlist_get(l, i);
-        if (item)
-            free(*(void **)item);
-    }
-    tlist_free_items(l);
+static int tlist_delete_impl(struct tlist *t, size_t idx, int deep) {
+	if(idx >= cnt (t->root)) return 0;
+	pitem it = getitem(t->root, idx, 0);
+	if(deep) free(data(it));
+	tremove(&t->root, idx, 0);
+	free(it);
+	return 1;
 }
 
-static void *tlist_free(tlist *l)
-{
-    if (!l)
-        return NULL;
-    tlist_free_items(l);
-    free(l);
-    return NULL;
+int tlist_delete(struct tlist *t, size_t idx) {
+	return tlist_delete_impl(t, idx, 0);
 }
 
-void *tlist_free_deep(tlist *l)
-{
-    if (!l)
-        return NULL;
-    tlist_free_items_deep(l);
-    free(l);
-    return NULL;
+int tlist_delete_deep(struct tlist *t, size_t idx) {
+	return tlist_delete_impl(t, idx, 1);
 }
 
-float tlist_getbalance(tlist *l)
-{
-    (void)l;
-    return 0.0f;
+static void tlist_free_items_impl(struct tlist *t, int deep) {
+	while(cnt(t->root)) tlist_delete_impl(t, 0, deep);
+}
+
+void tlist_free_items(struct tlist *t) {
+	tlist_free_items_impl(t, 0);
+}
+
+void tlist_free_items_deep(struct tlist *t) {
+	tlist_free_items_impl(t, 1);
+}
+
+static void* tlist_free_impl(struct tlist *t, int deep) {
+	tlist_free_items_impl(t, deep);
+	free(t);
+	return 0;
+}
+
+void *tlist_free(struct tlist *t) {
+	return tlist_free_impl(t, 0);
+}
+
+void *tlist_free_deep(struct tlist *t) {
+	return tlist_free_impl(t, 1);
 }
 
 typedef struct {
