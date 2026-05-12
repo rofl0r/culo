@@ -1343,7 +1343,9 @@ static void undo_history_append(undo_item_t item)
         int idx = g_undo.start;
         undo_item_free(&g_undo.history[idx]);
         memset(&g_undo.history[idx], 0, sizeof(g_undo.history[idx]));
-        g_undo.start = (g_undo.start + 1) % UNDO_STACK_CAP;
+        g_undo.start++;
+        if (g_undo.start >= UNDO_STACK_CAP)
+            g_undo.start = 0;
         g_undo.count--;
         if (g_undo.cursor > 0)
             g_undo.cursor--;
@@ -1605,7 +1607,7 @@ static void undo_perform_undo(void)
         ui_set_message("Nothing to undo");
         return;
     }
-    /* cursor points to the first not-yet-applied entry; step back to the
+    /* cursor points to the next unapplied entry; step back to the
      * entry we are about to unapply and run its inverse. */
     g_undo.cursor--;
     undo_item_t *item = &g_undo.history[undo_history_index(g_undo.cursor)];
