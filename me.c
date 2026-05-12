@@ -1240,12 +1240,12 @@ static int row_renderx_to_cursorx(editor_row_t *row, int render_x)
 
     while (byte_pos < row->size) {
         int next_render_x = cur_render_x;
+        int char_len = 1;
 
         if (row->chars[byte_pos] == '\t') {
             next_render_x += (TAB_STOP - 1) - (cur_render_x % TAB_STOP);
             next_render_x++;
         } else {
-            int char_len = 1;
             next_render_x += utf8_char_width_and_len(&row->chars[byte_pos],
                                                      (size_t) (row->size - byte_pos),
                                                      &char_len);
@@ -1259,9 +1259,6 @@ static int row_renderx_to_cursorx(editor_row_t *row, int render_x)
         if (row->chars[byte_pos] == '\t') {
             byte_pos++;
         } else {
-            int char_len = 1;
-            utf8_char_width_and_len(&row->chars[byte_pos],
-                                    (size_t) (row->size - byte_pos), &char_len);
             byte_pos += char_len;
         }
     }
