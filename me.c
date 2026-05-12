@@ -1,5 +1,5 @@
 /* Mazu Editor:
- * A minimalist editor with syntax highlight, copy/paste, undo, and search.
+ * A minimalist editor with syntax highlight, copy/paste, and search.
  */
 
 #if defined(__APPLE__) && !defined(_DARWIN_C_SOURCE)
@@ -224,447 +224,181 @@ static int utf8_to_codepoint(const char *s, size_t max_len)
     return -1;
 }
 
-/* A gap buffer maintains a gap (empty space) at the cursor position,
- * making insertions and deletions at that position O(1) operations.
- * Memory layout: [text before gap][    GAP    ][text after gap]
- */
-typedef struct {
-    char *buffer;  /* Start of buffer */
-    char *gap;     /* Start of gap */
-    char *egap;    /* End of gap */
-    char *ebuffer; /* End of buffer */
-    size_t size;   /* Total allocated size */
-    bool modified; /* Modified flag */
-} gap_buffer_t;
+/* Treap-list (tlist): indexed sequence with O(log N) insert/delete/get. */
+typedef struct tlist_node {
+    struct tlist_node *left;
+    struct tlist_node *right;
+    size_t size;
+    uint32_t priority;
+    unsigned char item[];
+} tlist_node;
 
-#define GAP_INITIAL_SIZE 65536 /* 64 KiB initial buffer */
-#define GAP_GROW_SIZE 4096     /* 4 KiB growth increment */
+typedef struct tlist {
+    tlist_node *root;
+    size_t item_size;
+} tlist;
 
-/* Initialize a gap buffer with given size */
-static gap_buffer_t *gap_init(size_t initial_size)
+static inline size_t tlist_node_size(const tlist_node *n)
 {
-    gap_buffer_t *gb = malloc(sizeof(gap_buffer_t));
-    if (!gb)
+    return n ? n->size : 0;
+}
+
+static inline void tlist_node_update(tlist_node *n)
+{
+    if (n)
+        n->size = 1 + tlist_node_size(n->left) + tlist_node_size(n->right);
+}
+
+static tlist_node *tlist_node_new(size_t item_size, const void *item)
+{
+    tlist_node *n = malloc(sizeof(*n) + item_size);
+    if (!n)
         return NULL;
-
-    if (!(gb->buffer = malloc(initial_size))) {
-        free(gb);
-        return NULL;
-    }
-
-    gb->size = initial_size;
-    gb->gap = gb->buffer;
-    gb->egap = gb->ebuffer = gb->buffer + initial_size;
-    gb->modified = false;
-    return gb;
-}
-
-/* Destroy gap buffer and free memory */
-static void gap_destroy(gap_buffer_t *gb)
-{
-    if (gb) {
-        free(gb->buffer);
-        free(gb);
-    }
-}
-
-/* Get total text length (excluding gap) */
-static inline size_t gap_length(const gap_buffer_t *gb)
-{
-    return (gb->gap - gb->buffer) + (gb->ebuffer - gb->egap);
-}
-
-/* Convert file position to buffer pointer */
-static char *gap_ptr(gap_buffer_t *gb, size_t pos)
-{
-    size_t front_size = gb->gap - gb->buffer;
-
-    if (pos < front_size)
-        return gb->buffer + pos;
-    return gb->egap + (pos - front_size);
-}
-
-/* Move gap to position */
-static void gap_move(gap_buffer_t *gb, size_t pos)
-{
-    char *dest = gap_ptr(gb, pos);
-
-    if (dest < gb->gap) {
-        /* Move gap backward - shift text forward */
-        size_t len = gb->gap - dest;
-        gb->egap -= len;
-        gb->gap -= len;
-        memmove(gb->egap, gb->gap, len);
-    } else if (dest > gb->egap) {
-        /* Move gap forward - shift text backward */
-        size_t len = dest - gb->egap;
-        memmove(gb->gap, gb->egap, len);
-        gb->gap += len;
-        gb->egap += len;
-    }
-}
-
-/* Grow the gap to ensure minimum size */
-static bool gap_grow(gap_buffer_t *gb, size_t min_gap)
-{
-    size_t gap_size = gb->egap - gb->gap;
-
-    if (gap_size >= min_gap)
-        return true; /* Already large enough */
-
-    /* Calculate new size */
-    size_t text_size = gap_length(gb);
-    size_t new_size = text_size + min_gap + GAP_GROW_SIZE;
-
-    /* Save current gap position */
-    size_t gap_pos = gb->gap - gb->buffer;
-    size_t after_gap_size = gb->ebuffer - gb->egap;
-
-    /* Reallocate buffer */
-    char *new_buffer = realloc(gb->buffer, new_size);
-    if (!new_buffer)
-        return false; /* Allocation failed */
-
-    /* Update pointers */
-    gb->buffer = new_buffer;
-    gb->gap = new_buffer + gap_pos;
-    gb->ebuffer = new_buffer + new_size;
-    gb->egap = gb->ebuffer - after_gap_size;
-
-    /* Move text after gap to end of new buffer */
-    if (after_gap_size > 0)
-        memmove(gb->egap, gb->gap + gap_size, after_gap_size);
-
-    gb->size = new_size;
-    return true;
-}
-
-/* Insert text at position */
-static bool gap_insert(gap_buffer_t *gb,
-                       size_t pos,
-                       const char *text,
-                       size_t len)
-{
-    /* Move gap to insertion point */
-    gap_move(gb, pos);
-
-    /* Ensure gap is large enough */
-    if (!gap_grow(gb, len))
-        return false; /* Failed to grow */
-
-    /* Copy text into gap */
-    memcpy(gb->gap, text, len);
-    gb->gap += len;
-    gb->modified = true;
-
-    return true;
-}
-
-/* Delete text from position */
-static void gap_delete(gap_buffer_t *gb, size_t pos, size_t len)
-{
-    /* Move gap to deletion point */
-    gap_move(gb, pos);
-
-    /* Extend gap to cover deleted text */
-    size_t available = gb->ebuffer - gb->egap;
-    if (len > available)
-        len = available; /* Can't delete more than exists */
-
-    gb->egap += len;
-    gb->modified = true;
-}
-
-/* Get character at position */
-static int gap_get_char(gap_buffer_t *gb, size_t pos)
-{
-    return pos >= gap_length(gb) ? -1 : (unsigned char) *gap_ptr(gb, pos);
-}
-
-/* Load file into gap buffer */
-static bool gap_load_file(gap_buffer_t *gb, FILE *fp)
-{
-    /* Clear existing content */
-    gb->gap = gb->buffer;
-    gb->egap = gb->ebuffer;
-
-    char buf[4096];
-    size_t nread;
-
-    while ((nread = fread(buf, 1, sizeof(buf), fp)) > 0) {
-        if (!gap_insert(gb, gap_length(gb), buf, nread))
-            return false; /* Insert failed */
-    }
-
-    gb->modified = false; /* Just loaded, not modified */
-    return true;
-}
-
-/* Undo/Redo Implementation */
-
-typedef enum { UNDO_INSERT, UNDO_DELETE, UNDO_REPLACE } undo_type_t;
-
-typedef struct undo_node {
-    undo_type_t type;
-    size_t pos; /* Position where change occurred */
-    size_t len; /* Length of text */
-    char *text; /* Text that was inserted/deleted */
-    struct undo_node *next, *prev;
-} undo_node_t;
-
-typedef struct {
-    undo_node_t *current;     /* Current position in undo history */
-    undo_node_t *head, *tail; /* First/Last undo node */
-    int max_undos;            /* Maximum number of undo levels */
-    int count;                /* Current number of undo nodes */
-} undo_stack_t;
-
-#define MAX_UNDO_LEVELS 100
-
-/* Initialize undo stack */
-static undo_stack_t *undo_init(int max_levels)
-{
-    undo_stack_t *stack = malloc(sizeof(undo_stack_t));
-    if (!stack)
-        return NULL;
-
-    stack->head = stack->tail = NULL;
-    stack->current = NULL;
-    stack->max_undos = max_levels;
-    stack->count = 0;
-
-    return stack;
-}
-
-/* Destroy undo stack and free all memory */
-static void undo_destroy(undo_stack_t *stack)
-{
-    if (!stack)
-        return;
-
-    /* Free all undo nodes */
-    undo_node_t *node = stack->head;
-    while (node) {
-        undo_node_t *next = node->next;
-        free(node->text);
-        free(node);
-        node = next;
-    }
-
-    free(stack);
-}
-
-/* Free a single undo node */
-static void undo_free_node(undo_node_t *node)
-{
-    if (node) {
-        free(node->text);
-        free(node);
-    }
-}
-
-/* Clear redo history (called when new edit is made) */
-static void undo_clear_redo(undo_stack_t *stack)
-{
-    if (!stack || !stack->current)
-        return;
-
-    /* Remove all nodes after current */
-    undo_node_t *node = stack->current->next;
-    while (node) {
-        undo_node_t *next = node->next;
-        undo_free_node(node);
-        stack->count--;
-        node = next;
-    }
-
-    /* Update tail */
-    if ((stack->tail = stack->current))
-        stack->tail->next = NULL;
-}
-
-/* Add a new undo operation */
-static void undo_push(undo_stack_t *stack,
-                      undo_type_t type,
-                      size_t pos,
-                      const char *text,
-                      size_t len)
-{
-    if (!stack || !text || len == 0)
-        return;
-
-    /* Clear any redo history */
-    undo_clear_redo(stack);
-
-    /* Create new node */
-    undo_node_t *node = malloc(sizeof(undo_node_t));
-    if (!node)
-        return;
-
-    node->type = type;
-    node->pos = pos;
-    node->len = len;
-    node->text = malloc(len + 1);
-    if (!node->text) {
-        free(node);
-        return;
-    }
-    memcpy(node->text, text, len);
-    node->text[len] = '\0';
-
-    /* Link node into list */
-    node->prev = stack->current;
-    node->next = NULL;
-
-    if (stack->current)
-        stack->current->next = node;
+    n->left = n->right = NULL;
+    n->size = 1;
+    n->priority = ((uint32_t)rand() << 16) ^ (uint32_t)rand();
+    if (item)
+        memcpy(n->item, item, item_size);
     else
-        stack->head = node;
+        memset(n->item, 0, item_size);
+    return n;
+}
 
-    stack->tail = stack->current = node;
-    stack->count++;
+static void tlist_split(tlist_node *root,
+                        size_t left_size,
+                        tlist_node **out_left,
+                        tlist_node **out_right)
+{
+    if (!root) {
+        *out_left = NULL;
+        *out_right = NULL;
+        return;
+    }
 
-    /* Remove oldest if we exceed max */
-    while (stack->count > stack->max_undos && stack->head) {
-        undo_node_t *old = stack->head;
-        stack->head = old->next;
-        if (stack->head)
-            stack->head->prev = NULL;
-        undo_free_node(old);
-        stack->count--;
+    size_t lsz = tlist_node_size(root->left);
+    if (left_size <= lsz) {
+        tlist_split(root->left, left_size, out_left, &root->left);
+        tlist_node_update(root);
+        *out_right = root;
+    } else {
+        tlist_split(root->right, left_size - lsz - 1, &root->right, out_right);
+        tlist_node_update(root);
+        *out_left = root;
     }
 }
 
-/* Forward declarations - will be defined later */
-static void gap_sync_to_rows(gap_buffer_t *gb);
-
-/* Perform undo operation */
-static bool undo_perform(gap_buffer_t *gb, undo_stack_t *stack)
+static tlist_node *tlist_merge(tlist_node *left, tlist_node *right)
 {
-    if (!gb || !stack || !stack->current)
-        return false; /* Nothing to undo */
+    if (!left)
+        return right;
+    if (!right)
+        return left;
 
-    undo_node_t *node = stack->current;
-
-    /* Reverse the operation WITHOUT adding to undo stack again */
-    switch (node->type) {
-    case UNDO_INSERT:
-        /* Was an insert, so delete it */
-        gap_delete(gb, node->pos, node->len);
-        break;
-
-    case UNDO_DELETE:
-        /* Was a delete, so insert it back */
-        gap_insert(gb, node->pos, node->text, node->len);
-        break;
-
-    case UNDO_REPLACE:
-        /* For replace, we need the old text (stored in next node) */
-        /* For now, treat as delete + insert */
-        gap_delete(gb, node->pos, node->len);
-        if (node->prev && node->prev->type == UNDO_DELETE)
-            gap_insert(gb, node->pos, node->prev->text, node->prev->len);
-        break;
+    if (left->priority > right->priority) {
+        left->right = tlist_merge(left->right, right);
+        tlist_node_update(left);
+        return left;
     }
 
-    /* Move current pointer back */
-    stack->current = node->prev;
-
-    /* Sync gap buffer back to rows for display */
-    gap_sync_to_rows(gb);
-
-    /* Mark as modified if we have undo history */
-    gb->modified = (stack->current != NULL);
-
-    return true;
+    right->left = tlist_merge(left, right->left);
+    tlist_node_update(right);
+    return right;
 }
 
-/* Perform redo operation */
-static bool undo_redo(gap_buffer_t *gb, undo_stack_t *stack)
+static tlist_node *tlist_get_node(tlist_node *root, size_t idx)
 {
-    if (!gb || !stack)
-        return false;
-
-    /* Find the node to redo */
-    undo_node_t *node = stack->current ? stack->current->next : stack->head;
-
-    if (!node)
-        return false; /* Nothing to redo */
-
-    /* Re-apply the operation */
-    switch (node->type) {
-    case UNDO_INSERT:
-        /* Re-insert the text */
-        gap_insert(gb, node->pos, node->text, node->len);
-        break;
-
-    case UNDO_DELETE:
-        /* Re-delete the text */
-        gap_delete(gb, node->pos, node->len);
-        break;
-
-    case UNDO_REPLACE:
-        /* Re-replace the text */
-        gap_delete(gb, node->pos, node->len);
-        gap_insert(gb, node->pos, node->text, node->len);
-        break;
-    }
-
-    /* Move current pointer forward */
-    stack->current = node;
-
-    /* Sync gap buffer back to rows for display */
-    gap_sync_to_rows(gb);
-
-    return true;
-}
-
-/* Track insertion for undo (wrapper for gap_insert) */
-static bool gap_insert_with_undo(gap_buffer_t *gb,
-                                 undo_stack_t *undo,
-                                 size_t pos,
-                                 const char *text,
-                                 size_t len)
-{
-    if (!gap_insert(gb, pos, text, len))
-        return false;
-
-    if (undo)
-        undo_push(undo, UNDO_INSERT, pos, text, len);
-
-    return true;
-}
-
-/* Track deletion for undo (wrapper for gap_delete) */
-static void gap_delete_with_undo(gap_buffer_t *gb,
-                                 undo_stack_t *undo,
-                                 size_t pos,
-                                 size_t len)
-{
-    if (undo && len > 0 && pos < gap_length(gb)) {
-        /* Save the text being deleted */
-        char *text = malloc(len + 1);
-        if (text) {
-            size_t i;
-            for (i = 0; i < len && pos + i < gap_length(gb); i++) {
-                int ch = gap_get_char(gb, pos + i);
-                if (ch == -1)
-                    break;
-                text[i] = ch;
-            }
-            text[i] = '\0';
-
-            if (i > 0)
-                undo_push(undo, UNDO_DELETE, pos, text, i);
-            free(text);
+    while (root) {
+        size_t lsz = tlist_node_size(root->left);
+        if (idx < lsz) {
+            root = root->left;
+        } else if (idx == lsz) {
+            return root;
+        } else {
+            idx -= lsz + 1;
+            root = root->right;
         }
     }
+    return NULL;
+}
 
-    gap_delete(gb, pos, len);
+static void tlist_node_free(tlist_node *root)
+{
+    if (!root)
+        return;
+    tlist_node_free(root->left);
+    tlist_node_free(root->right);
+    free(root);
+}
+
+static tlist *tlist_new(size_t item_size)
+{
+    tlist *l = malloc(sizeof(*l));
+    if (!l)
+        return NULL;
+    l->root = NULL;
+    l->item_size = item_size;
+    return l;
+}
+
+static size_t tlist_getsize(const tlist *l)
+{
+    return l ? tlist_node_size(l->root) : 0;
+}
+
+static void *tlist_get(tlist *l, size_t idx)
+{
+    if (!l || idx >= tlist_getsize(l))
+        return NULL;
+    tlist_node *n = tlist_get_node(l->root, idx);
+    return n ? n->item : NULL;
+}
+
+static bool tlist_insert(tlist *l, size_t idx, const void *item)
+{
+    if (!l || idx > tlist_getsize(l))
+        return false;
+
+    tlist_node *n = tlist_node_new(l->item_size, item);
+    if (!n)
+        return false;
+
+    tlist_node *a, *b;
+    tlist_split(l->root, idx, &a, &b);
+    l->root = tlist_merge(tlist_merge(a, n), b);
+    return true;
+}
+
+static bool tlist_delete(tlist *l, size_t idx)
+{
+    if (!l || idx >= tlist_getsize(l))
+        return false;
+
+    tlist_node *a, *b, *mid, *c;
+    tlist_split(l->root, idx, &a, &b);
+    tlist_split(b, 1, &mid, &c);
+    if (mid)
+        free(mid);
+    l->root = tlist_merge(a, c);
+    return true;
+}
+
+static void tlist_free_items(tlist *l)
+{
+    if (!l)
+        return;
+    tlist_node_free(l->root);
+    l->root = NULL;
+}
+
+static void tlist_free(tlist *l)
+{
+    if (!l)
+        return;
+    tlist_free_items(l);
+    free(l);
 }
 
 typedef struct {
-    int idx;
     int size;
     int render_size;
     char *chars;
@@ -751,8 +485,7 @@ struct {
     int cursor_x, cursor_y, render_x;
     int row_offset, col_offset;
     int screen_rows, screen_cols;
-    int num_rows;
-    editor_row_t *row;
+    tlist *rows;
     bool modified;
     char *file_name;
     char status_msg[90];
@@ -760,9 +493,6 @@ struct {
     char *copied_char_buffer;
     editor_syntax_t *syntax;
     struct termios orig_termios;
-    /* Gap buffer and undo/redo support */
-    gap_buffer_t *gb;
-    undo_stack_t *undo_stack;
     /* Editor mode state machine */
     editor_mode_t mode;
     editor_mode_t prev_mode;     /* For returning from temporary modes */
@@ -790,16 +520,13 @@ struct {
     .render_x = 0,
     .row_offset = 0,
     .col_offset = 0,
-    .num_rows = 0,
-    .row = NULL,
+    .rows = NULL,
     .modified = false,
     .file_name = NULL,
     .status_msg = "",
     .status_msg_time = 0,
     .copied_char_buffer = NULL,
     .syntax = NULL,
-    .gb = NULL,
-    .undo_stack = NULL,
     .mode = MODE_NORMAL,
     .prev_mode = MODE_NORMAL,
     .mode_state = {{0}},
@@ -821,6 +548,40 @@ struct {
                 .has_wrapped = false },
     .notfound_msg = "",
 };
+
+/* Number of rows */
+#define NR ((int)tlist_getsize(ec.rows))
+
+/* Pointer to the editor_row_t at index i */
+static inline editor_row_t *ROW(int i)
+{
+    return (editor_row_t *)tlist_get(ec.rows, (size_t) (i));
+}
+
+/* Chars allocation padding — avoids realloc churn for small edits */
+#define ROW_ALLOC_PAD 64
+
+/* Free a row's heap-owned sub-fields (NOT the row struct itself, which is
+ * owned by the tlist node). */
+static void row_free_contents(editor_row_t *row)
+{
+    free(row->chars);
+    row->chars = NULL;
+    free(row->render);
+    row->render = NULL;
+    free(row->highlight);
+    row->highlight = NULL;
+}
+
+/* Delete row at index `at`, freeing its contents first, then removing the
+ * tlist node. */
+static void row_erase(int at)
+{
+    editor_row_t *r = ROW(at);
+    if (r)
+        row_free_contents(r);
+    tlist_delete(ec.rows, (size_t) at);
+}
 
 typedef struct {
     char *buf;
@@ -900,6 +661,8 @@ editor_syntax_t DB[] = {
 static char *ui_prompt(const char *msg, void (*callback)(char *, int));
 static void editor_refresh(void);
 static int get_line_number_width(void);
+static void editor_newline(void);
+static void editor_insert_char(int c);
 
 /* Mode management implementation */
 static void mode_set(editor_mode_t new_mode)
@@ -916,11 +679,11 @@ static void mode_set(editor_mode_t new_mode)
         /* Restore saved highlight if leaving search mode */
         if (ec.mode_state.search.saved_highlight &&
             ec.mode_state.search.highlight_line >= 0 &&
-            ec.mode_state.search.highlight_line < ec.num_rows &&
-            ec.row[ec.mode_state.search.highlight_line].highlight) {
-            memcpy(ec.row[ec.mode_state.search.highlight_line].highlight,
+            ec.mode_state.search.highlight_line < NR &&
+            ROW(ec.mode_state.search.highlight_line)->highlight) {
+            memcpy(ROW(ec.mode_state.search.highlight_line)->highlight,
                    ec.mode_state.search.saved_highlight,
-                   ec.row[ec.mode_state.search.highlight_line].render_size);
+                   ROW(ec.mode_state.search.highlight_line)->render_size);
         }
         free(ec.mode_state.search.saved_highlight);
         ec.mode_state.search.saved_highlight = NULL;
@@ -941,9 +704,9 @@ static void mode_set(editor_mode_t new_mode)
     switch (new_mode) {
     case MODE_SELECT:
         /* Ensure cursor is in valid position before starting selection */
-        if (ec.cursor_y >= ec.num_rows && ec.num_rows > 0) {
-            ec.cursor_y = ec.num_rows - 1;
-            ec.cursor_x = ec.row[ec.cursor_y].size;
+        if (ec.cursor_y >= NR && NR > 0) {
+            ec.cursor_y = NR - 1;
+            ec.cursor_x = ROW(ec.cursor_y)->size;
         }
         ec.selection.start_x = ec.cursor_x;
         ec.selection.start_y = ec.cursor_y;
@@ -1032,10 +795,6 @@ static const char * const help_lines[] = {
     "  End     End of line",
     "  M-\\     Go to first line of file",
     "  M-/     Go to last line of file",
-    "",
-    "Undo/Redo:",
-    "  M-U     Undo last edit",
-    "  M-E     Redo last undo",
     "",
     "View:",
     "  ^N      Toggle line numbers",
@@ -1204,7 +963,7 @@ static bool syntax_is_number_part(int c)
            c == 'h' || c == 'H';
 }
 
-static void syntax_highlight(editor_row_t *row)
+static void syntax_highlight(editor_row_t *row, int row_idx)
 {
     row->highlight = realloc(row->highlight, row->render_size);
     memset(row->highlight, NORMAL, row->render_size);
@@ -1219,7 +978,7 @@ static void syntax_highlight(editor_row_t *row)
     int mce_len = mce ? strlen(mce) : 0;
     bool prev_sep = true;
     int in_string = 0;
-    bool in_comment = (row->idx > 0 && ec.row[row->idx - 1].hl_open_comment);
+    bool in_comment = (row_idx > 0 && ROW(row_idx - 1)->hl_open_comment);
     int i = 0;
     while (i < row->render_size) {
         char c = row->render[i];
@@ -1301,8 +1060,8 @@ static void syntax_highlight(editor_row_t *row)
     }
     bool changed = (row->hl_open_comment != in_comment);
     row->hl_open_comment = in_comment;
-    if (changed && row->idx + 1 < ec.num_rows)
-        syntax_highlight(&ec.row[row->idx + 1]);
+    if (changed && row_idx + 1 < NR)
+        syntax_highlight(ROW(row_idx + 1), row_idx + 1);
 }
 
 /* Reference: https://misc.flogisoft.com/bash/tip_colors_and_formatting */
@@ -1334,8 +1093,8 @@ static void syntax_select(void)
             int pat_len = strlen(es->file_match[i]);
             if ((es->file_match[i][0] != '.') || (p[pat_len] == '\0')) {
                 ec.syntax = es;
-                for (int file_row = 0; file_row < ec.num_rows; file_row++)
-                    syntax_highlight(&ec.row[file_row]);
+                for (int file_row = 0; file_row < NR; file_row++)
+                    syntax_highlight(ROW(file_row), file_row);
                 return;
             }
         }
@@ -1390,7 +1149,7 @@ static int row_renderx_to_cursorx(editor_row_t *row, int render_x)
     return byte_pos;
 }
 
-static void row_update(editor_row_t *row)
+static void row_update(editor_row_t *row, int row_idx)
 {
     int tabs = 0;
     int wide_chars = 0;
@@ -1434,56 +1193,52 @@ static void row_update(editor_row_t *row)
     }
     row->render[idx] = '\0';
     row->render_size = idx;
-    syntax_highlight(row);
+    syntax_highlight(row, row_idx);
 }
 
 static void row_insert(int at, const char *s, size_t line_len)
 {
-    if ((at < 0) || (at > ec.num_rows))
+    if (at < 0 || at > NR)
         return;
-    ec.row = realloc(ec.row, sizeof(editor_row_t) * (ec.num_rows + 1));
-    memmove(&ec.row[at + 1], &ec.row[at],
-            sizeof(editor_row_t) * (ec.num_rows - at));
-    for (int j = at + 1; j <= ec.num_rows; j++)
-        ec.row[j].idx++;
-    ec.row[at].idx = at;
-    ec.row[at].size = line_len;
-    ec.row[at].chars = malloc(line_len + 1);
-    memcpy(ec.row[at].chars, s, line_len);
-    ec.row[at].chars[line_len] = '\0';
-    ec.row[at].render_size = 0;
-    ec.row[at].render = NULL;
-    ec.row[at].highlight = NULL;
-    ec.row[at].hl_open_comment = false;
-    row_update(&ec.row[at]);
-    ec.num_rows++;
+    editor_row_t row = {0};
+    row.size = (int)line_len;
+    row.chars = malloc(line_len + 1 + ROW_ALLOC_PAD);
+    if (!row.chars)
+        return;
+    memcpy(row.chars, s, line_len);
+    row.chars[line_len] = '\0';
+    if (!tlist_insert(ec.rows, (size_t) at, &row)) {
+        free(row.chars);
+        return;
+    }
+    row_update(ROW(at), at);
     ec.modified = true;
 }
 
 static void editor_copy(int cut)
 {
-    if (!ec.gb || ec.cursor_y >= ec.num_rows)
+    if (ec.cursor_y >= NR)
         return;
 
-    size_t len = strlen(ec.row[ec.cursor_y].chars) + 1;
+    size_t len = strlen(ROW(ec.cursor_y)->chars) + 1;
     ec.copied_char_buffer = realloc(ec.copied_char_buffer, len);
     if (!ec.copied_char_buffer) {
         ui_set_message("Memory allocation failed");
         return;
     }
-    snprintf(ec.copied_char_buffer, len, "%s", ec.row[ec.cursor_y].chars);
+    snprintf(ec.copied_char_buffer, len, "%s", ROW(ec.cursor_y)->chars);
     ui_set_message(cut ? "Text cut" : "Text copied");
 }
 
 static void editor_cut(bool append)
 {
-    if (!ec.gb || ec.cursor_y >= ec.num_rows)
+    if (ec.cursor_y >= NR)
         return;
 
-    bool is_last_line = (ec.cursor_y == ec.num_rows - 1);
+    bool is_last_line = (ec.cursor_y == NR - 1);
 
     /* Build the new clipboard text for this line */
-    size_t line_size = ec.row[ec.cursor_y].size;
+    size_t line_size = ROW(ec.cursor_y)->size;
     size_t new_len = line_size + 1; /* text + \n */
 
     if (append && ec.copied_char_buffer) {
@@ -1495,7 +1250,7 @@ static void editor_cut(bool append)
             return;
         }
         ec.copied_char_buffer = new_buf;
-        memcpy(ec.copied_char_buffer + old_len, ec.row[ec.cursor_y].chars, line_size);
+        memcpy(ec.copied_char_buffer + old_len, ROW(ec.cursor_y)->chars, line_size);
         ec.copied_char_buffer[old_len + line_size] = '\n';
         ec.copied_char_buffer[old_len + line_size + 1] = '\0';
     } else {
@@ -1506,87 +1261,66 @@ static void editor_cut(bool append)
             return;
         }
         ec.copied_char_buffer = new_buf;
-        memcpy(ec.copied_char_buffer, ec.row[ec.cursor_y].chars, line_size);
+        memcpy(ec.copied_char_buffer, ROW(ec.cursor_y)->chars, line_size);
         ec.copied_char_buffer[line_size] = '\n';
         ec.copied_char_buffer[line_size + 1] = '\0';
     }
     ui_set_message("Text cut");
 
-    /* Calculate line position in gap buffer */
-    size_t line_start = 0;
-    for (int i = 0; i < ec.cursor_y; i++)
-        line_start += ec.row[i].size + 1;
+    editor_row_t *row = ROW(ec.cursor_y);
+    row_free_contents(row);
 
-    /* Delete entire line including newline (for non-last lines only).
-     * For the last line we only delete the text; the preceding row's \n
-     * remains, creating an implicit empty last line in the gap buffer. */
-    size_t line_len = ec.row[ec.cursor_y].size;
-    if (!is_last_line)
-        line_len++; /* Include newline */
-
-    gap_delete_with_undo(ec.gb, ec.undo_stack, line_start, line_len);
-
-    /* Update row display structure */
-    editor_row_t *row = &ec.row[ec.cursor_y];
-    free(row->render);
-    free(row->chars);
-    free(row->highlight);
-
-    if (is_last_line && ec.num_rows > 1) {
+    if (is_last_line && NR > 1) {
         /* Last line of a multi-line file: replace with empty row so cursor
          * stays at the same position (GNU nano behaviour). The preceding
          * row's \n now represents the empty last line in the gap buffer. */
-        ec.row[ec.cursor_y].size = 0;
-        ec.row[ec.cursor_y].chars = malloc(1);
-        if (!ec.row[ec.cursor_y].chars) {
+        ROW(ec.cursor_y)->size = 0;
+        ROW(ec.cursor_y)->chars = malloc(1);
+        if (!ROW(ec.cursor_y)->chars) {
             ui_set_message("Memory allocation failed");
             ec.modified = true;
             return;
         }
-        ec.row[ec.cursor_y].chars[0] = '\0';
-        ec.row[ec.cursor_y].render = NULL;
-        ec.row[ec.cursor_y].render_size = 0;
-        ec.row[ec.cursor_y].highlight = NULL;
-        row_update(&ec.row[ec.cursor_y]);
-    } else if (ec.num_rows > 1) {
-        memmove(&ec.row[ec.cursor_y], &ec.row[ec.cursor_y + 1],
-                sizeof(editor_row_t) * (ec.num_rows - ec.cursor_y - 1));
-        for (int j = ec.cursor_y; j < ec.num_rows - 1; j++)
-            ec.row[j].idx--;
-        ec.num_rows--;
+        ROW(ec.cursor_y)->chars[0] = '\0';
+        ROW(ec.cursor_y)->render = NULL;
+        ROW(ec.cursor_y)->render_size = 0;
+        ROW(ec.cursor_y)->highlight = NULL;
+        row_update(ROW(ec.cursor_y), ec.cursor_y);
+    } else if (NR > 1) {
+        tlist_delete(ec.rows, (size_t) ec.cursor_y);
     } else {
         /* Only row - replace with empty row */
-        ec.row[0].size = 0;
-        ec.row[0].chars = malloc(1);
-        if (!ec.row[0].chars) {
+        ROW(0)->size = 0;
+        ROW(0)->chars = malloc(1);
+        if (!ROW(0)->chars) {
             ui_set_message("Memory allocation failed");
             ec.modified = true;
             return;
         }
-        ec.row[0].chars[0] = '\0';
-        ec.row[0].render = NULL;
-        ec.row[0].render_size = 0;
-        ec.row[0].highlight = NULL;
-        row_update(&ec.row[0]);
+        ROW(0)->chars[0] = '\0';
+        ROW(0)->render = NULL;
+        ROW(0)->render_size = 0;
+        ROW(0)->highlight = NULL;
+        row_update(ROW(0), 0);
     }
 
     /* Adjust cursor */
-    if (ec.cursor_y >= ec.num_rows && ec.num_rows > 0)
-        ec.cursor_y = ec.num_rows - 1;
+    if (ec.cursor_y >= NR && NR > 0)
+        ec.cursor_y = NR - 1;
     ec.cursor_x = 0;
     ec.modified = true;
 }
 
 static void editor_paste(void)
 {
-    if (!ec.copied_char_buffer || !ec.gb)
+    if (!ec.copied_char_buffer)
         return;
 
     /* Validate cursor position first */
-    if (ec.cursor_y >= ec.num_rows) {
-        if (ec.num_rows > 0) {
-            ec.cursor_y = ec.num_rows - 1;
-            ec.cursor_x = ec.row[ec.cursor_y].size;
+    if (ec.cursor_y >= NR) {
+        if (NR > 0) {
+            ec.cursor_y = NR - 1;
+            ec.cursor_x = ROW(ec.cursor_y)->size;
         } else {
             ec.cursor_y = 0;
             ec.cursor_x = 0;
@@ -1594,79 +1328,20 @@ static void editor_paste(void)
     }
 
     /* Ensure cursor_x doesn't exceed current row size */
-    if (ec.cursor_y < ec.num_rows) {
-        int max_x = ec.row[ec.cursor_y].size;
+    if (ec.cursor_y < NR) {
+        int max_x = ROW(ec.cursor_y)->size;
         if (ec.cursor_x > max_x)
             ec.cursor_x = max_x;
     }
 
-    /* Save validated cursor position for later */
-    int paste_start_x = ec.cursor_x, paste_start_y = ec.cursor_y;
-
-    /* Calculate position in gap buffer */
-    size_t pos = 0;
-    for (int i = 0; i < ec.cursor_y && i < ec.num_rows; i++)
-        pos += ec.row[i].size + 1;
-    pos += ec.cursor_x;
-
-    /* Insert the copied text */
     size_t paste_len = strlen(ec.copied_char_buffer);
-
-    if (gap_insert_with_undo(ec.gb, ec.undo_stack, pos, ec.copied_char_buffer,
-                             paste_len)) {
-        /* Sync gap buffer to rows first */
-        gap_sync_to_rows(ec.gb);
-
-        /* Now calculate correct cursor position based on what we pasted */
-        bool has_newlines = (strchr(ec.copied_char_buffer, '\n') != NULL);
-
-        if (has_newlines) {
-            /* For multi-line paste, find where we end up */
-            int lines_in_paste = 0;
-            int last_line_len = 0;
-            int chars_on_first_line = paste_start_x;
-
-            for (size_t i = 0; i < paste_len; i++) {
-                if (ec.copied_char_buffer[i] == '\n') {
-                    lines_in_paste++;
-                    last_line_len = 0;
-                } else {
-                    if (lines_in_paste == 0) {
-                        chars_on_first_line++;
-                    } else {
-                        last_line_len++;
-                    }
-                }
-            }
-
-            /* Position cursor at the end of pasted content */
-            ec.cursor_y = paste_start_y + lines_in_paste;
-            if (ec.cursor_y >= ec.num_rows)
-                ec.cursor_y = ec.num_rows - 1;
-
-            if (lines_in_paste == 0) {
-                /* No newlines actually found, stay on same line */
-                ec.cursor_x = chars_on_first_line;
-            } else {
-                /* Had newlines, cursor is at position on last line */
-                ec.cursor_x = last_line_len;
-            }
-
-            /* Ensure cursor_x is valid */
-            if (ec.cursor_y < ec.num_rows &&
-                ec.cursor_x > ec.row[ec.cursor_y].size)
-                ec.cursor_x = ec.row[ec.cursor_y].size;
-        } else {
-            /* Single-line paste - advance cursor on same line */
-            ec.cursor_x = paste_start_x + paste_len;
-            if (ec.cursor_y < ec.num_rows &&
-                ec.cursor_x > ec.row[ec.cursor_y].size)
-                ec.cursor_x = ec.row[ec.cursor_y].size;
-        }
-
-        ec.modified = true;
-        ui_set_message("Pasted %zu bytes", paste_len);
+    for (size_t i = 0; i < paste_len; i++) {
+        if (ec.copied_char_buffer[i] == '\n')
+            editor_newline();
+        else
+            editor_insert_char((unsigned char) ec.copied_char_buffer[i]);
     }
+    ui_set_message("Pasted %zu bytes", paste_len);
 }
 
 /* Check if a position is within the selection */
@@ -1718,7 +1393,7 @@ static char *selection_get_text(void)
     int end_x = ec.selection.end_x;
 
     /* Ensure selection is within valid rows */
-    if (start_y >= ec.num_rows || end_y >= ec.num_rows)
+    if (start_y >= NR || end_y >= NR)
         return NULL;
 
     /* Normalize selection (ensure start comes before end) */
@@ -1735,8 +1410,8 @@ static char *selection_get_text(void)
     size_t total_size = 0;
     if (start_y == end_y) {
         /* Single line selection */
-        if (start_y < ec.num_rows) {
-            editor_row_t *row = &ec.row[start_y];
+        if (start_y < NR) {
+            editor_row_t *row = ROW(start_y);
             if (row->chars) { /* Safety check */
                 int actual_start = start_x > row->size ? row->size : start_x;
                 int actual_end = end_x > row->size ? row->size : end_x;
@@ -1746,8 +1421,8 @@ static char *selection_get_text(void)
         }
     } else {
         /* Multi-line selection - properly count newlines */
-        for (int y = start_y; y <= end_y && y < ec.num_rows; y++) {
-            editor_row_t *row = &ec.row[y];
+        for (int y = start_y; y <= end_y && y < NR; y++) {
+            editor_row_t *row = ROW(y);
             if (!row->chars) {
                 /* Empty row, just count newline if not last line */
                 if (y < end_y)
@@ -1786,8 +1461,8 @@ static char *selection_get_text(void)
     char *p = buffer;
     if (start_y == end_y) {
         /* Single line */
-        if (start_y < ec.num_rows) {
-            editor_row_t *row = &ec.row[start_y];
+        if (start_y < NR) {
+            editor_row_t *row = ROW(start_y);
             if (row->chars) { /* Safety check */
                 /* Clamp positions to actual row size */
                 int actual_start = start_x > row->size ? row->size : start_x;
@@ -1801,8 +1476,8 @@ static char *selection_get_text(void)
         }
     } else {
         /* Multi-line - properly include newlines */
-        for (int y = start_y; y <= end_y && y < ec.num_rows; y++) {
-            editor_row_t *row = &ec.row[y];
+        for (int y = start_y; y <= end_y && y < NR; y++) {
+            editor_row_t *row = ROW(y);
             if (!row->chars)
                 continue; /* Safety check */
 
@@ -1859,7 +1534,7 @@ static void selection_copy(void)
 /* Delete selected text */
 static void selection_delete(void)
 {
-    if (!ec.selection.active || !ec.gb)
+    if (!ec.selection.active)
         return;
 
     int start_y = ec.selection.start_y;
@@ -1877,25 +1552,36 @@ static void selection_delete(void)
         end_x = tmp_x;
     }
 
-    /* Calculate position in gap buffer */
-    size_t start_pos = 0;
-    for (int i = 0; i < start_y && i < ec.num_rows; i++)
-        start_pos += ec.row[i].size + 1;
-    start_pos += start_x;
-
-    size_t end_pos = 0;
-    for (int i = 0; i < end_y && i < ec.num_rows; i++)
-        end_pos += ec.row[i].size + 1;
-    end_pos += end_x;
-
-    /* Delete the selected range */
-    if (end_pos > start_pos) {
-        gap_delete_with_undo(ec.gb, ec.undo_stack, start_pos,
-                             end_pos - start_pos);
-        gap_sync_to_rows(ec.gb);
+    if (start_y == end_y) {
+        editor_row_t *row = ROW(start_y);
+        if (row && end_x > start_x) {
+            memmove(&row->chars[start_x], &row->chars[end_x], row->size - end_x + 1);
+            row->size -= end_x - start_x;
+            row_update(row, start_y);
+            ec.modified = true;
+        }
+    } else {
+        editor_row_t *start_row = ROW(start_y);
+        editor_row_t *end_row = ROW(end_y);
+        if (start_row && end_row) {
+            int suffix_len = end_row->size - end_x;
+            char *nc = realloc(start_row->chars, start_x + suffix_len + 1 + ROW_ALLOC_PAD);
+            if (!nc) {
+                ec.selection.active = false;
+                mode_set(MODE_NORMAL);
+                return;
+            }
+            start_row->chars = nc;
+            memcpy(&start_row->chars[start_x], &end_row->chars[end_x], suffix_len);
+            start_row->size = start_x + suffix_len;
+            start_row->chars[start_row->size] = '\0';
+            row_update(start_row, start_y);
+            for (int y = end_y; y > start_y; y--)
+                row_erase(y);
+            ec.modified = true;
+        }
         ec.cursor_y = start_y;
         ec.cursor_x = start_x;
-        ec.modified = true;
     }
 
     ec.selection.active = false;
@@ -1918,93 +1604,19 @@ static void selection_cut(void)
 
 static void editor_newline(void)
 {
-    if (!ec.gb)
-        return;
-
-    /* Calculate position in gap buffer */
-    size_t pos = 0;
-    for (int i = 0; i < ec.cursor_y && i < ec.num_rows; i++)
-        pos += ec.row[i].size + 1; /* +1 for newline */
-    pos += ec.cursor_x;
-
-    /* Insert newline character into gap buffer */
-    char nl = '\n';
-    if (gap_insert_with_undo(ec.gb, ec.undo_stack, pos, &nl, 1)) {
-        /* Update row structure directly */
-        if (ec.cursor_x == 0) {
-            row_insert(ec.cursor_y, "", 0);
-        } else {
-            editor_row_t *row = &ec.row[ec.cursor_y];
-            row_insert(ec.cursor_y + 1, &row->chars[ec.cursor_x],
-                       row->size - ec.cursor_x);
-            row = &ec.row[ec.cursor_y];
-            row->size = ec.cursor_x;
-            row->chars[row->size] = '\0';
-            row_update(row);
-        }
-        ec.cursor_y++;
-        ec.cursor_x = 0;
-        ec.modified = true;
+    if (ec.cursor_x == 0) {
+        row_insert(ec.cursor_y, "", 0);
+    } else {
+        editor_row_t *row = ROW(ec.cursor_y);
+        row_insert(ec.cursor_y + 1, &row->chars[ec.cursor_x], row->size - ec.cursor_x);
+        row = ROW(ec.cursor_y);
+        row->size = ec.cursor_x;
+        row->chars[row->size] = '\0';
+        row_update(row, ec.cursor_y);
     }
-}
-
-/* Sync gap buffer to rows for display */
-static void gap_sync_to_rows(gap_buffer_t *gb)
-{
-    if (!gb)
-        return;
-
-    /* Save cursor position */
-    int saved_y = ec.cursor_y, saved_x = ec.cursor_x;
-
-    /* Clear existing rows */
-    for (int i = 0; i < ec.num_rows; i++) {
-        free(ec.row[i].chars);
-        free(ec.row[i].render);
-        free(ec.row[i].highlight);
-    }
-    free(ec.row);
-    ec.row = NULL;
-    ec.num_rows = 0;
-
-    /* Convert gap buffer to rows */
-    size_t pos = 0, len = gap_length(gb);
-
-    while (pos < len) {
-        size_t line_start = pos, line_end = pos;
-
-        /* Find end of line */
-        while (line_end < len && gap_get_char(gb, line_end) != '\n')
-            line_end++;
-
-        /* Extract line */
-        size_t line_len = line_end - line_start;
-        char *line = malloc(line_len + 1);
-        if (line) {
-            for (size_t i = 0; i < line_len; i++)
-                line[i] = gap_get_char(gb, line_start + i);
-            line[line_len] = '\0';
-            row_insert(ec.num_rows, line, line_len);
-            free(line);
-        }
-
-        /* Move past newline */
-        pos = line_end + (gap_get_char(gb, line_end) == '\n');
-    }
-
-    /* Ensure at least one row */
-    if (!ec.num_rows)
-        row_insert(0, "", 0);
-
-    /* Update modified flag from gap buffer */
-    ec.modified = gb->modified;
-
-    /* Restore cursor position within bounds */
-    ec.cursor_y = saved_y >= ec.num_rows ? ec.num_rows - 1 : saved_y;
-    if (ec.cursor_y >= 0 && ec.cursor_y < ec.num_rows)
-        ec.cursor_x = saved_x > ec.row[ec.cursor_y].size
-                          ? ec.row[ec.cursor_y].size
-                          : saved_x;
+    ec.cursor_y++;
+    ec.cursor_x = 0;
+    ec.modified = true;
 }
 
 /* Buffer for accumulating UTF-8 bytes */
@@ -2016,9 +1628,6 @@ static struct {
 
 static void editor_insert_char(int c)
 {
-    if (!ec.gb)
-        return;
-
     unsigned char byte = (unsigned char) c;
 
     /* Check if this is the start of a UTF-8 sequence */
@@ -2048,29 +1657,24 @@ static void editor_insert_char(int c)
     if (utf8_buffer.len < utf8_buffer.expected)
         return;
 
-    /* We have a complete character, insert it */
-    size_t pos = 0;
-    for (int i = 0; i < ec.cursor_y && i < ec.num_rows; i++)
-        pos += ec.row[i].size + 1;
-    pos += ec.cursor_x;
-
-    /* Insert the complete UTF-8 sequence as one undo operation */
-    if (gap_insert_with_undo(ec.gb, ec.undo_stack, pos, utf8_buffer.bytes,
-                             utf8_buffer.len)) {
-        /* Update current row directly */
-        if (ec.cursor_y == ec.num_rows)
-            row_insert(ec.num_rows, "", 0);
-
-        editor_row_t *row = &ec.row[ec.cursor_y];
-        row->chars = realloc(row->chars, row->size + utf8_buffer.len + 1);
-        memmove(&row->chars[ec.cursor_x + utf8_buffer.len],
-                &row->chars[ec.cursor_x], row->size - ec.cursor_x + 1);
-        memcpy(&row->chars[ec.cursor_x], utf8_buffer.bytes, utf8_buffer.len);
-        row->size += utf8_buffer.len;
-        row_update(row);
-        ec.cursor_x += utf8_buffer.len;
-        ec.modified = true;
+    if (ec.cursor_y == NR)
+        row_insert(NR, "", 0);
+    editor_row_t *row = ROW(ec.cursor_y);
+    char *nc = realloc(row->chars, row->size + utf8_buffer.len + 1 + ROW_ALLOC_PAD);
+    if (!nc) {
+        utf8_buffer.len = 0;
+        utf8_buffer.expected = 0;
+        return;
     }
+    row->chars = nc;
+    memmove(&row->chars[ec.cursor_x + utf8_buffer.len],
+            &row->chars[ec.cursor_x],
+            row->size - ec.cursor_x + 1);
+    memcpy(&row->chars[ec.cursor_x], utf8_buffer.bytes, utf8_buffer.len);
+    row->size += utf8_buffer.len;
+    row_update(row, ec.cursor_y);
+    ec.cursor_x += utf8_buffer.len;
+    ec.modified = true;
 
     /* Reset UTF-8 buffer */
     utf8_buffer.len = 0;
@@ -2079,59 +1683,37 @@ static void editor_insert_char(int c)
 
 static void editor_delete_char(void)
 {
-    if (!ec.gb)
-        return;
-    if (ec.cursor_y == ec.num_rows)
+    if (ec.cursor_y == NR)
         return;
     if (ec.cursor_x == 0 && ec.cursor_y == 0)
         return;
 
-    editor_row_t *row = &ec.row[ec.cursor_y];
-
-    /* Calculate position in gap buffer */
-    size_t pos = 0;
-    for (int i = 0; i < ec.cursor_y && i < ec.num_rows; i++)
-        pos += ec.row[i].size + 1; /* +1 for newline */
+    editor_row_t *row = ROW(ec.cursor_y);
 
     if (ec.cursor_x > 0) {
         /* Delete character before cursor */
         const char *prev = utf8_prev_char(row->chars, row->chars + ec.cursor_x);
         int prev_pos = prev - row->chars, char_len = ec.cursor_x - prev_pos;
 
-        gap_delete_with_undo(ec.gb, ec.undo_stack, pos + prev_pos, char_len);
-
-        /* Update row directly */
         memmove(&row->chars[prev_pos], &row->chars[ec.cursor_x],
                 row->size - ec.cursor_x + 1);
         row->size -= char_len;
-        row_update(row);
+        row_update(row, ec.cursor_y);
         ec.cursor_x = prev_pos;
         ec.modified = true;
     } else {
         /* Delete newline - join with previous line */
         if (ec.cursor_y > 0) {
-            pos--; /* Point to previous line's newline */
-            gap_delete_with_undo(ec.gb, ec.undo_stack, pos, 1);
-
-            /* Join lines in row structure */
-            ec.cursor_x = ec.row[ec.cursor_y - 1].size;
-            editor_row_t *prev_row = &ec.row[ec.cursor_y - 1];
-            prev_row->chars =
-                realloc(prev_row->chars, prev_row->size + row->size + 1);
+            ec.cursor_x = ROW(ec.cursor_y - 1)->size;
+            editor_row_t *prev_row = ROW(ec.cursor_y - 1);
+            prev_row->chars = realloc(prev_row->chars, prev_row->size + row->size + 1 + ROW_ALLOC_PAD);
+            if (!prev_row->chars)
+                return;
             memcpy(&prev_row->chars[prev_row->size], row->chars, row->size);
             prev_row->size += row->size;
             prev_row->chars[prev_row->size] = '\0';
-            row_update(prev_row);
-
-            /* Remove current row */
-            free(row->render);
-            free(row->chars);
-            free(row->highlight);
-            memmove(&ec.row[ec.cursor_y], &ec.row[ec.cursor_y + 1],
-                    sizeof(editor_row_t) * (ec.num_rows - ec.cursor_y - 1));
-            for (int j = ec.cursor_y; j < ec.num_rows - 1; j++)
-                ec.row[j].idx--;
-            ec.num_rows--;
+            row_update(prev_row, ec.cursor_y - 1);
+            row_erase(ec.cursor_y);
             ec.cursor_y--;
             ec.modified = true;
         }
@@ -2141,13 +1723,13 @@ static void editor_delete_char(void)
 static char *file_rows_to_string(int *buf_len)
 {
     int total_len = 0;
-    for (int j = 0; j < ec.num_rows; j++)
-        total_len += ec.row[j].size + 1;
+    for (int j = 0; j < NR; j++)
+        total_len += ROW(j)->size + 1;
     *buf_len = total_len;
     char *buf = malloc(total_len), *p = buf;
-    for (int j = 0; j < ec.num_rows; j++) {
-        memcpy(p, ec.row[j].chars, ec.row[j].size);
-        p += ec.row[j].size;
+    for (int j = 0; j < NR; j++) {
+        memcpy(p, ROW(j)->chars, ROW(j)->size);
+        p += ROW(j)->size;
         *p++ = '\n';
     }
     return buf;
@@ -2155,15 +1737,9 @@ static char *file_rows_to_string(int *buf_len)
 
 static void file_open(const char *file_name)
 {
-    /* Clear existing file content first */
-    for (int i = 0; i < ec.num_rows; i++) {
-        free(ec.row[i].chars);
-        free(ec.row[i].render);
-        free(ec.row[i].highlight);
-    }
-    free(ec.row);
-    ec.row = NULL;
-    ec.num_rows = 0;
+    for (int i = 0; i < NR; i++)
+        row_free_contents(ROW(i));
+    tlist_free_items(ec.rows);
 
     /* Reset cursor and scroll position */
     ec.cursor_x = 0;
@@ -2175,37 +1751,12 @@ static void file_open(const char *file_name)
     free(ec.file_name);
     ec.file_name = strdup(file_name);
     syntax_select();
-    /* Clear undo/redo stacks for new file */
-    if (ec.undo_stack) {
-        undo_destroy(ec.undo_stack);
-        ec.undo_stack = undo_init(100);
-    }
-
     FILE *file = fopen(file_name, "r+");
     if (!file) {
         if (errno != ENOENT)
             panic("Failed to open the file");
-        /* File does not exist yet — start with empty buffer.
-           The filename is already stored; it will be used when saving. */
-        if (ec.gb) {
-            gap_destroy(ec.gb);
-            ec.gb = gap_init(1024);
-        }
         ec.modified = false;
         return;
-    }
-
-    /* Load file into gap buffer if available */
-    if (ec.gb) {
-        /* Recreate gap buffer for new file */
-        gap_destroy(ec.gb);
-        ec.gb = gap_init(1024);
-        /* Rewind file to beginning */
-        fseek(file, 0, SEEK_SET);
-        gap_load_file(ec.gb, file);
-
-        /* Rewind for row loading */
-        fseek(file, 0, SEEK_SET);
     }
 
     char *line = NULL;
@@ -2215,7 +1766,7 @@ static void file_open(const char *file_name)
         if (line_len > 0 &&
             (line[line_len - 1] == '\n' || line[line_len - 1] == '\r'))
             line_len--;
-        row_insert(ec.num_rows, line, line_len);
+        row_insert(NR, line, line_len);
     }
     free(line);
     fclose(file);
@@ -2256,7 +1807,7 @@ static void file_save(void)
  * previous highlight so it can be restored when leaving search mode. */
 static void search_highlight_match(int row_idx, int match_offset, int match_len)
 {
-    editor_row_t *r = &ec.row[row_idx];
+    editor_row_t *r = ROW(row_idx);
     if (!r->highlight || r->render_size <= 0)
         return;
 
@@ -2264,9 +1815,9 @@ static void search_highlight_match(int row_idx, int match_offset, int match_len)
     if (ec.mode_state.search.saved_highlight &&
         ec.mode_state.search.highlight_line != row_idx) {
         int prev = ec.mode_state.search.highlight_line;
-        if (prev >= 0 && prev < ec.num_rows && ec.row[prev].highlight) {
-            memcpy(ec.row[prev].highlight, ec.mode_state.search.saved_highlight,
-                   ec.row[prev].render_size);
+        if (prev >= 0 && prev < NR && ROW(prev)->highlight) {
+            memcpy(ROW(prev)->highlight, ec.mode_state.search.saved_highlight,
+                   ROW(prev)->render_size);
         }
         free(ec.mode_state.search.saved_highlight);
         ec.mode_state.search.saved_highlight = NULL;
@@ -2378,7 +1929,7 @@ static bool search_do_from(const char *query, int start_row, int start_char_off,
 {
     if (out_wrapped) *out_wrapped = false;
     if (!query || !*query) return false;
-    int n = ec.num_rows;
+    int n = NR;
     if (n == 0) return false;
     bool backwards = (ec.search.mode & SM_BACKWARDS)     != 0;
     bool use_regex  = (ec.search.mode & SM_REGEX)         != 0;
@@ -2400,7 +1951,7 @@ static bool search_do_from(const char *query, int start_row, int start_char_off,
     for (int i = 0; i < max_rows && !found; i++) {
         int ri = no_wrap ? start_row + i * dir
                          : ((start_row + i * dir) % n + n) % n;
-        editor_row_t *r = &ec.row[ri];
+        editor_row_t *r = ROW(ri);
         if (!r->chars) continue;
 
         /* For the starting row honour start_char_off; for subsequent rows
@@ -2446,7 +1997,7 @@ static bool search_do_from(const char *query, int start_row, int start_char_off,
  * Shows "[ search wrapped ]" overlay when the match is in the wrapped portion. */
 static bool search_do(const char *query)
 {
-    if (!query || !*query || ec.num_rows == 0) return false;
+    if (!query || !*query || NR == 0) return false;
     bool backwards = (ec.search.mode & SM_BACKWARDS) != 0;
     bool wrapped = false;
     bool found;
@@ -2459,23 +2010,28 @@ static bool search_do(const char *query)
     return found;
 }
 
-/* Perform one text replacement at g_last_match.
- * Updates the gap buffer and resyncs rows.  Returns true on success. */
+/* Perform one text replacement at g_last_match. */
 static bool do_replace_one(const char *replacement, size_t repl_len)
 {
-    if (g_last_match.row < 0 || g_last_match.row >= ec.num_rows)
+    if (g_last_match.row < 0 || g_last_match.row >= NR)
         return false;
-    size_t pos = 0;
-    for (int i = 0; i < g_last_match.row; i++)
-        pos += (size_t)ec.row[i].size + 1; /* +1 for newline */
-    pos += (size_t)g_last_match.char_off;
-    if (g_last_match.char_len > 0)
-        gap_delete_with_undo(ec.gb, ec.undo_stack, pos, (size_t)g_last_match.char_len);
-    if (repl_len > 0) {
-        if (!gap_insert_with_undo(ec.gb, ec.undo_stack, pos, replacement, repl_len))
-            return false;
-    }
-    gap_sync_to_rows(ec.gb);
+    editor_row_t *row = ROW(g_last_match.row);
+    if (!row)
+        return false;
+    int off = g_last_match.char_off;
+    int oldlen = g_last_match.char_len;
+    char *nc = realloc(row->chars, row->size - oldlen + (int)repl_len + 1 + ROW_ALLOC_PAD);
+    if (!nc)
+        return false;
+    row->chars = nc;
+    memmove(&row->chars[off + repl_len],
+            &row->chars[off + oldlen],
+            row->size - off - oldlen + 1);
+    if (repl_len > 0)
+        memcpy(&row->chars[off], replacement, repl_len);
+    row->size = row->size - oldlen + (int)repl_len;
+    row->chars[row->size] = '\0';
+    row_update(row, g_last_match.row);
     ec.modified = true;
     return true;
 }
@@ -2604,11 +2160,11 @@ static void buf_append_overlay(editor_buf_t *eb)
 /* Calculate line number display width */
 static int get_line_number_width(void)
 {
-    if (!ec.show_line_numbers || ec.num_rows == 0)
+    if (!ec.show_line_numbers || NR == 0)
         return 0;
 
     /* Calculate width needed for line numbers */
-    int max_line = ec.num_rows;
+    int max_line = NR;
     int width = 1;
     while (max_line >= 10) {
         width++;
@@ -2620,8 +2176,8 @@ static int get_line_number_width(void)
 static void editor_scroll(void)
 {
     ec.render_x = 0;
-    if (ec.cursor_y < ec.num_rows)
-        ec.render_x = row_cursorx_to_renderx(&ec.row[ec.cursor_y], ec.cursor_x);
+    if (ec.cursor_y < NR)
+        ec.render_x = row_cursorx_to_renderx(ROW(ec.cursor_y), ec.cursor_x);
     if (ec.cursor_y < ec.row_offset)
         ec.row_offset = ec.cursor_y;
     if (ec.cursor_y >= ec.row_offset + ec.screen_rows)
@@ -2671,12 +2227,11 @@ static void ui_draw_statusbar(editor_buf_t *eb)
         len = snprintf(status, sizeof(status), " [%s] File: %.20s %s",
                        mode_name, ec.file_name ? ec.file_name : "< New >",
                        ec.modified ? "(modified)" : "");
-        int col_size =
-            ec.row && ec.cursor_y <= ec.num_rows - 1 ? ec.row[ec.cursor_y].size : 0;
+        int col_size = (ec.cursor_y <= NR - 1) ? ROW(ec.cursor_y)->size : 0;
         r_len = snprintf(
             r_status, sizeof(r_status), "%d/%d lines  %d/%d cols",
-            (ec.cursor_y + 1 > ec.num_rows) ? ec.num_rows : ec.cursor_y + 1,
-            ec.num_rows, ec.cursor_x + 1, col_size);
+            (ec.cursor_y + 1 > NR) ? NR : ec.cursor_y + 1,
+            NR, ec.cursor_x + 1, col_size);
     }
 
     if (len > ec.screen_cols)
@@ -2800,7 +2355,7 @@ static void ui_draw_rows(editor_buf_t *eb)
 
         /* Draw line number if enabled */
         if (ec.show_line_numbers) {
-            if (file_row < ec.num_rows) {
+            if (file_row < NR) {
                 /* Draw line number */
                 char line_num[32];
                 int num_len = snprintf(line_num, sizeof(line_num), "%*d ",
@@ -2815,23 +2370,23 @@ static void ui_draw_rows(editor_buf_t *eb)
             }
         }
 
-        if (file_row >= ec.num_rows) {
+        if (file_row >= NR) {
             buf_append(eb, "~", 1);
         } else {
             int available_cols = ec.screen_cols - line_num_width;
-            int len = ec.row[file_row].render_size - ec.col_offset;
+            int len = ROW(file_row)->render_size - ec.col_offset;
             if (len < 0)
                 len = 0;
             if (len > available_cols)
                 len = available_cols;
-            char *c = &ec.row[file_row].render[ec.col_offset];
-            unsigned char *hl = &ec.row[file_row].highlight[ec.col_offset];
+            char *c = ROW(file_row)->render + ec.col_offset;
+            unsigned char *hl = ROW(file_row)->highlight + ec.col_offset;
             int current_color = -1;
             bool in_selection = false;
 
             for (int j = 0; j < len; j++) {
                 /* Check if this character is in selection */
-                int cursor_x = row_renderx_to_cursorx(&ec.row[file_row],
+                int cursor_x = row_renderx_to_cursorx(ROW(file_row),
                                                       ec.col_offset + j);
                 bool is_selected = selection_contains(cursor_x, file_row);
 
@@ -3061,7 +2616,7 @@ static char *ui_prompt(const char *msg, void (*callback)(char *, int))
 static void editor_move_cursor(int key)
 {
     editor_row_t *row =
-        (ec.cursor_y >= ec.num_rows) ? NULL : &ec.row[ec.cursor_y];
+        (ec.cursor_y >= NR) ? NULL : ROW(ec.cursor_y);
     switch (key) {
     case ARROW_LEFT:
         if (ec.cursor_x != 0) {
@@ -3075,7 +2630,7 @@ static void editor_move_cursor(int key)
             }
         } else if (ec.cursor_y > 0) {
             ec.cursor_y--;
-            ec.cursor_x = ec.row[ec.cursor_y].size;
+            ec.cursor_x = ROW(ec.cursor_y)->size;
         }
         break;
     case ARROW_RIGHT:
@@ -3095,11 +2650,11 @@ static void editor_move_cursor(int key)
             ec.cursor_y--;
         break;
     case ARROW_DOWN:
-        if (ec.cursor_y < ec.num_rows)
+        if (ec.cursor_y < NR)
             ec.cursor_y++;
         break;
     }
-    row = (ec.cursor_y >= ec.num_rows) ? NULL : &ec.row[ec.cursor_y];
+    row = (ec.cursor_y >= NR) ? NULL : ROW(ec.cursor_y);
     int row_len = row ? row->size : 0;
     if (ec.cursor_x > row_len)
         ec.cursor_x = row_len;
@@ -3492,15 +3047,10 @@ static void browser_render(void)
 /* Clean up all allocated memory before exit */
 static void editor_cleanup(void)
 {
-    /* Free all rows */
-    for (int i = 0; i < ec.num_rows; i++) {
-        free(ec.row[i].chars);
-        free(ec.row[i].render);
-        free(ec.row[i].highlight);
-    }
-    free(ec.row);
-    ec.row = NULL;
-    ec.num_rows = 0;
+    for (int i = 0; i < NR; i++)
+        row_free_contents(ROW(i));
+    tlist_free(ec.rows);
+    ec.rows = NULL;
 
     /* Free file name */
     free(ec.file_name);
@@ -3509,18 +3059,6 @@ static void editor_cleanup(void)
     /* Free copied buffer */
     free(ec.copied_char_buffer);
     ec.copied_char_buffer = NULL;
-
-    /* Free gap buffer */
-    if (ec.gb) {
-        gap_destroy(ec.gb);
-        ec.gb = NULL;
-    }
-
-    /* Free undo stack */
-    if (ec.undo_stack) {
-        undo_destroy(ec.undo_stack);
-        ec.undo_stack = NULL;
-    }
 
     /* Free mode state */
     free(ec.search.query);
@@ -3625,9 +3163,9 @@ static void editor_process_key(void)
             /* Update selection while moving */
             editor_move_cursor(c);
             /* Ensure selection doesn't go past last row */
-            if (ec.cursor_y >= ec.num_rows && ec.num_rows > 0) {
-                ec.cursor_y = ec.num_rows - 1;
-                ec.cursor_x = ec.row[ec.cursor_y].size;
+            if (ec.cursor_y >= NR && NR > 0) {
+                ec.cursor_y = NR - 1;
+                ec.cursor_x = ROW(ec.cursor_y)->size;
             }
             ec.selection.end_x = ec.cursor_x;
             ec.selection.end_y = ec.cursor_y;
@@ -3638,8 +3176,8 @@ static void editor_process_key(void)
             ec.selection.end_y = ec.cursor_y;
             return;
         case END_KEY:
-            if (ec.cursor_y < ec.num_rows)
-                ec.cursor_x = ec.row[ec.cursor_y].size;
+            if (ec.cursor_y < NR)
+                ec.cursor_x = ROW(ec.cursor_y)->size;
             ec.selection.end_x = ec.cursor_x;
             ec.selection.end_y = ec.cursor_y;
             return;
@@ -3919,7 +3457,7 @@ static void editor_process_key(void)
         }
         break;
     case META_('6'): /* Copy current line (GNU nano: M-6 Copy) */
-        if (ec.cursor_y < ec.num_rows)
+        if (ec.cursor_y < NR)
             editor_copy(0);
         break;
     case CTRL_('k'): /* Cut current line (GNU nano: ^K Cut Line) */
@@ -3928,34 +3466,6 @@ static void editor_process_key(void)
         break;
     case CTRL_('u'): /* Paste/uncut (GNU nano: ^U Uncut) */
         editor_paste();
-        break;
-    case META_('u'):
-    case META_('U'):
-        /* Undo last operation (GNU nano: M-U) */
-        if (ec.gb && ec.undo_stack) {
-            if (undo_perform(ec.gb, ec.undo_stack)) {
-                ec.modified = ec.gb->modified;
-                ui_set_message("Undo performed");
-            } else {
-                ui_set_message("Nothing to undo");
-            }
-        } else {
-            ui_set_message("Undo system not initialized");
-        }
-        break;
-    case META_('e'):
-    case META_('E'):
-        /* Redo last undone operation (GNU nano: M-E) */
-        if (ec.gb && ec.undo_stack) {
-            if (undo_redo(ec.gb, ec.undo_stack)) {
-                ec.modified = ec.gb->modified;
-                ui_set_message("Redo performed");
-            } else {
-                ui_set_message("Nothing to redo");
-            }
-        } else {
-            ui_set_message("Undo system not initialized");
-        }
         break;
     case ARROW_UP:
     case ARROW_DOWN:
@@ -3977,8 +3487,8 @@ static void editor_process_key(void)
         ec.cursor_x = 0;
         break;
     case END_KEY:
-        if (ec.cursor_y < ec.num_rows)
-            ec.cursor_x = ec.row[ec.cursor_y].size;
+        if (ec.cursor_y < NR)
+            ec.cursor_x = ROW(ec.cursor_y)->size;
         break;
     case CTRL_('w'): /* Find/search (GNU nano: ^W Where Is) */
         search_find();
@@ -4000,8 +3510,8 @@ static void editor_process_key(void)
         ec.cursor_x = 0;
         break;
     case META_('/'): /* M-/ Go to last line (GNU nano: M-/) */
-        if (ec.num_rows > 0) {
-            ec.cursor_y = ec.num_rows - 1;
+        if (NR > 0) {
+            ec.cursor_y = NR - 1;
             ec.cursor_x = 0;
         }
         break;
@@ -4024,11 +3534,11 @@ static void editor_process_key(void)
         indent_level++;
         break;
     case '}':
-        if (ec.cursor_y == ec.num_rows)
+        if (ec.cursor_y == NR)
             goto none;
         if ((ec.cursor_x == 0) && (ec.cursor_y == 0))
             goto none;
-        editor_row_t *row = &ec.row[ec.cursor_y];
+        editor_row_t *row = ROW(ec.cursor_y);
         if ((ec.cursor_x > 0) && (row->chars[ec.cursor_x - 1] == '\t'))
             editor_delete_char();
     none:
@@ -4045,11 +3555,7 @@ static void editor_init(void)
     term_update_size();
     signal(SIGWINCH, sig_winch_handler);
     signal(SIGCONT, sig_cont_handler);
-
-    /* Initialize gap buffer and undo/redo - always enabled */
-    ec.gb = gap_init(GAP_INITIAL_SIZE);
-    if (ec.gb)
-        ec.undo_stack = undo_init(MAX_UNDO_LEVELS);
+    ec.rows = tlist_new(sizeof(editor_row_t));
 }
 
 int main(int argc, char *argv[])
