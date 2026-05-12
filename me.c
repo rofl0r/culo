@@ -1484,12 +1484,28 @@ static void undo_record_delete(int row, int col, const char *text, size_t len,
     undo_record_common(EDIT_DELETE, row, col, text, len, before_y, before_x, after_y, after_x);
 }
 
-static bool undo_apply_replace_text(int row, int col,
-                                    const char *old_text, size_t old_len,
-                                    const char *new_text, size_t new_len)
+static bool undo_apply_replace_span(int row, int col, size_t from_len,
+                                    const char *to_text, size_t to_len)
 {
-    return undo_apply_delete_text(row, col, old_text, old_len) &&
-           undo_apply_insert_text(row, col, new_text, new_len);
+    editor_row_t *r = ROW(row);
+    if (!r || col < 0 || col > r->size || (size_t)(r->size - col) < from_len)
+        return false;
+    size_t new_size = (size_t)r->size - from_len + to_len;
+    if (new_size > INT_MAX)
+        return false;
+    char *nc = realloc(r->chars, new_size + 1 + ROW_ALLOC_PAD);
+    if (!nc)
+        return false;
+    r->chars = nc;
+    memmove(&r->chars[col + to_len], &r->chars[col + from_len],
+            (size_t)(r->size - col) - from_len + 1);
+    if (to_len > 0)
+        memcpy(&r->chars[col], to_text, to_len);
+    r->size = (int)new_size;
+    r->chars[r->size] = '\0';
+    row_update(r, row);
+    ec.modified = true;
+    return true;
 }
 
 static void undo_record_replace(int row, int col, const char *old_text, size_t old_len,
@@ -1528,8 +1544,7 @@ static void undo_apply_item(const undo_item_t *item, bool redo)
         } else if (item->type == EDIT_DELETE) {
             ok = undo_apply_delete_text(item->row, item->col, item->text, item->len);
         } else {
-            ok = undo_apply_replace_text(item->row, item->col,
-                                         item->text, item->len,
+            ok = undo_apply_replace_span(item->row, item->col, item->len,
                                          item->text + item->len, item->aux_len);
         }
         if (ok) {
@@ -1542,8 +1557,7 @@ static void undo_apply_item(const undo_item_t *item, bool redo)
         } else if (item->type == EDIT_DELETE) {
             ok = undo_apply_insert_text(item->row, item->col, item->text, item->len);
         } else {
-            ok = undo_apply_replace_text(item->row, item->col,
-                                         item->text + item->len, item->aux_len,
+            ok = undo_apply_replace_span(item->row, item->col, item->aux_len,
                                          item->text, item->len);
         }
         if (ok) {
