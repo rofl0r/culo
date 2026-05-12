@@ -575,8 +575,15 @@ static inline editor_row_t *ROW(int i)
     return (editor_row_t *)tlist_get(ec.rows, (size_t) (i));
 }
 
-/* Chars allocation padding — avoids realloc churn for small edits */
-#define ROW_ALLOC_PAD 64
+/* Manual typing growth alignment (power of two). */
+#define ROW_MANUAL_ALLOC_ALIGN 64
+
+static inline size_t row_manual_alloc_size(size_t content_len)
+{
+    size_t need = content_len + 1; /* include NUL */
+    size_t a = ROW_MANUAL_ALLOC_ALIGN;
+    return (need + (a - 1)) & ~(a - 1);
+}
 
 /* Free a row's heap-owned sub-fields (NOT the row struct itself, which is
  * owned by the tlist node). */
@@ -679,7 +686,7 @@ static char *ui_prompt(const char *msg, void (*callback)(char *, int));
 static void editor_refresh(void);
 static int get_line_number_width(void);
 static void editor_newline(void);
-static void editor_insert_char(int c);
+static void editor_insert_char(int c, bool manual_typing);
 static void undo_reset_history(void);
 static void undo_record_insert(int row, int col, const char *text, size_t len,
                                int before_y, int before_x, int after_y, int after_x);
@@ -1264,7 +1271,7 @@ static void row_insert(int at, const char *s, size_t line_len)
         return;
     editor_row_t row = {0};
     row.size = (int)line_len;
-    row.chars = malloc(line_len + 1 + ROW_ALLOC_PAD);
+    row.chars = malloc(line_len + 1);
     if (!row.chars) {
         ui_set_message("Memory allocation failed");
         return;
@@ -1336,7 +1343,7 @@ static bool undo_insert_bytes(int row_idx, int col, const char *s, size_t len)
         col = 0;
     if (col > row->size)
         col = row->size;
-    char *nc = realloc(row->chars, (size_t)row->size + len + 1 + ROW_ALLOC_PAD);
+    char *nc = realloc(row->chars, (size_t)row->size + len + 1);
     if (!nc)
         return false;
     row->chars = nc;
@@ -1414,7 +1421,7 @@ static bool undo_apply_delete_text(int row, int col, const char *text, size_t le
             editor_row_t *next = ROW(y + 1);
             if (!r || !next)
                 return false;
-            char *nc = realloc(r->chars, (size_t)r->size + (size_t)next->size + 1 + ROW_ALLOC_PAD);
+            char *nc = realloc(r->chars, (size_t)r->size + (size_t)next->size + 1);
             if (!nc)
                 return false;
             r->chars = nc;
@@ -1493,7 +1500,7 @@ static bool undo_apply_replace_span(int row, int col, size_t from_len,
     size_t new_size = (size_t)r->size - from_len + to_len;
     if (new_size > INT_MAX)
         return false;
-    char *nc = realloc(r->chars, new_size + 1 + ROW_ALLOC_PAD);
+    char *nc = realloc(r->chars, new_size + 1);
     if (!nc)
         return false;
     r->chars = nc;
@@ -1671,7 +1678,7 @@ static void editor_cut(bool append)
         row_erase(ec.cursor_y);
     } else {
         editor_row_t *row = ROW(ec.cursor_y);
-        char *nc = realloc(row->chars, 1 + ROW_ALLOC_PAD);
+        char *nc = realloc(row->chars, 1);
         if (!nc) {
             ui_set_message("Memory allocation failed");
             return;
@@ -1725,7 +1732,7 @@ static void editor_paste(void)
         if (ec.copied_char_buffer[i] == '\n')
             editor_newline();
         else
-            editor_insert_char((unsigned char) ec.copied_char_buffer[i]);
+            editor_insert_char((unsigned char) ec.copied_char_buffer[i], false);
     }
     undo_set_batching(false);
     if (paste_len > 0) {
@@ -1959,7 +1966,7 @@ static void selection_delete(void)
         editor_row_t *end_row = ROW(end_y);
         if (start_row && end_row) {
             int suffix_len = end_row->size - end_x;
-            char *nc = realloc(start_row->chars, start_x + suffix_len + 1 + ROW_ALLOC_PAD);
+            char *nc = realloc(start_row->chars, start_x + suffix_len + 1);
             if (!nc) {
                 ec.selection.active = false;
                 mode_set(MODE_NORMAL);
@@ -2031,7 +2038,7 @@ static struct {
     int expected;
 } utf8_buffer = {.len = 0, .expected = 0};
 
-static void editor_insert_char(int c)
+static void editor_insert_char(int c, bool manual_typing)
 {
     unsigned char byte = (unsigned char) c;
 
@@ -2066,7 +2073,10 @@ static void editor_insert_char(int c)
     if (ec.cursor_y == NR)
         row_insert(NR, "", 0);
     editor_row_t *row = ROW(ec.cursor_y);
-    char *nc = realloc(row->chars, row->size + utf8_buffer.len + 1 + ROW_ALLOC_PAD);
+    size_t new_content_len = (size_t)row->size + (size_t)utf8_buffer.len;
+    size_t alloc_len = manual_typing ? row_manual_alloc_size(new_content_len)
+                                     : (new_content_len + 1);
+    char *nc = realloc(row->chars, alloc_len);
     if (!nc) {
         utf8_buffer.len = 0;
         utf8_buffer.expected = 0;
@@ -2125,7 +2135,7 @@ static void editor_delete_char(void)
             ec.cursor_x = prev_size;
             editor_row_t *prev_row = ROW(ec.cursor_y - 1);
             char *new_chars = realloc(prev_row->chars,
-                                      prev_row->size + row->size + 1 + ROW_ALLOC_PAD);
+                                      prev_row->size + row->size + 1);
             if (!new_chars)
                 return;
             prev_row->chars = new_chars;
@@ -2454,7 +2464,7 @@ static bool do_replace_one(const char *replacement, size_t repl_len)
     size_t new_size = (size_t) row->size - (size_t) oldlen + repl_len;
     if (new_size > INT_MAX)
         goto out;
-    char *nc = realloc(row->chars, new_size + 1 + ROW_ALLOC_PAD);
+    char *nc = realloc(row->chars, new_size + 1);
     if (!nc)
         goto out;
     row->chars = nc;
@@ -3911,7 +3921,7 @@ static void editor_process_key(void)
     case '\r':
         editor_newline();
         for (int i = 0; i < indent_level; i++)
-            editor_insert_char('\t');
+            editor_insert_char('\t', false);
         break;
     case CTRL_('x'): /* Exit editor (GNU nano: ^X) */
         if (ec.modified) {
@@ -4024,7 +4034,7 @@ static void editor_process_key(void)
     case '\x1b':
         break;
     case '{':
-        editor_insert_char(c);
+        editor_insert_char(c, true);
         indent_level++;
         break;
     case '}':
@@ -4036,11 +4046,11 @@ static void editor_process_key(void)
         if ((ec.cursor_x > 0) && (row->chars[ec.cursor_x - 1] == '\t'))
             editor_delete_char();
     none:
-        editor_insert_char(c);
+        editor_insert_char(c, true);
         indent_level--;
         break;
     default:
-        editor_insert_char(c);
+        editor_insert_char(c, true);
     }
 }
 
