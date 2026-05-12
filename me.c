@@ -3686,6 +3686,8 @@ static scroll_action_t browser_on_event(scrollable_screen_t *ss,
     char full_path[PATH_MAX];
     snprintf(full_path, sizeof(full_path), "%s/%s",
              ec.mode_state.browser.current_dir, entry);
+    free(ctx->selected_file);
+    ctx->selected_file = NULL;
     ctx->selected_file = strdup(full_path);
     if (!ctx->selected_file) {
         ui_set_message("Out of memory");
