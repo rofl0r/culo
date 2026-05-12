@@ -224,7 +224,7 @@ static int utf8_to_codepoint(const char *s, size_t max_len)
     return -1;
 }
 
-/* Treap-list (tlist): indexed sequence with O(log N) insert/delete/get. */
+/* tlist, aka treap list. (C) 2024 rofl0r. */
 typedef struct tlist_node {
     struct tlist_node *left;
     struct tlist_node *right;
@@ -235,7 +235,7 @@ typedef struct tlist_node {
 
 typedef struct tlist {
     tlist_node *root;
-    size_t item_size;
+    unsigned item_size;
 } tlist;
 
 static inline size_t tlist_node_size(const tlist_node *n)
@@ -249,7 +249,7 @@ static inline void tlist_node_update(tlist_node *n)
         n->size = 1 + tlist_node_size(n->left) + tlist_node_size(n->right);
 }
 
-static tlist_node *tlist_node_new(size_t item_size, const void *item)
+static tlist_node *tlist_node_new(unsigned item_size, const void *item)
 {
     tlist_node *n = malloc(sizeof(*n) + item_size);
     if (!n)
@@ -330,7 +330,7 @@ static void tlist_node_free(tlist_node *root)
     free(root);
 }
 
-static tlist *tlist_new(size_t item_size)
+static tlist *tlist_new(unsigned item_size)
 {
     tlist *l = malloc(sizeof(*l));
     if (!l)
@@ -340,7 +340,7 @@ static tlist *tlist_new(size_t item_size)
     return l;
 }
 
-static size_t tlist_getsize(const tlist *l)
+static size_t tlist_getsize(tlist *l)
 {
     return l ? tlist_node_size(l->root) : 0;
 }
@@ -353,25 +353,30 @@ static void *tlist_get(tlist *l, size_t idx)
     return n ? n->item : NULL;
 }
 
-static bool tlist_insert(tlist *l, size_t idx, const void *item)
+static int tlist_insert(tlist *l, size_t idx, void *item)
 {
     if (!l || idx > tlist_getsize(l))
-        return false;
+        return 0;
 
     tlist_node *n = tlist_node_new(l->item_size, item);
     if (!n)
-        return false;
+        return 0;
 
     tlist_node *a, *b;
     tlist_split(l->root, idx, &a, &b);
     l->root = tlist_merge(tlist_merge(a, n), b);
-    return true;
+    return 1;
 }
 
-static bool tlist_delete(tlist *l, size_t idx)
+int tlist_append(tlist *l, void *item)
+{
+    return tlist_insert(l, tlist_getsize(l), item);
+}
+
+static int tlist_delete(tlist *l, size_t idx)
 {
     if (!l || idx >= tlist_getsize(l))
-        return false;
+        return 0;
 
     tlist_node *a, *b, *mid, *c;
     tlist_split(l->root, idx, &a, &b);
@@ -379,7 +384,17 @@ static bool tlist_delete(tlist *l, size_t idx)
     if (mid)
         free(mid);
     l->root = tlist_merge(a, c);
-    return true;
+    return 1;
+}
+
+int tlist_delete_deep(tlist *l, size_t idx)
+{
+    void *item = tlist_get(l, idx);
+    if (!item)
+        return 0;
+    void *p = *(void **)item;
+    free(p);
+    return tlist_delete(l, idx);
 }
 
 static void tlist_free_items(tlist *l)
@@ -390,12 +405,41 @@ static void tlist_free_items(tlist *l)
     l->root = NULL;
 }
 
-static void tlist_free(tlist *l)
+static void tlist_free_items_deep(tlist *l)
 {
     if (!l)
         return;
+    size_t n = tlist_getsize(l);
+    for (size_t i = 0; i < n; i++) {
+        void *item = tlist_get(l, i);
+        if (item)
+            free(*(void **)item);
+    }
+    tlist_free_items(l);
+}
+
+static void *tlist_free(tlist *l)
+{
+    if (!l)
+        return NULL;
     tlist_free_items(l);
     free(l);
+    return NULL;
+}
+
+void *tlist_free_deep(tlist *l)
+{
+    if (!l)
+        return NULL;
+    tlist_free_items_deep(l);
+    free(l);
+    return NULL;
+}
+
+float tlist_getbalance(tlist *l)
+{
+    (void)l;
+    return 0.0f;
 }
 
 typedef struct {
