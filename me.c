@@ -3508,36 +3508,24 @@ static void scrollable_screen_run(scrollable_screen_t *ss)
 
         switch (c) {
         case ARROW_UP:
-            if (ss->selectable) {
+            ss->offset--;
+            if (ss->selectable)
                 ss->selected--;
-                ss->offset--;
-            } else {
-                ss->offset--;
-            }
             break;
         case ARROW_DOWN:
-            if (ss->selectable) {
+            ss->offset++;
+            if (ss->selectable)
                 ss->selected++;
-                ss->offset++;
-            } else {
-                ss->offset++;
-            }
             break;
         case PAGE_UP:
-            if (ss->selectable) {
+            ss->offset -= visible;
+            if (ss->selectable)
                 ss->selected -= visible;
-                ss->offset -= visible;
-            } else {
-                ss->offset -= visible;
-            }
             break;
         case PAGE_DOWN:
-            if (ss->selectable) {
+            ss->offset += visible;
+            if (ss->selectable)
                 ss->selected += visible;
-                ss->offset += visible;
-            } else {
-                ss->offset += visible;
-            }
             break;
         case HOME_KEY:
             ss->offset = 0;
@@ -3687,7 +3675,6 @@ static scroll_action_t browser_on_event(scrollable_screen_t *ss,
     snprintf(full_path, sizeof(full_path), "%s/%s",
              ec.mode_state.browser.current_dir, entry);
     free(ctx->selected_file);
-    ctx->selected_file = NULL;
     ctx->selected_file = strdup(full_path);
     if (!ctx->selected_file) {
         ui_set_message("Out of memory");
@@ -3704,13 +3691,9 @@ static scroll_action_t browser_key_cb(scrollable_screen_t *ss, int key)
     ec.mode_state.browser.show_hidden = !ec.mode_state.browser.show_hidden;
     const char *cur = ec.mode_state.browser.current_dir ?
                       ec.mode_state.browser.current_dir : ".";
-    char *path = strdup(cur);
-    if (!path) {
-        ui_set_message("Out of memory");
-        return SCROLL_ACT_CONTINUE;
-    }
+    char path[PATH_MAX];
+    snprintf(path, sizeof(path), "%s", cur);
     browser_load_directory(path);
-    free(path);
     if (ec.mode != MODE_BROWSER)
         return SCROLL_ACT_EXIT;
     ss->total_lines = ec.mode_state.browser.num_entries;
