@@ -3618,7 +3618,8 @@ static void browser_update_labels(scrollable_screen_t *ss)
 static scroll_line_result_t browser_get_line(scrollable_screen_t *ss, int idx,
                                              char *buf, int len)
 {
-    browser_update_labels(ss);
+    if (idx == ss->offset)
+        browser_update_labels(ss);
     if (idx < 0 || idx >= ec.mode_state.browser.num_entries)
         return SCROLL_LINE_END;
 
