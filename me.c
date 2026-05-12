@@ -2558,11 +2558,16 @@ static int ui_dialog_ask(const char *msg, char *const options[])
     while (1) {
         char status_msg[512];
         int off = snprintf(status_msg, sizeof(status_msg), "%s  ", msg);
-        for (int i = 0; i < n && off > -1 && off < (int)sizeof(status_msg); i++) {
+        for (int i = 0; i < n; i++) {
+            if (off < 0 || off >= (int)sizeof(status_msg))
+                break;
             off += snprintf(status_msg + off, sizeof(status_msg) - (size_t)off,
-                            (i == choice) ? "\x1b[7m[ %s ]\x1b[m" : "%s", options[i]);
-            if (i + 1 < n)
+                            (i == choice) ? "\x1b[7m[ %s ]\x1b[m" : "[ %s ]", options[i]);
+            if (i + 1 < n) {
+                if (off < 0 || off >= (int)sizeof(status_msg))
+                    break;
                 off += snprintf(status_msg + off, sizeof(status_msg) - (size_t)off, "  ");
+            }
         }
         if (off > -1 && off < (int)sizeof(status_msg))
             snprintf(status_msg + off, sizeof(status_msg) - (size_t)off, "  ^C:Cancel");
@@ -2595,12 +2600,9 @@ static int ui_dialog_ask(const char *msg, char *const options[])
             choice = n - 1;
             break;
         default:
-            if (c >= 'A' && c <= 'Z')
-                c = c - 'A' + 'a';
+            c = tolower((unsigned char)c);
             for (int i = 0; i < n; i++) {
-                int ch = options[i][0];
-                if (ch >= 'A' && ch <= 'Z')
-                    ch = ch - 'A' + 'a';
+                int ch = tolower((unsigned char)options[i][0]);
                 if (c == ch) {
                     ui_set_message("");
                     return i;
@@ -2618,7 +2620,7 @@ static int ui_confirm(const char *msg)
     int r = ui_dialog_ask(msg, options);
     if (r < 0)
         return -1;
-    return r ? 1 : 0;
+    return r;
 }
 
 static char *ui_prompt(const char *msg, void (*callback)(char *, int))
