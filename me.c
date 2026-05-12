@@ -555,6 +555,8 @@ struct {
 /* Pointer to the editor_row_t at index i */
 static inline editor_row_t *ROW(int i)
 {
+    if (!ec.rows || i < 0 || i >= NR)
+        return NULL;
     return (editor_row_t *)tlist_get(ec.rows, (size_t) (i));
 }
 
@@ -1203,12 +1205,15 @@ static void row_insert(int at, const char *s, size_t line_len)
     editor_row_t row = {0};
     row.size = (int)line_len;
     row.chars = malloc(line_len + 1 + ROW_ALLOC_PAD);
-    if (!row.chars)
+    if (!row.chars) {
+        ui_set_message("Memory allocation failed");
         return;
+    }
     memcpy(row.chars, s, line_len);
     row.chars[line_len] = '\0';
     if (!tlist_insert(ec.rows, (size_t) at, &row)) {
         free(row.chars);
+        ui_set_message("Memory allocation failed");
         return;
     }
     row_update(ROW(at), at);
@@ -1267,41 +1272,19 @@ static void editor_cut(bool append)
     }
     ui_set_message("Text cut");
 
-    editor_row_t *row = ROW(ec.cursor_y);
-    row_free_contents(row);
-
-    if (is_last_line && NR > 1) {
-        /* Last line of a multi-line file: replace with empty row so cursor
-         * stays at the same position (GNU nano behaviour). The preceding
-         * row's \n now represents the empty last line in the gap buffer. */
-        ROW(ec.cursor_y)->size = 0;
-        ROW(ec.cursor_y)->chars = malloc(1);
-        if (!ROW(ec.cursor_y)->chars) {
-            ui_set_message("Memory allocation failed");
-            ec.modified = true;
-            return;
-        }
-        ROW(ec.cursor_y)->chars[0] = '\0';
-        ROW(ec.cursor_y)->render = NULL;
-        ROW(ec.cursor_y)->render_size = 0;
-        ROW(ec.cursor_y)->highlight = NULL;
-        row_update(ROW(ec.cursor_y), ec.cursor_y);
-    } else if (NR > 1) {
-        tlist_delete(ec.rows, (size_t) ec.cursor_y);
+    if (NR > 1 && !is_last_line) {
+        row_erase(ec.cursor_y);
     } else {
-        /* Only row - replace with empty row */
-        ROW(0)->size = 0;
-        ROW(0)->chars = malloc(1);
-        if (!ROW(0)->chars) {
+        editor_row_t *row = ROW(ec.cursor_y);
+        char *nc = realloc(row->chars, 1 + ROW_ALLOC_PAD);
+        if (!nc) {
             ui_set_message("Memory allocation failed");
-            ec.modified = true;
             return;
         }
-        ROW(0)->chars[0] = '\0';
-        ROW(0)->render = NULL;
-        ROW(0)->render_size = 0;
-        ROW(0)->highlight = NULL;
-        row_update(ROW(0), 0);
+        row->chars = nc;
+        row->size = 0;
+        row->chars[0] = '\0';
+        row_update(row, ec.cursor_y);
     }
 
     /* Adjust cursor */
@@ -1706,9 +1689,11 @@ static void editor_delete_char(void)
         if (ec.cursor_y > 0) {
             ec.cursor_x = ROW(ec.cursor_y - 1)->size;
             editor_row_t *prev_row = ROW(ec.cursor_y - 1);
-            prev_row->chars = realloc(prev_row->chars, prev_row->size + row->size + 1 + ROW_ALLOC_PAD);
-            if (!prev_row->chars)
+            char *new_chars = realloc(prev_row->chars,
+                                      prev_row->size + row->size + 1 + ROW_ALLOC_PAD);
+            if (!new_chars)
                 return;
+            prev_row->chars = new_chars;
             memcpy(&prev_row->chars[prev_row->size], row->chars, row->size);
             prev_row->size += row->size;
             prev_row->chars[prev_row->size] = '\0';
@@ -2020,7 +2005,10 @@ static bool do_replace_one(const char *replacement, size_t repl_len)
         return false;
     int off = g_last_match.char_off;
     int oldlen = g_last_match.char_len;
-    char *nc = realloc(row->chars, row->size - oldlen + (int)repl_len + 1 + ROW_ALLOC_PAD);
+    size_t new_size = (size_t) row->size - (size_t) oldlen + repl_len;
+    if (new_size > INT_MAX)
+        return false;
+    char *nc = realloc(row->chars, new_size + 1 + ROW_ALLOC_PAD);
     if (!nc)
         return false;
     row->chars = nc;
@@ -2029,7 +2017,7 @@ static bool do_replace_one(const char *replacement, size_t repl_len)
             row->size - off - oldlen + 1);
     if (repl_len > 0)
         memcpy(&row->chars[off], replacement, repl_len);
-    row->size = row->size - oldlen + (int)repl_len;
+    row->size = (int)new_size;
     row->chars[row->size] = '\0';
     row_update(row, g_last_match.row);
     ec.modified = true;
@@ -3555,6 +3543,7 @@ static void editor_init(void)
     term_update_size();
     signal(SIGWINCH, sig_winch_handler);
     signal(SIGCONT, sig_cont_handler);
+    srand((unsigned int) time(NULL));
     ec.rows = tlist_new(sizeof(editor_row_t));
 }
 
