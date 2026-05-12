@@ -73,25 +73,45 @@ static inline bool is_utf8_continuation(uint8_t c)
     return (c & 0xC0) == 0x80;
 }
 
-static int utf8_to_codepoint(const char *s, size_t max_len);
+static int utf8_validate(const char *s, size_t max_len);
 
 /* Get display width of a UTF-8 character (handles wide characters)
  * Returns 2 for CJK characters, 1 for most others, 0 for combining marks
  */
-static inline int utf8_char_width(const char *s)
+static inline int utf8_char_width_and_len(const char *s, size_t max_len, int *char_len)
 {
-    /* Use the enhanced UTF-8 to codepoint conversion */
-    int codepoint = utf8_to_codepoint(s, 4);
-
-    /* Handle invalid UTF-8 */
-    if (codepoint < 0)
+    unsigned char c = (unsigned char) *s;
+    if (!(c & 0x80)) {
+        if (char_len)
+            *char_len = 1;
+        if (c < 0x20 || c == 0x7F)
+            return 0;
         return 1;
+    }
 
-    /* ASCII control characters */
-    if (codepoint < 0x20 || codepoint == 0x7F)
-        return 0;
+    int len = utf8_validate(s, max_len);
+    if (len == 0) {
+        if (char_len)
+            *char_len = 1;
+        return 1;
+    }
+    if (char_len)
+        *char_len = len;
 
-    /* CJK Unified Ideographs and common fullwidth ranges */
+    int codepoint;
+    if (len == 2) {
+        codepoint = ((c & 0x1F) << 6) | ((unsigned char) s[1] & 0x3F);
+    } else if (len == 3) {
+        codepoint = ((c & 0x0F) << 12) |
+                    (((unsigned char) s[1] & 0x3F) << 6) |
+                    ((unsigned char) s[2] & 0x3F);
+    } else {
+        codepoint = ((c & 0x07) << 18) |
+                    (((unsigned char) s[1] & 0x3F) << 12) |
+                    (((unsigned char) s[2] & 0x3F) << 6) |
+                    ((unsigned char) s[3] & 0x3F);
+    }
+
     if ((codepoint >= 0x4E00 &&
          codepoint <= 0x9FFF) || /* CJK Unified Ideographs */
         (codepoint >= 0x3400 && codepoint <= 0x4DBF) || /* CJK Extension A */
@@ -195,33 +215,6 @@ static int utf8_validate(const char *s, size_t max_len)
     }
 
     return 0;
-}
-
-/* Convert UTF-8 sequence to Unicode codepoint
- * Returns the codepoint value, or -1 if invalid
- */
-static int utf8_to_codepoint(const char *s, size_t max_len)
-{
-    int len = utf8_validate(s, max_len);
-    if (len == 0)
-        return -1;
-
-    unsigned char c = (unsigned char) *s;
-
-    if (len == 1)
-        return c;
-
-    if (len == 2)
-        return ((c & 0x1F) << 6) | (s[1] & 0x3F);
-
-    if (len == 3)
-        return ((c & 0x0F) << 12) | ((s[1] & 0x3F) << 6) | (s[2] & 0x3F);
-
-    if (len == 4)
-        return ((c & 0x07) << 18) | ((s[1] & 0x3F) << 12) |
-               ((s[2] & 0x3F) << 6) | (s[3] & 0x3F);
-
-    return -1;
 }
 
 /* tlist, aka treap list. (C) 2024 rofl0r.
@@ -503,6 +496,7 @@ void *tlist_free_deep(struct tlist *t) {
 typedef struct {
     int size;
     int render_size;
+    bool render_direct_map;
     char *chars;
     char *render;
     unsigned char *highlight;
@@ -1207,6 +1201,12 @@ static void syntax_select(void)
 
 static int row_cursorx_to_renderx(editor_row_t *row, int cursor_x)
 {
+    if (row->render_direct_map) {
+        if (cursor_x < 0)
+            return 0;
+        return cursor_x > row->size ? row->size : cursor_x;
+    }
+
     int render_x = 0;
     int byte_pos = 0;
 
@@ -1216,9 +1216,12 @@ static int row_cursorx_to_renderx(editor_row_t *row, int cursor_x)
             render_x++;
             byte_pos++;
         } else {
-            int char_width = utf8_char_width(&row->chars[byte_pos]);
+            int char_len = 1;
+            int char_width = utf8_char_width_and_len(&row->chars[byte_pos],
+                                                     (size_t) (row->size - byte_pos),
+                                                     &char_len);
             render_x += char_width;
-            byte_pos += utf8_byte_length((uint8_t) row->chars[byte_pos]);
+            byte_pos += char_len;
         }
     }
     return render_x;
@@ -1226,6 +1229,12 @@ static int row_cursorx_to_renderx(editor_row_t *row, int cursor_x)
 
 static int row_renderx_to_cursorx(editor_row_t *row, int render_x)
 {
+    if (row->render_direct_map) {
+        if (render_x < 0)
+            return 0;
+        return render_x > row->size ? row->size : render_x;
+    }
+
     int cur_render_x = 0;
     int byte_pos = 0;
 
@@ -1236,7 +1245,10 @@ static int row_renderx_to_cursorx(editor_row_t *row, int render_x)
             next_render_x += (TAB_STOP - 1) - (cur_render_x % TAB_STOP);
             next_render_x++;
         } else {
-            next_render_x += utf8_char_width(&row->chars[byte_pos]);
+            int char_len = 1;
+            next_render_x += utf8_char_width_and_len(&row->chars[byte_pos],
+                                                     (size_t) (row->size - byte_pos),
+                                                     &char_len);
         }
 
         if (next_render_x > render_x)
@@ -1247,7 +1259,10 @@ static int row_renderx_to_cursorx(editor_row_t *row, int render_x)
         if (row->chars[byte_pos] == '\t') {
             byte_pos++;
         } else {
-            byte_pos += utf8_byte_length((uint8_t) row->chars[byte_pos]);
+            int char_len = 1;
+            utf8_char_width_and_len(&row->chars[byte_pos],
+                                    (size_t) (row->size - byte_pos), &char_len);
+            byte_pos += char_len;
         }
     }
     return byte_pos;
@@ -1257,22 +1272,33 @@ static void row_update(editor_row_t *row, int row_idx)
 {
     int tabs = 0;
     int wide_chars = 0;
+    bool direct_map = true;
     int byte_pos = 0;
 
     /* Count tabs and wide characters for buffer allocation */
     while (byte_pos < row->size) {
-        if (row->chars[byte_pos] == '\t') {
+        unsigned char c = (unsigned char) row->chars[byte_pos];
+        if (c == '\t') {
             tabs++;
+            direct_map = false;
+            byte_pos++;
+        } else if (!(c & 0x80)) {
+            if (c < 0x20 || c == 0x7F)
+                direct_map = false;
             byte_pos++;
         } else {
-            int char_len = utf8_byte_length((uint8_t) row->chars[byte_pos]);
-            int char_width = utf8_char_width(&row->chars[byte_pos]);
+            int char_len = 1;
+            int char_width = utf8_char_width_and_len(&row->chars[byte_pos],
+                                                     (size_t) (row->size - byte_pos),
+                                                     &char_len);
+            direct_map = false;
             if (char_width > 1) {
                 wide_chars += (char_width - 1);
             }
             byte_pos += char_len;
         }
     }
+    row->render_direct_map = direct_map;
 
     free(row->render);
     /* Allocate extra space for tabs and wide characters */
