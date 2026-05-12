@@ -385,7 +385,7 @@ static void tremove(pitem *t, unsigned idx, unsigned add) {
 	pitem n;
 	if (!(*t)) return;
 	unsigned cur_key = add + cnt ((*t)->l), new_add = cur_key + 1;
-	unsigned rk, lk = rk = UINT_MAX;
+	unsigned lk = UINT_MAX, rk = UINT_MAX;
 	if ((*t)->l) lk = cnt ((*t)->l->l) + add;
 	if ((*t)->r) rk = cnt ((*t)->r->l) + new_add;
 	if (cur_key == idx) {
@@ -441,6 +441,7 @@ size_t tlist_getsize(struct tlist* t) {
 }
 
 void* tlist_get(struct tlist* t, size_t idx) {
+	if(idx >= cnt (t->root)) return 0;
 	return data(getitem(t->root, idx, 0));
 }
 
@@ -459,7 +460,7 @@ int tlist_append(struct tlist* t, void *value) {
 static int tlist_delete_impl(struct tlist *t, size_t idx, int deep) {
 	if(idx >= cnt (t->root)) return 0;
 	pitem it = getitem(t->root, idx, 0);
-	if(deep) free(data(it));
+	if(deep) free(*(void**)data(it));
 	tremove(&t->root, idx, 0);
 	free(it);
 	return 1;
