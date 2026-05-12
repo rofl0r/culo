@@ -50,6 +50,7 @@ typedef enum {
 #define CTRL_(k) ((k) & (0x1f))
 #define META_(k) (0x800 | (unsigned char)(k))
 #define TAB_STOP 4
+#define UNDO_STACK_CAP 64
 
 /* UTF-8 handling functions */
 
@@ -536,6 +537,31 @@ struct {
     .notfound_msg = "",
 };
 
+typedef enum {
+    EDIT_INSERT = 0,
+    EDIT_DELETE = 1,
+} edit_type_t;
+
+typedef struct {
+    edit_type_t type;
+    int row, col;
+    char *text;
+    size_t len;
+    int before_y, before_x;
+    int after_y, after_x;
+} undo_item_t;
+
+typedef struct {
+    undo_item_t undo[UNDO_STACK_CAP];
+    undo_item_t redo[UNDO_STACK_CAP];
+    int undo_count;
+    int redo_count;
+    bool replaying;
+    bool batching;
+} undo_state_t;
+
+static undo_state_t g_undo = {0};
+
 /* Number of rows */
 #define NR ((int)tlist_getsize(ec.rows))
 
@@ -652,6 +678,16 @@ static void editor_refresh(void);
 static int get_line_number_width(void);
 static void editor_newline(void);
 static void editor_insert_char(int c);
+static void undo_reset_history(void);
+static void undo_record_insert(int row, int col, const char *text, size_t len,
+                               int before_y, int before_x, int after_y, int after_x);
+static void undo_record_delete(int row, int col, const char *text, size_t len,
+                               int before_y, int before_x, int after_y, int after_x);
+static void undo_perform_undo(void);
+static void undo_perform_redo(void);
+static bool undo_is_replaying(void);
+static bool undo_is_batching(void);
+static void undo_set_batching(bool batching);
 
 /* Mode management implementation */
 static void mode_set(editor_mode_t new_mode)
@@ -1236,6 +1272,263 @@ static void row_insert(int at, const char *s, size_t line_len)
     ec.modified = true;
 }
 
+static char *xstrndup0(const char *s, size_t len)
+{
+    char *p = malloc(len + 1);
+    if (!p)
+        return NULL;
+    if (len)
+        memcpy(p, s, len);
+    p[len] = '\0';
+    return p;
+}
+
+static void undo_item_free(undo_item_t *item)
+{
+    free(item->text);
+    item->text = NULL;
+    item->len = 0;
+}
+
+static void undo_stack_clear(undo_item_t *stack, int *count)
+{
+    while (*count > 0) {
+        (*count)--;
+        undo_item_free(&stack[*count]);
+    }
+}
+
+static void undo_stack_push(undo_item_t *stack, int *count, undo_item_t item)
+{
+    if (*count == UNDO_STACK_CAP) {
+        undo_item_free(&stack[0]);
+        memmove(&stack[0], &stack[1], sizeof(stack[0]) * (UNDO_STACK_CAP - 1));
+        *count = UNDO_STACK_CAP - 1;
+    }
+    stack[*count] = item;
+    (*count)++;
+}
+
+static bool undo_stack_pop(undo_item_t *stack, int *count, undo_item_t *out)
+{
+    if (*count <= 0)
+        return false;
+    (*count)--;
+    *out = stack[*count];
+    memset(&stack[*count], 0, sizeof(stack[*count]));
+    return true;
+}
+
+static bool undo_insert_bytes(int row_idx, int col, const char *s, size_t len)
+{
+    editor_row_t *row = ROW(row_idx);
+    if (!row || len == 0)
+        return row != NULL;
+    if (col < 0)
+        col = 0;
+    if (col > row->size)
+        col = row->size;
+    char *nc = realloc(row->chars, (size_t)row->size + len + 1 + ROW_ALLOC_PAD);
+    if (!nc)
+        return false;
+    row->chars = nc;
+    memmove(&row->chars[col + len], &row->chars[col], (size_t)(row->size - col) + 1);
+    memcpy(&row->chars[col], s, len);
+    row->size += (int)len;
+    row_update(row, row_idx);
+    return true;
+}
+
+static bool undo_apply_insert_text(int row, int col, const char *text, size_t len)
+{
+    if (row < 0 || row > NR)
+        return false;
+    if (row == NR)
+        row_insert(NR, "", 0);
+    int y = row, x = col;
+    size_t i = 0;
+    while (i < len) {
+        size_t seg = 0;
+        while (i + seg < len && text[i + seg] != '\n')
+            seg++;
+        if (seg > 0 && !undo_insert_bytes(y, x, text + i, seg))
+            return false;
+        x += (int)seg;
+        i += seg;
+        if (i < len && text[i] == '\n') {
+            editor_row_t *r = ROW(y);
+            if (!r)
+                return false;
+            row_insert(y + 1, &r->chars[x], (size_t)(r->size - x));
+            r = ROW(y);
+            r->size = x;
+            r->chars[x] = '\0';
+            row_update(r, y);
+            y++;
+            x = 0;
+            i++;
+        }
+    }
+    ec.modified = true;
+    return true;
+}
+
+static bool undo_delete_bytes(int row_idx, int col, size_t len)
+{
+    editor_row_t *row = ROW(row_idx);
+    if (!row || len == 0)
+        return row != NULL;
+    if (col < 0 || col > row->size || (size_t)(row->size - col) < len)
+        return false;
+    memmove(&row->chars[col], &row->chars[col + len], (size_t)(row->size - col) - len + 1);
+    row->size -= (int)len;
+    row_update(row, row_idx);
+    return true;
+}
+
+static bool undo_apply_delete_text(int row, int col, const char *text, size_t len)
+{
+    if (row < 0 || row >= NR)
+        return false;
+    int y = row, x = col;
+    size_t i = 0;
+    while (i < len) {
+        size_t seg = 0;
+        while (i + seg < len && text[i + seg] != '\n')
+            seg++;
+        if (seg > 0 && !undo_delete_bytes(y, x, seg))
+            return false;
+        i += seg;
+        if (i < len && text[i] == '\n') {
+            if (y + 1 >= NR)
+                return false;
+            editor_row_t *r = ROW(y);
+            editor_row_t *next = ROW(y + 1);
+            if (!r || !next)
+                return false;
+            char *nc = realloc(r->chars, (size_t)r->size + (size_t)next->size + 1 + ROW_ALLOC_PAD);
+            if (!nc)
+                return false;
+            r->chars = nc;
+            memcpy(&r->chars[r->size], next->chars, (size_t)next->size + 1);
+            r->size += next->size;
+            row_update(r, y);
+            row_erase(y + 1);
+            i++;
+        }
+    }
+    ec.modified = true;
+    return true;
+}
+
+static void undo_reset_history(void)
+{
+    undo_stack_clear(g_undo.undo, &g_undo.undo_count);
+    undo_stack_clear(g_undo.redo, &g_undo.redo_count);
+}
+
+static bool undo_is_replaying(void)
+{
+    return g_undo.replaying;
+}
+
+static bool undo_is_batching(void)
+{
+    return g_undo.batching;
+}
+
+static void undo_set_batching(bool batching)
+{
+    g_undo.batching = batching;
+}
+
+static void undo_record_common(edit_type_t type, int row, int col, const char *text, size_t len,
+                               int before_y, int before_x, int after_y, int after_x)
+{
+    if (g_undo.replaying || g_undo.batching || !text || len == 0)
+        return;
+    undo_item_t item = {
+        .type = type,
+        .row = row,
+        .col = col,
+        .text = xstrndup0(text, len),
+        .len = len,
+        .before_y = before_y,
+        .before_x = before_x,
+        .after_y = after_y,
+        .after_x = after_x,
+    };
+    if (!item.text)
+        return;
+    undo_stack_clear(g_undo.redo, &g_undo.redo_count);
+    undo_stack_push(g_undo.undo, &g_undo.undo_count, item);
+}
+
+static void undo_record_insert(int row, int col, const char *text, size_t len,
+                               int before_y, int before_x, int after_y, int after_x)
+{
+    undo_record_common(EDIT_INSERT, row, col, text, len, before_y, before_x, after_y, after_x);
+}
+
+static void undo_record_delete(int row, int col, const char *text, size_t len,
+                               int before_y, int before_x, int after_y, int after_x)
+{
+    undo_record_common(EDIT_DELETE, row, col, text, len, before_y, before_x, after_y, after_x);
+}
+
+static void undo_apply_item(const undo_item_t *item, bool redo)
+{
+    bool ok;
+    if (redo) {
+        ok = (item->type == EDIT_INSERT)
+                 ? undo_apply_insert_text(item->row, item->col, item->text, item->len)
+                 : undo_apply_delete_text(item->row, item->col, item->text, item->len);
+        if (ok) {
+            ec.cursor_y = item->after_y;
+            ec.cursor_x = item->after_x;
+        }
+    } else {
+        ok = (item->type == EDIT_INSERT)
+                 ? undo_apply_delete_text(item->row, item->col, item->text, item->len)
+                 : undo_apply_insert_text(item->row, item->col, item->text, item->len);
+        if (ok) {
+            ec.cursor_y = item->before_y;
+            ec.cursor_x = item->before_x;
+        }
+    }
+    if (ec.cursor_y < 0) ec.cursor_y = 0;
+    if (ec.cursor_y > NR) ec.cursor_y = NR;
+    if (ec.cursor_y < NR && ec.cursor_x > ROW(ec.cursor_y)->size)
+        ec.cursor_x = ROW(ec.cursor_y)->size;
+    if (ec.cursor_x < 0) ec.cursor_x = 0;
+}
+
+static void undo_perform_undo(void)
+{
+    undo_item_t item;
+    if (!undo_stack_pop(g_undo.undo, &g_undo.undo_count, &item)) {
+        ui_set_message("Nothing to undo");
+        return;
+    }
+    g_undo.replaying = true;
+    undo_apply_item(&item, false);
+    g_undo.replaying = false;
+    undo_stack_push(g_undo.redo, &g_undo.redo_count, item);
+}
+
+static void undo_perform_redo(void)
+{
+    undo_item_t item;
+    if (!undo_stack_pop(g_undo.redo, &g_undo.redo_count, &item)) {
+        ui_set_message("Nothing to redo");
+        return;
+    }
+    g_undo.replaying = true;
+    undo_apply_item(&item, true);
+    g_undo.replaying = false;
+    undo_stack_push(g_undo.undo, &g_undo.undo_count, item);
+}
+
 static void editor_copy(int cut)
 {
     if (ec.cursor_y >= NR)
@@ -1256,7 +1549,21 @@ static void editor_cut(bool append)
     if (ec.cursor_y >= NR)
         return;
 
+    int before_y = ec.cursor_y, before_x = ec.cursor_x;
     bool is_last_line = (ec.cursor_y == NR - 1);
+    bool remove_newline = (NR > 1 && !is_last_line);
+    size_t del_len = (size_t)ROW(ec.cursor_y)->size + (remove_newline ? 1u : 0u);
+    bool have_newline = false;
+    char *deleted = xstrndup0(ROW(ec.cursor_y)->chars, (size_t)ROW(ec.cursor_y)->size);
+    if (deleted && remove_newline) {
+        char *nd = realloc(deleted, del_len + 1);
+        if (nd) {
+            deleted = nd;
+            deleted[del_len - 1] = '\n';
+            deleted[del_len] = '\0';
+            have_newline = true;
+        }
+    }
 
     /* Build the new clipboard text for this line */
     size_t line_size = ROW(ec.cursor_y)->size;
@@ -1308,6 +1615,12 @@ static void editor_cut(bool append)
         ec.cursor_y = NR - 1;
     ec.cursor_x = 0;
     ec.modified = true;
+    if (deleted) {
+        size_t record_len = have_newline ? del_len : strlen(deleted);
+        undo_record_delete(before_y, 0, deleted, record_len,
+                           before_y, before_x, ec.cursor_y, ec.cursor_x);
+        free(deleted);
+    }
 }
 
 static void editor_paste(void)
@@ -1333,12 +1646,19 @@ static void editor_paste(void)
             ec.cursor_x = max_x;
     }
 
+    int before_y = ec.cursor_y, before_x = ec.cursor_x;
     size_t paste_len = strlen(ec.copied_char_buffer);
+    undo_set_batching(true);
     for (size_t i = 0; i < paste_len; i++) {
         if (ec.copied_char_buffer[i] == '\n')
             editor_newline();
         else
             editor_insert_char((unsigned char) ec.copied_char_buffer[i]);
+    }
+    undo_set_batching(false);
+    if (paste_len > 0) {
+        undo_record_insert(before_y, before_x, ec.copied_char_buffer, paste_len,
+                           before_y, before_x, ec.cursor_y, ec.cursor_x);
     }
     ui_set_message("Pasted %zu bytes", paste_len);
 }
@@ -1550,6 +1870,9 @@ static void selection_delete(void)
         start_x = end_x;
         end_x = tmp_x;
     }
+    int before_y = ec.cursor_y, before_x = ec.cursor_x;
+    char *deleted_text = selection_get_text();
+    size_t deleted_len = deleted_text ? strlen(deleted_text) : 0;
 
     if (start_y == end_y) {
         editor_row_t *row = ROW(start_y);
@@ -1585,6 +1908,11 @@ static void selection_delete(void)
 
     ec.selection.active = false;
     mode_set(MODE_NORMAL);
+    if (deleted_text && deleted_len > 0) {
+        undo_record_delete(start_y, start_x, deleted_text, deleted_len,
+                           before_y, before_x, ec.cursor_y, ec.cursor_x);
+    }
+    free(deleted_text);
 }
 
 /* Cut selected text (copy then delete) */
@@ -1603,6 +1931,7 @@ static void selection_cut(void)
 
 static void editor_newline(void)
 {
+    int before_y = ec.cursor_y, before_x = ec.cursor_x;
     if (ec.cursor_x == 0) {
         row_insert(ec.cursor_y, "", 0);
     } else {
@@ -1616,6 +1945,11 @@ static void editor_newline(void)
     ec.cursor_y++;
     ec.cursor_x = 0;
     ec.modified = true;
+    if (!undo_is_replaying() && !undo_is_batching()) {
+        static const char nl[] = "\n";
+        undo_record_insert(before_y, before_x, nl, 1, before_y, before_x,
+                           ec.cursor_y, ec.cursor_x);
+    }
 }
 
 /* Buffer for accumulating UTF-8 bytes */
@@ -1656,6 +1990,7 @@ static void editor_insert_char(int c)
     if (utf8_buffer.len < utf8_buffer.expected)
         return;
 
+    int before_y = ec.cursor_y, before_x = ec.cursor_x;
     if (ec.cursor_y == NR)
         row_insert(NR, "", 0);
     editor_row_t *row = ROW(ec.cursor_y);
@@ -1674,6 +2009,10 @@ static void editor_insert_char(int c)
     row_update(row, ec.cursor_y);
     ec.cursor_x += utf8_buffer.len;
     ec.modified = true;
+    if (!undo_is_replaying() && !undo_is_batching()) {
+        undo_record_insert(before_y, before_x, utf8_buffer.bytes, (size_t)utf8_buffer.len,
+                           before_y, before_x, ec.cursor_y, ec.cursor_x);
+    }
 
     /* Reset UTF-8 buffer */
     utf8_buffer.len = 0;
@@ -1688,11 +2027,13 @@ static void editor_delete_char(void)
         return;
 
     editor_row_t *row = ROW(ec.cursor_y);
+    int before_y = ec.cursor_y, before_x = ec.cursor_x;
 
     if (ec.cursor_x > 0) {
         /* Delete character before cursor */
         const char *prev = utf8_prev_char(row->chars, row->chars + ec.cursor_x);
         int prev_pos = prev - row->chars, char_len = ec.cursor_x - prev_pos;
+        char *deleted = xstrndup0(&row->chars[prev_pos], (size_t)char_len);
 
         memmove(&row->chars[prev_pos], &row->chars[ec.cursor_x],
                 row->size - ec.cursor_x + 1);
@@ -1700,10 +2041,16 @@ static void editor_delete_char(void)
         row_update(row, ec.cursor_y);
         ec.cursor_x = prev_pos;
         ec.modified = true;
+        if (deleted) {
+            undo_record_delete(before_y, prev_pos, deleted, (size_t)char_len,
+                               before_y, before_x, ec.cursor_y, ec.cursor_x);
+            free(deleted);
+        }
     } else {
         /* Delete newline - join with previous line */
         if (ec.cursor_y > 0) {
-            ec.cursor_x = ROW(ec.cursor_y - 1)->size;
+            int prev_size = ROW(ec.cursor_y - 1)->size;
+            ec.cursor_x = prev_size;
             editor_row_t *prev_row = ROW(ec.cursor_y - 1);
             char *new_chars = realloc(prev_row->chars,
                                       prev_row->size + row->size + 1 + ROW_ALLOC_PAD);
@@ -1717,6 +2064,11 @@ static void editor_delete_char(void)
             row_erase(ec.cursor_y);
             ec.cursor_y--;
             ec.modified = true;
+            if (!undo_is_replaying() && !undo_is_batching()) {
+                static const char nl[] = "\n";
+                undo_record_delete(before_y - 1, prev_size, nl, 1,
+                                   before_y, before_x, ec.cursor_y, ec.cursor_x);
+            }
         }
     }
 }
@@ -1738,6 +2090,7 @@ static char *file_rows_to_string(int *buf_len)
 
 static void file_open(const char *file_name)
 {
+    undo_reset_history();
     for (int i = 0; i < NR; i++)
         row_free_contents(ROW(i));
     tlist_free_items(ec.rows);
@@ -3109,6 +3462,7 @@ static void browser_render(void)
 /* Clean up all allocated memory before exit */
 static void editor_cleanup(void)
 {
+    undo_reset_history();
     for (int i = 0; i < NR; i++)
         row_free_contents(ROW(i));
     tlist_free(ec.rows);
@@ -3489,6 +3843,12 @@ static void editor_process_key(void)
         break;
     case CTRL_('o'): /* Save file (GNU nano: ^O Write Out) */
         file_save();
+        break;
+    case CTRL_('z'):
+        undo_perform_undo();
+        break;
+    case CTRL_('y'):
+        undo_perform_redo();
         break;
     case META_('a'):
     case META_('A'): /* Start text marking (GNU nano: M-A Set Mark) */
