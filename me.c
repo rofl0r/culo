@@ -3339,91 +3339,127 @@ static void browser_load_directory(const char *path)
     ec.mode_state.browser.offset = 0;
 }
 
-static void browser_open_selected(void)
+typedef enum {
+    SCROLL_LINE_OK,
+    SCROLL_LINE_END,
+} scroll_line_result_t;
+
+typedef enum {
+    SCROLL_EV_ENTER,
+    SCROLL_EV_CANCEL,
+} scroll_event_t;
+
+typedef enum {
+    SCROLL_ACT_CONTINUE,
+    SCROLL_ACT_REPAINT,
+    SCROLL_ACT_EXIT,
+} scroll_action_t;
+
+typedef struct scrollable_screen scrollable_screen_t;
+
+typedef scroll_line_result_t (*scroll_line_cb)(scrollable_screen_t *ss, int idx,
+                                               char *buf, int len);
+typedef scroll_action_t (*scroll_event_cb)(scrollable_screen_t *ss,
+                                           scroll_event_t ev, int idx);
+typedef scroll_action_t (*scroll_key_cb)(scrollable_screen_t *ss, int key);
+
+struct scrollable_screen {
+    const char     *title;
+    const char     *status_right;
+    int             total_lines;
+    int             offset;
+    int             selected;
+    bool            selectable;
+    scroll_line_cb  get_line;
+    scroll_event_cb on_event;
+    scroll_key_cb   on_key;
+    void           *ctx;
+};
+
+typedef struct {
+    char *selected_file;
+} browser_ctx_t;
+
+static void scrollable_screen_clamp(scrollable_screen_t *ss, int visible)
 {
-    if (ec.mode_state.browser.selected >= ec.mode_state.browser.num_entries)
+    if (ss->total_lines < 0)
+        ss->total_lines = 0;
+    if (visible < 0)
+        visible = 0;
+
+    int max_offset = ss->total_lines - visible;
+    if (max_offset < 0)
+        max_offset = 0;
+    if (ss->offset < 0)
+        ss->offset = 0;
+    if (ss->offset > max_offset)
+        ss->offset = max_offset;
+
+    if (!ss->selectable) {
+        ss->selected = -1;
         return;
-
-    char *entry = ec.mode_state.browser.entries[ec.mode_state.browser.selected];
-    if (!entry)
-        return;
-
-    if (entry[0] == '/') {
-        /* Directory */
-        if (!strcmp(entry, "/..")) {
-            /* Go to parent directory */
-            char *last_slash = strrchr(ec.mode_state.browser.current_dir, '/');
-            if (last_slash && last_slash != ec.mode_state.browser.current_dir) {
-                *last_slash = '\0';
-                browser_load_directory(ec.mode_state.browser.current_dir);
-            } else {
-                browser_load_directory("/");
-            }
-        } else {
-            /* Enter subdirectory */
-            char new_path[PATH_MAX];
-            snprintf(new_path, sizeof(new_path), "%s%s",
-                     ec.mode_state.browser.current_dir, entry);
-            browser_load_directory(new_path);
-        }
-    } else {
-        /* File - open it */
-        char full_path[PATH_MAX];
-        snprintf(full_path, sizeof(full_path), "%s/%s",
-                 ec.mode_state.browser.current_dir, entry);
-
-        /* Save current file if modified */
-        if (ec.modified) {
-            int r = ui_confirm("Current file has been modified. Save before "
-                               "opening new file?");
-            if (r == -1)
-                return; /* Cancel: stay in browser */
-            if (r == 1)
-                file_save(); /* Yes: save then open */
-            /* No (r == 0): discard changes and open */
-        }
-
-        /* Open the new file */
-        file_open(full_path);
-        browser_free_entries();
-        mode_set(MODE_NORMAL);
-        ui_set_message("Opened: %s", full_path);
-        editor_refresh_full(); /* Full redraw the editor with new file */
     }
+
+    if (ss->total_lines <= 0) {
+        ss->selected = -1;
+        ss->offset = 0;
+        return;
+    }
+
+    if (ss->selected < 0)
+        ss->selected = 0;
+    if (ss->selected >= ss->total_lines)
+        ss->selected = ss->total_lines - 1;
+
+    if (ss->selected < ss->offset)
+        ss->offset = ss->selected;
+    if (visible > 0 && ss->selected >= ss->offset + visible)
+        ss->offset = ss->selected - visible + 1;
+
+    max_offset = ss->total_lines - visible;
+    if (max_offset < 0)
+        max_offset = 0;
+    if (ss->offset > max_offset)
+        ss->offset = max_offset;
 }
 
-static void help_render(void)
+static void scrollable_screen_render(scrollable_screen_t *ss)
 {
     editor_buf_t eb = {NULL, 0};
+    char line[4096];
+    int visible = ec.screen_rows - 1;
+    if (visible < 0)
+        visible = 0;
 
-    /* Redraw from home; avoid full-screen clear to reduce flicker. */
     buf_append(&eb, "\x1b[?25l", 6);
     buf_append(&eb, "\x1b[H", 3);
 
-    /* Title bar: clear and repaint top line in inverse video. */
     buf_append(&eb, "\x1b[7m", 4);
-    {
-        const char *title_text = "  Help";
-        int tlen = (int)strlen(title_text);
-        if (tlen > ec.screen_cols)
-            tlen = ec.screen_cols;
-        buf_append(&eb, title_text, tlen);
-        buf_append(&eb, "\x1b[K", 3);
+    int tlen = ss->title ? (int)strlen(ss->title) : 0;
+    if (tlen > ec.screen_cols)
+        tlen = ec.screen_cols;
+    if (ss->title && tlen > 0)
+        buf_append(&eb, ss->title, tlen);
+    while (tlen < ec.screen_cols) {
+        buf_append(&eb, " ", 1);
+        tlen++;
     }
-    buf_append(&eb, "\x1b[0m", 4);
-    buf_append(&eb, "\r\n", 2);
-
-    int visible = ec.screen_rows - 1; /* ec.screen_rows already excludes status+messagebar; subtract 1 for title */
-    int offset  = ec.mode_state.help.offset;
+    buf_append(&eb, "\x1b[0m\r\n", 6);
 
     for (int i = 0; i < visible; i++) {
-        int idx = offset + i;
-        buf_append(&eb, "\r\x1b[K", 4); /* move to line start and clear */
-        if (idx < HELP_NUM_LINES) {
-            int hlen = (int)strlen(help_lines[idx]);
-            if (hlen > ec.screen_cols)
-                hlen = ec.screen_cols;
-            buf_append(&eb, help_lines[idx], hlen);
+        int idx = ss->offset + i;
+        buf_append(&eb, "\r\x1b[K", 4);
+        scroll_line_result_t line_result = SCROLL_LINE_END;
+        if (ss->get_line)
+            line_result = ss->get_line(ss, idx, line, (int)sizeof(line));
+        if (line_result == SCROLL_LINE_OK) {
+            int line_len = (int)strlen(line);
+            if (line_len > ec.screen_cols)
+                line_len = ec.screen_cols;
+            if (ss->selectable && idx == ss->selected)
+                buf_append(&eb, "\x1b[7m", 4);
+            buf_append(&eb, line, line_len);
+            buf_append(&eb, "\x1b[0m", 4);
         } else {
             buf_append(&eb, "~", 1);
         }
@@ -3431,150 +3467,300 @@ static void help_render(void)
             buf_append(&eb, "\r\n", 2);
     }
 
-    /* Status bar */
     buf_append(&eb, "\r\n", 2);
     buf_append(&eb, "\x1b[100m", 6);
-    char status[80];
-    int last_visible = offset + visible;
-    if (last_visible > HELP_NUM_LINES)
-        last_visible = HELP_NUM_LINES;
-    int len = snprintf(status, sizeof(status), " [HELP] lines %d-%d of %d",
-                       offset + 1, last_visible, HELP_NUM_LINES);
+    char status[256], r_status[128];
+    int len = snprintf(status, sizeof(status), "%s", ss->title ? ss->title : "");
+    int r_len = 0;
+    if (ss->status_right && ss->status_right[0] != '\0')
+        r_len = snprintf(r_status, sizeof(r_status), "%s", ss->status_right);
     if (len > ec.screen_cols)
         len = ec.screen_cols;
     buf_append(&eb, status, len);
-    while (len++ < ec.screen_cols)
-        buf_append(&eb, " ", 1);
-    buf_append(&eb, "\x1b[m", 3);
-    buf_append(&eb, "\r\n", 2);
-    ui_draw_messagebar(&eb);
-
-    write(STDOUT_FILENO, eb.buf, eb.len);
-    buf_destroy(&eb);
-}
-
-static void browser_render(void)
-{
-    editor_buf_t eb = {NULL, 0};
-
-    /* Redraw from top-left; avoid full-screen clear to prevent visible flicker. */
-    buf_append(&eb, "\x1b[?25l", 6); /* Hide cursor */
-    buf_append(&eb, "\x1b[H", 3);    /* Move cursor home */
-
-    /* Title bar */
-    char title[256];
-    snprintf(title, sizeof(title), "=== File Browser: %s ===",
-             ec.mode_state.browser.current_dir);
-    buf_append(&eb, "\x1b[7m", 4); /* Inverse video */
-    buf_append(&eb, title, strlen(title));
-    buf_append(&eb, "\x1b[K", 3);   /* Clear rest of title line */
-    buf_append(&eb, "\x1b[0m", 4); /* Reset */
-    buf_append(&eb, "\r\n", 2);
-
-    /* Calculate visible entries */
-    int visible_lines = ec.screen_rows - 1; /* Subtract title line */
-
-    /* Adjust offset if needed */
-    if (ec.mode_state.browser.selected < ec.mode_state.browser.offset) {
-        ec.mode_state.browser.offset = ec.mode_state.browser.selected;
-    }
-    if (ec.mode_state.browser.selected >=
-        ec.mode_state.browser.offset + visible_lines) {
-        ec.mode_state.browser.offset =
-            ec.mode_state.browser.selected - visible_lines + 1;
-    }
-
-    /* Display entries */
-    int lines_printed = 0;
-    for (int i = 0; i < visible_lines && i + ec.mode_state.browser.offset <
-                                             ec.mode_state.browser.num_entries;
-         i++) {
-        int idx = i + ec.mode_state.browser.offset;
-        char *entry = ec.mode_state.browser.entries[idx];
-
-        /* Highlight selected entry */
-        if (idx == ec.mode_state.browser.selected)
-            buf_append(&eb, "\x1b[7m", 4); /* Inverse video */
-
-        /* Display entry with colored icon */
-        int color;
-        const char *type_str = get_file_type_info(entry, &color);
-
-        /* Add color for file type */
-        char color_buf[16];
-        snprintf(color_buf, sizeof(color_buf), "\x1b[%dm", color);
-        buf_append(&eb, color_buf, strlen(color_buf));
-
-        buf_append(&eb, "  ", 2);
-        buf_append(&eb, type_str, strlen(type_str));
-
-        /* Display name */
-        if (entry[0] == '/') {
-            /* Directory name without leading slash */
-            buf_append(&eb, entry + 1, strlen(entry + 1));
-        } else {
-            /* File name */
-            buf_append(&eb, entry, strlen(entry));
-        }
-
-        /* Reset color */
-        buf_append(&eb, "\x1b[0m", 4);
-
-        if (idx == ec.mode_state.browser.selected)
-            buf_append(&eb, "\x1b[0m", 4); /* Reset */
-
-        buf_append(&eb, "\x1b[K", 3); /* Clear to end of line */
-
-        lines_printed++;
-        /* Only add newline if not the last line before status */
-        if (lines_printed < visible_lines)
-            buf_append(&eb, "\r\n", 2);
-    }
-
-    /* Fill remaining lines */
-    for (int i = lines_printed; i < visible_lines; i++) {
-        if (i > lines_printed || lines_printed > 0)
-            buf_append(&eb, "\r\n", 2);
-        buf_append(&eb, "~\x1b[K", 4);
-    }
-
-    /* Always add final newline before status bar */
-    if (visible_lines > 0)
-        buf_append(&eb, "\r\n", 2);
-
-    /* Draw status bar similar to ui_draw_statusbar */
-    buf_append(&eb, "\x1b[100m", 6); /* Dark gray background */
-    char status[80], r_status[80];
-
-    /* Left side: mode and path */
-    int len = snprintf(status, sizeof(status), " [BROWSER] %s",
-                       ec.mode_state.browser.current_dir);
-
-    /* Right side: file count */
-    int r_len = snprintf(r_status, sizeof(r_status), "%d/%d files",
-                         ec.mode_state.browser.selected + 1,
-                         ec.mode_state.browser.num_entries);
-
-    if (len > ec.screen_cols)
-        len = ec.screen_cols;
-    buf_append(&eb, status, len);
-
     while (len < ec.screen_cols) {
-        if (ec.screen_cols - len == r_len) {
+        if (r_len > 0 && ec.screen_cols - len == r_len) {
             buf_append(&eb, r_status, r_len);
             break;
         }
         buf_append(&eb, " ", 1);
         len++;
     }
-    buf_append(&eb, "\x1b[m", 3); /* Reset */
-    buf_append(&eb, "\r\n", 2);   /* Move to message bar line */
-
-    /* Use ui_draw_messagebar for the bottom message bar */
+    buf_append(&eb, "\x1b[m\r\n", 5);
     ui_draw_messagebar(&eb);
-
     write(STDOUT_FILENO, eb.buf, eb.len);
     buf_destroy(&eb);
+}
+
+static void scrollable_screen_run(scrollable_screen_t *ss)
+{
+    while (1) {
+        int visible = ec.screen_rows - 1;
+        if (visible < 0)
+            visible = 0;
+        scrollable_screen_clamp(ss, visible);
+        scrollable_screen_render(ss);
+
+        int c = term_read_key();
+        scroll_action_t act = SCROLL_ACT_CONTINUE;
+        int max_offset = ss->total_lines - visible;
+        if (max_offset < 0)
+            max_offset = 0;
+
+        switch (c) {
+        case ARROW_UP:
+            if (ss->selectable) {
+                ss->selected--;
+                ss->offset--;
+            } else {
+                ss->offset--;
+            }
+            break;
+        case ARROW_DOWN:
+            if (ss->selectable) {
+                ss->selected++;
+                ss->offset++;
+            } else {
+                ss->offset++;
+            }
+            break;
+        case PAGE_UP:
+            if (ss->selectable) {
+                ss->selected -= visible;
+                ss->offset -= visible;
+            } else {
+                ss->offset -= visible;
+            }
+            break;
+        case PAGE_DOWN:
+            if (ss->selectable) {
+                ss->selected += visible;
+                ss->offset += visible;
+            } else {
+                ss->offset += visible;
+            }
+            break;
+        case HOME_KEY:
+            ss->offset = 0;
+            if (ss->selectable)
+                ss->selected = 0;
+            break;
+        case END_KEY:
+            ss->offset = max_offset;
+            if (ss->selectable)
+                ss->selected = ss->total_lines - 1;
+            break;
+        case '\r':
+            if (ss->selectable && ss->on_event)
+                act = ss->on_event(ss, SCROLL_EV_ENTER, ss->selected);
+            break;
+        case CTRL_('c'):
+        case CTRL_('x'):
+        case '\x1b':
+            if (ss->on_event)
+                act = ss->on_event(ss, SCROLL_EV_CANCEL, -1);
+            else
+                act = SCROLL_ACT_EXIT;
+            break;
+        default:
+            if (ss->on_key)
+                act = ss->on_key(ss, c);
+            break;
+        }
+
+        scrollable_screen_clamp(ss, visible);
+
+        if (act == SCROLL_ACT_EXIT)
+            return;
+    }
+}
+
+static scroll_line_result_t help_get_line(scrollable_screen_t *ss, int idx,
+                                          char *buf, int len)
+{
+    (void)ss;
+    if (idx < 0 || idx >= HELP_NUM_LINES)
+        return SCROLL_LINE_END;
+    snprintf(buf, (size_t)len, "%s", help_lines[idx]);
+    return SCROLL_LINE_OK;
+}
+
+static scroll_action_t help_on_event(scrollable_screen_t *ss, scroll_event_t ev,
+                                     int idx)
+{
+    (void)ss;
+    (void)idx;
+    if (ev == SCROLL_EV_CANCEL)
+        return SCROLL_ACT_EXIT;
+    return SCROLL_ACT_CONTINUE;
+}
+
+static scroll_action_t help_key_cb(scrollable_screen_t *ss, int key)
+{
+    (void)ss;
+    if (key == CTRL_('g'))
+        return SCROLL_ACT_EXIT;
+    return SCROLL_ACT_CONTINUE;
+}
+
+static void browser_update_labels(scrollable_screen_t *ss)
+{
+    static char title[PATH_MAX + 32];
+    static char right[64];
+    const char *dir = ec.mode_state.browser.current_dir ?
+                      ec.mode_state.browser.current_dir : ".";
+    snprintf(title, sizeof(title), " [BROWSER] %s", dir);
+    int current = ss->selected >= 0 ? ss->selected + 1 : 0;
+    snprintf(right, sizeof(right), "%d/%d files", current, ss->total_lines);
+    ss->title = title;
+    ss->status_right = right;
+}
+
+static scroll_line_result_t browser_get_line(scrollable_screen_t *ss, int idx,
+                                             char *buf, int len)
+{
+    browser_update_labels(ss);
+    if (idx < 0 || idx >= ec.mode_state.browser.num_entries)
+        return SCROLL_LINE_END;
+
+    const char *entry = ec.mode_state.browser.entries[idx];
+    int color = 37;
+    const char *type_str = get_file_type_info(entry, &color);
+    snprintf(buf, (size_t)len, "\x1b[%dm  %s%s\x1b[0m", color, type_str,
+             (entry[0] == '/') ? entry + 1 : entry);
+    return SCROLL_LINE_OK;
+}
+
+static scroll_action_t browser_on_event(scrollable_screen_t *ss,
+                                        scroll_event_t ev, int idx)
+{
+    browser_ctx_t *ctx = ss->ctx;
+
+    if (ev == SCROLL_EV_CANCEL) {
+        browser_free_entries();
+        mode_set(MODE_NORMAL);
+        return SCROLL_ACT_EXIT;
+    }
+
+    if (ev != SCROLL_EV_ENTER || idx < 0 || idx >= ec.mode_state.browser.num_entries)
+        return SCROLL_ACT_CONTINUE;
+
+    char *entry = ec.mode_state.browser.entries[idx];
+    if (entry[0] == '/') {
+        char new_path[PATH_MAX];
+        if (!strcmp(entry, "/..")) {
+            const char *cur = ec.mode_state.browser.current_dir;
+            if (!cur || !strcmp(cur, "/")) {
+                snprintf(new_path, sizeof(new_path), "/");
+            } else {
+                snprintf(new_path, sizeof(new_path), "%s", cur);
+                char *last_slash = strrchr(new_path, '/');
+                if (!last_slash || last_slash == new_path)
+                    snprintf(new_path, sizeof(new_path), "/");
+                else
+                    *last_slash = '\0';
+            }
+        } else {
+            snprintf(new_path, sizeof(new_path), "%s%s",
+                     ec.mode_state.browser.current_dir, entry);
+        }
+        browser_load_directory(new_path);
+        if (ec.mode != MODE_BROWSER)
+            return SCROLL_ACT_EXIT;
+        ss->total_lines = ec.mode_state.browser.num_entries;
+        ss->offset = 0;
+        ss->selected = ss->total_lines > 0 ? 0 : -1;
+        browser_update_labels(ss);
+        return SCROLL_ACT_REPAINT;
+    }
+
+    if (ec.modified) {
+        int r = ui_confirm("Current file has been modified. Save before "
+                           "opening new file?");
+        if (r == -1)
+            return SCROLL_ACT_CONTINUE;
+        if (r == 1)
+            file_save();
+    }
+
+    char full_path[PATH_MAX];
+    snprintf(full_path, sizeof(full_path), "%s/%s",
+             ec.mode_state.browser.current_dir, entry);
+    ctx->selected_file = strdup(full_path);
+    if (!ctx->selected_file) {
+        ui_set_message("Out of memory");
+        return SCROLL_ACT_CONTINUE;
+    }
+    return SCROLL_ACT_EXIT;
+}
+
+static scroll_action_t browser_key_cb(scrollable_screen_t *ss, int key)
+{
+    if (key != 'h' && key != 'H')
+        return SCROLL_ACT_CONTINUE;
+
+    ec.mode_state.browser.show_hidden = !ec.mode_state.browser.show_hidden;
+    const char *cur = ec.mode_state.browser.current_dir ?
+                      ec.mode_state.browser.current_dir : ".";
+    char *path = strdup(cur);
+    if (!path) {
+        ui_set_message("Out of memory");
+        return SCROLL_ACT_CONTINUE;
+    }
+    browser_load_directory(path);
+    free(path);
+    if (ec.mode != MODE_BROWSER)
+        return SCROLL_ACT_EXIT;
+    ss->total_lines = ec.mode_state.browser.num_entries;
+    ss->offset = 0;
+    ss->selected = ss->total_lines > 0 ? 0 : -1;
+    browser_update_labels(ss);
+    return SCROLL_ACT_REPAINT;
+}
+
+static void help_screen_open(void)
+{
+    scrollable_screen_t ss = {
+        .title = "  Help",
+        .status_right = NULL,
+        .total_lines = HELP_NUM_LINES,
+        .offset = ec.mode_state.help.offset,
+        .selected = -1,
+        .selectable = false,
+        .get_line = help_get_line,
+        .on_event = help_on_event,
+        .on_key = help_key_cb,
+        .ctx = NULL,
+    };
+    scrollable_screen_run(&ss);
+    mode_restore();
+    editor_refresh_full();
+}
+
+static void browser_screen_open(void)
+{
+    browser_ctx_t ctx = {NULL};
+    scrollable_screen_t ss = {
+        .title = " [BROWSER]",
+        .status_right = NULL,
+        .total_lines = ec.mode_state.browser.num_entries,
+        .offset = 0,
+        .selected = ec.mode_state.browser.num_entries > 0 ? 0 : -1,
+        .selectable = true,
+        .get_line = browser_get_line,
+        .on_event = browser_on_event,
+        .on_key = browser_key_cb,
+        .ctx = &ctx,
+    };
+    browser_update_labels(&ss);
+    scrollable_screen_run(&ss);
+    if (ctx.selected_file) {
+        mode_set(MODE_NORMAL);
+        browser_free_entries();
+        file_open(ctx.selected_file);
+        ui_set_message("Opened: %s", ctx.selected_file);
+        free(ctx.selected_file);
+        editor_refresh_full();
+    }
 }
 
 /* Clean up all allocated memory before exit */
@@ -3624,70 +3810,6 @@ static void editor_process_key(void)
 
     /* Handle mode-specific keys first */
     switch (ec.mode) {
-    case MODE_BROWSER:
-        /* File browser mode */
-        switch (c) {
-        case CTRL_('c'): /* ^C - cancel */
-        case CTRL_('x'):
-            browser_free_entries();
-            mode_set(MODE_NORMAL);
-            editor_refresh_full(); /* Full redraw the editor */
-            return;
-        case '\r': /* Enter - open file/directory */
-            browser_open_selected();
-            if (ec.mode == MODE_BROWSER)
-                browser_render();
-            return;
-        case ARROW_UP:
-            if (ec.mode_state.browser.selected > 0) {
-                ec.mode_state.browser.selected--;
-            }
-            browser_render();
-            return;
-        case ARROW_DOWN:
-            if (ec.mode_state.browser.selected <
-                ec.mode_state.browser.num_entries - 1) {
-                ec.mode_state.browser.selected++;
-            }
-            browser_render();
-            return;
-        case PAGE_UP:
-            ec.mode_state.browser.selected -= ec.screen_rows - 3;
-            if (ec.mode_state.browser.selected < 0)
-                ec.mode_state.browser.selected = 0;
-            browser_render();
-            return;
-        case PAGE_DOWN:
-            ec.mode_state.browser.selected += ec.screen_rows - 3;
-            if (ec.mode_state.browser.selected >=
-                ec.mode_state.browser.num_entries)
-                ec.mode_state.browser.selected =
-                    ec.mode_state.browser.num_entries - 1;
-            browser_render();
-            return;
-        case HOME_KEY:
-            ec.mode_state.browser.selected = 0;
-            browser_render();
-            return;
-        case END_KEY:
-            ec.mode_state.browser.selected =
-                ec.mode_state.browser.num_entries - 1;
-            browser_render();
-            return;
-        case 'h':
-        case 'H':
-            /* Toggle hidden files */
-            ec.mode_state.browser.show_hidden =
-                !ec.mode_state.browser.show_hidden;
-            browser_load_directory(ec.mode_state.browser.current_dir);
-            browser_render();
-            return;
-        default:
-            /* Ignore other keys */
-            return;
-        }
-        break;
-
     case MODE_SELECT:
         switch (c) {
         case CTRL_('c'): /* ^C - abort selection */
@@ -3758,43 +3880,6 @@ static void editor_process_key(void)
             break;
         }
         break;
-
-    case MODE_HELP: {
-        int visible   = ec.screen_rows - 1;
-        int max_offset = HELP_NUM_LINES - visible;
-        if (max_offset < 0)
-            max_offset = 0;
-        switch (c) {
-        case CTRL_('g'):
-        case CTRL_('x'):
-        case CTRL_('c'):
-            mode_restore();
-            editor_refresh_full();
-            return;
-        case ARROW_UP:
-            if (ec.mode_state.help.offset > 0)
-                ec.mode_state.help.offset--;
-            break;
-        case ARROW_DOWN:
-            if (ec.mode_state.help.offset < max_offset)
-                ec.mode_state.help.offset++;
-            break;
-        case PAGE_UP:
-            ec.mode_state.help.offset -= visible;
-            if (ec.mode_state.help.offset < 0)
-                ec.mode_state.help.offset = 0;
-            break;
-        case PAGE_DOWN:
-            ec.mode_state.help.offset += visible;
-            if (ec.mode_state.help.offset > max_offset)
-                ec.mode_state.help.offset = max_offset;
-            break;
-        default:
-            break; /* ignore other keys */
-        }
-        help_render();
-        return;
-    }
 
     case MODE_SEARCH: {
         /* Phase 1: entering replacement text */
@@ -4027,8 +4112,10 @@ static void editor_process_key(void)
     case META_('B'): /* Open file browser (M-B) */
         mode_set(MODE_BROWSER);
         browser_load_directory(".");
+        if (ec.mode != MODE_BROWSER)
+            return;
         ui_set_message("File Browser: Enter to open, ^C to cancel");
-        browser_render();
+        browser_screen_open();
         return;      /* Don't continue to normal refresh */
     case META_('\\'): /* M-\ Go to first line (GNU nano: M-\) */
         ec.cursor_y = 0;
@@ -4042,7 +4129,7 @@ static void editor_process_key(void)
         break;
     case CTRL_('g'): /* Show help (GNU nano: ^G) */
         mode_set(MODE_HELP);
-        help_render();
+        help_screen_open();
         return; /* Don't continue to normal refresh */
     case BACKSPACE:
     case CTRL_('h'):
