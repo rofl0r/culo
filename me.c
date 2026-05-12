@@ -3418,7 +3418,7 @@ static void help_render(void)
 
     for (int i = 0; i < visible; i++) {
         int idx = offset + i;
-        buf_append(&eb, "\r\x1b[K", 3); /* move to line start and clear */
+        buf_append(&eb, "\r\x1b[K", 4); /* move to line start and clear */
         if (idx < HELP_NUM_LINES) {
             int hlen = (int)strlen(help_lines[idx]);
             if (hlen > ec.screen_cols)
