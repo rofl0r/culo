@@ -1893,12 +1893,12 @@ static bool row_find_last_match(editor_row_t *r, int max_off,
 /* Find the FIRST match of query in r->chars[min_off..].
  * Returns true and fills *out_off / *out_len on success. */
 static bool row_find_first_match(editor_row_t *r, int min_off,
-                                 bool case_sens, bool use_regex,
+                                 bool case_sens,
                                  const char *query, size_t qlen, regex_t *re,
                                  int *out_off, int *out_len)
 {
     if (min_off > r->size) return false;
-    if (use_regex) {
+    if (re) {
         regmatch_t m;
         if (regexec(re, r->chars + min_off, 1, &m, 0) != 0) return false;
         *out_off = min_off + (int)m.rm_so;
@@ -1963,8 +1963,8 @@ static bool search_do_from(const char *query, int start_row, int start_char_off,
         bool hit = backwards
             ? row_find_last_match(r, search_off, case_sens,
                                   query, qlen, use_regex ? &re : NULL, &match_off, &match_len)
-            : row_find_first_match(r, search_off, case_sens, use_regex,
-                                    query, qlen, &re, &match_off, &match_len);
+            : row_find_first_match(r, search_off, case_sens,
+                                   query, qlen, use_regex ? &re : NULL, &match_off, &match_len);
 
         if (hit) {
             ec.cursor_y = ri;
