@@ -540,6 +540,7 @@ struct {
 typedef enum {
     EDIT_INSERT = 0,
     EDIT_DELETE = 1,
+    EDIT_REPLACE = 2,
 } edit_type_t;
 
 typedef struct {
@@ -547,6 +548,7 @@ typedef struct {
     int row, col;
     char *text;
     size_t len;
+    size_t aux_len;
     int before_y, before_x;
     int after_y, after_x;
 } undo_item_t;
@@ -683,6 +685,9 @@ static void undo_record_insert(int row, int col, const char *text, size_t len,
                                int before_y, int before_x, int after_y, int after_x);
 static void undo_record_delete(int row, int col, const char *text, size_t len,
                                int before_y, int before_x, int after_y, int after_x);
+static void undo_record_replace(int row, int col, const char *old_text, size_t old_len,
+                                const char *new_text, size_t new_len,
+                                int before_y, int before_x, int after_y, int after_x);
 static void undo_perform_undo(void);
 static void undo_perform_redo(void);
 static bool undo_is_replaying(void);
@@ -802,6 +807,9 @@ static const char * const help_lines[] = {
     "Editing:",
     "  ^K      Cut current line (consecutive ^K appends to cut buffer)",
     "  ^U      Uncut/paste",
+    "  M-U     Undo last edit",
+    "  M-E     Redo last undo",
+    "  ^Z/^Y   Undo/redo aliases",
     "  M-A     Set/toggle mark",
     "  M-6     Copy marked region",
     "",
@@ -1476,21 +1484,68 @@ static void undo_record_delete(int row, int col, const char *text, size_t len,
     undo_record_common(EDIT_DELETE, row, col, text, len, before_y, before_x, after_y, after_x);
 }
 
+static bool undo_apply_replace_text(int row, int col,
+                                    const char *old_text, size_t old_len,
+                                    const char *new_text, size_t new_len)
+{
+    return undo_apply_delete_text(row, col, old_text, old_len) &&
+           undo_apply_insert_text(row, col, new_text, new_len);
+}
+
+static void undo_record_replace(int row, int col, const char *old_text, size_t old_len,
+                                const char *new_text, size_t new_len,
+                                int before_y, int before_x, int after_y, int after_x)
+{
+    if (g_undo.replaying || g_undo.batching || !old_text || !new_text)
+        return;
+    undo_item_t item = {
+        .type = EDIT_REPLACE,
+        .row = row,
+        .col = col,
+        .text = malloc(old_len + new_len + 1),
+        .len = old_len,
+        .aux_len = new_len,
+        .before_y = before_y,
+        .before_x = before_x,
+        .after_y = after_y,
+        .after_x = after_x,
+    };
+    if (!item.text)
+        return;
+    memcpy(item.text, old_text, old_len);
+    memcpy(item.text + old_len, new_text, new_len);
+    item.text[old_len + new_len] = '\0';
+    undo_stack_clear(g_undo.redo, &g_undo.redo_count);
+    undo_stack_push(g_undo.undo, &g_undo.undo_count, item);
+}
+
 static void undo_apply_item(const undo_item_t *item, bool redo)
 {
     bool ok;
     if (redo) {
-        ok = (item->type == EDIT_INSERT)
-                 ? undo_apply_insert_text(item->row, item->col, item->text, item->len)
-                 : undo_apply_delete_text(item->row, item->col, item->text, item->len);
+        if (item->type == EDIT_INSERT) {
+            ok = undo_apply_insert_text(item->row, item->col, item->text, item->len);
+        } else if (item->type == EDIT_DELETE) {
+            ok = undo_apply_delete_text(item->row, item->col, item->text, item->len);
+        } else {
+            ok = undo_apply_replace_text(item->row, item->col,
+                                         item->text, item->len,
+                                         item->text + item->len, item->aux_len);
+        }
         if (ok) {
             ec.cursor_y = item->after_y;
             ec.cursor_x = item->after_x;
         }
     } else {
-        ok = (item->type == EDIT_INSERT)
-                 ? undo_apply_delete_text(item->row, item->col, item->text, item->len)
-                 : undo_apply_insert_text(item->row, item->col, item->text, item->len);
+        if (item->type == EDIT_INSERT) {
+            ok = undo_apply_delete_text(item->row, item->col, item->text, item->len);
+        } else if (item->type == EDIT_DELETE) {
+            ok = undo_apply_insert_text(item->row, item->col, item->text, item->len);
+        } else {
+            ok = undo_apply_replace_text(item->row, item->col,
+                                         item->text + item->len, item->aux_len,
+                                         item->text, item->len);
+        }
         if (ok) {
             ec.cursor_y = item->before_y;
             ec.cursor_x = item->before_x;
@@ -2374,12 +2429,16 @@ static bool do_replace_one(const char *replacement, size_t repl_len)
         return false;
     int off = g_last_match.char_off;
     int oldlen = g_last_match.char_len;
+    int before_y = ec.cursor_y, before_x = ec.cursor_x;
+    char *old_text = xstrndup0(&row->chars[off], (size_t)oldlen);
+    if (!old_text)
+        return false;
     size_t new_size = (size_t) row->size - (size_t) oldlen + repl_len;
     if (new_size > INT_MAX)
-        return false;
+        goto out;
     char *nc = realloc(row->chars, new_size + 1 + ROW_ALLOC_PAD);
     if (!nc)
-        return false;
+        goto out;
     row->chars = nc;
     memmove(&row->chars[off + repl_len],
             &row->chars[off + oldlen],
@@ -2390,7 +2449,14 @@ static bool do_replace_one(const char *replacement, size_t repl_len)
     row->chars[row->size] = '\0';
     row_update(row, g_last_match.row);
     ec.modified = true;
+    undo_record_replace(g_last_match.row, off, old_text, (size_t)oldlen,
+                        replacement, repl_len,
+                        before_y, before_x, ec.cursor_y, ec.cursor_x);
+    free(old_text);
     return true;
+out:
+    free(old_text);
+    return false;
 }
 
 /* Set the transient overlay message (cleared at the start of the next keypress). */
@@ -3281,19 +3347,17 @@ static void help_render(void)
 {
     editor_buf_t eb = {NULL, 0};
 
-    /* Clear screen */
+    /* Redraw from home; avoid full-screen clear to reduce flicker. */
     buf_append(&eb, "\x1b[?25l", 6);
-    buf_append(&eb, "\x1b[2J", 4);
     buf_append(&eb, "\x1b[H", 3);
 
-    /* Title bar: pad "  Help" with spaces to fill the entire row */
+    /* Title bar: clear and repaint top line in inverse video. */
     buf_append(&eb, "\x1b[7m", 4);
     {
         const char *title_text = "  Help";
         int tlen = (int)strlen(title_text);
         buf_append(&eb, title_text, tlen);
-        for (int i = tlen; i < ec.screen_cols; i++)
-            buf_append(&eb, " ", 1);
+        buf_append(&eb, "\x1b[K", 3);
     }
     buf_append(&eb, "\x1b[0m", 4);
     buf_append(&eb, "\r\n", 2);
@@ -3845,9 +3909,13 @@ static void editor_process_key(void)
         file_save();
         break;
     case CTRL_('z'):
+    case META_('u'):
+    case META_('U'):
         undo_perform_undo();
         break;
     case CTRL_('y'):
+    case META_('e'):
+    case META_('E'):
         undo_perform_redo();
         break;
     case META_('a'):
