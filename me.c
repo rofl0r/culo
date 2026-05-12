@@ -1608,7 +1608,7 @@ static void undo_perform_undo(void)
         return;
     }
     /* cursor points to the next unapplied entry; step back to the
-     * entry we are about to unapply and run its inverse. */
+     * entry we are about to undo and run its inverse. */
     g_undo.cursor--;
     undo_item_t *item = &g_undo.history[undo_history_index(g_undo.cursor)];
     g_undo.replaying = true;
@@ -3418,7 +3418,7 @@ static void help_render(void)
 
     for (int i = 0; i < visible; i++) {
         int idx = offset + i;
-        buf_append(&eb, "\r\x1b[K", 4); /* move to line start and clear */
+        buf_append(&eb, "\r\x1b[K", 3); /* move to line start and clear */
         if (idx < HELP_NUM_LINES) {
             int hlen = (int)strlen(help_lines[idx]);
             if (hlen > ec.screen_cols)
