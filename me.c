@@ -3374,6 +3374,8 @@ static void help_render(void)
     {
         const char *title_text = "  Help";
         int tlen = (int)strlen(title_text);
+        if (tlen > ec.screen_cols)
+            tlen = ec.screen_cols;
         buf_append(&eb, title_text, tlen);
         buf_append(&eb, "\x1b[K", 3);
     }
@@ -3385,9 +3387,12 @@ static void help_render(void)
 
     for (int i = 0; i < visible; i++) {
         int idx = offset + i;
-        buf_append(&eb, "\x1b[K", 3); /* clear line */
+        buf_append(&eb, "\r\x1b[K", 4); /* clear line from col 1 */
         if (idx < HELP_NUM_LINES) {
-            buf_append(&eb, help_lines[idx], strlen(help_lines[idx]));
+            int hlen = (int)strlen(help_lines[idx]);
+            if (hlen > ec.screen_cols)
+                hlen = ec.screen_cols;
+            buf_append(&eb, help_lines[idx], hlen);
         } else {
             buf_append(&eb, "~", 1);
         }
