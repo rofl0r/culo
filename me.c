@@ -554,10 +554,10 @@ typedef struct {
 } undo_item_t;
 
 typedef struct {
-    undo_item_t undo[UNDO_STACK_CAP];
-    undo_item_t redo[UNDO_STACK_CAP];
-    int undo_count;
-    int redo_count;
+    undo_item_t history[UNDO_STACK_CAP];
+    int start;   /* oldest entry index in ring */
+    int count;   /* number of valid entries */
+    int cursor;  /* number of applied entries from start; [0..count] */
     bool replaying;
     bool batching;
 } undo_state_t;
@@ -1303,35 +1303,52 @@ static void undo_item_free(undo_item_t *item)
     free(item->text);
     item->text = NULL;
     item->len = 0;
+    item->aux_len = 0;
 }
 
-static void undo_stack_clear(undo_item_t *stack, int *count)
+static int undo_history_index(int logical_idx)
 {
-    while (*count > 0) {
-        (*count)--;
-        undo_item_free(&stack[*count]);
+    return (g_undo.start + logical_idx) % UNDO_STACK_CAP;
+}
+
+static void undo_history_clear(void)
+{
+    for (int i = 0; i < g_undo.count; i++) {
+        int idx = undo_history_index(i);
+        undo_item_free(&g_undo.history[idx]);
+        memset(&g_undo.history[idx], 0, sizeof(g_undo.history[idx]));
+    }
+    g_undo.start = 0;
+    g_undo.count = 0;
+    g_undo.cursor = 0;
+}
+
+static void undo_history_discard_redo(void)
+{
+    while (g_undo.count > g_undo.cursor) {
+        int idx = undo_history_index(g_undo.count - 1);
+        undo_item_free(&g_undo.history[idx]);
+        memset(&g_undo.history[idx], 0, sizeof(g_undo.history[idx]));
+        g_undo.count--;
     }
 }
 
-static void undo_stack_push(undo_item_t *stack, int *count, undo_item_t item)
+static void undo_history_append(undo_item_t item)
 {
-    if (*count == UNDO_STACK_CAP) {
-        undo_item_free(&stack[0]);
-        memmove(&stack[0], &stack[1], sizeof(stack[0]) * (UNDO_STACK_CAP - 1));
-        *count = UNDO_STACK_CAP - 1;
+    undo_history_discard_redo();
+    if (g_undo.count == UNDO_STACK_CAP) {
+        int idx = g_undo.start;
+        undo_item_free(&g_undo.history[idx]);
+        memset(&g_undo.history[idx], 0, sizeof(g_undo.history[idx]));
+        g_undo.start = (g_undo.start + 1) % UNDO_STACK_CAP;
+        g_undo.count--;
+        if (g_undo.cursor > 0)
+            g_undo.cursor--;
     }
-    stack[*count] = item;
-    (*count)++;
-}
-
-static bool undo_stack_pop(undo_item_t *stack, int *count, undo_item_t *out)
-{
-    if (*count <= 0)
-        return false;
-    (*count)--;
-    *out = stack[*count];
-    memset(&stack[*count], 0, sizeof(stack[*count]));
-    return true;
+    int write_idx = undo_history_index(g_undo.count);
+    g_undo.history[write_idx] = item;
+    g_undo.count++;
+    g_undo.cursor = g_undo.count;
 }
 
 static bool undo_insert_bytes(int row_idx, int col, const char *s, size_t len)
@@ -1438,8 +1455,7 @@ static bool undo_apply_delete_text(int row, int col, const char *text, size_t le
 
 static void undo_reset_history(void)
 {
-    undo_stack_clear(g_undo.undo, &g_undo.undo_count);
-    undo_stack_clear(g_undo.redo, &g_undo.redo_count);
+    undo_history_clear();
 }
 
 static bool undo_is_replaying(void)
@@ -1475,8 +1491,7 @@ static void undo_record_common(edit_type_t type, int row, int col, const char *t
     };
     if (!item.text)
         return;
-    undo_stack_clear(g_undo.redo, &g_undo.redo_count);
-    undo_stack_push(g_undo.undo, &g_undo.undo_count, item);
+    undo_history_append(item);
 }
 
 static void undo_record_insert(int row, int col, const char *text, size_t len,
@@ -1541,8 +1556,7 @@ static void undo_record_replace(int row, int col, const char *old_text, size_t o
     memcpy(item.text, old_text, old_len);
     memcpy(item.text + old_len, new_text, new_len);
     item.text[total_len] = '\0';
-    undo_stack_clear(g_undo.redo, &g_undo.redo_count);
-    undo_stack_push(g_undo.undo, &g_undo.undo_count, item);
+    undo_history_append(item);
 }
 
 static void undo_apply_item(const undo_item_t *item, bool redo)
@@ -1584,28 +1598,28 @@ static void undo_apply_item(const undo_item_t *item, bool redo)
 
 static void undo_perform_undo(void)
 {
-    undo_item_t item;
-    if (!undo_stack_pop(g_undo.undo, &g_undo.undo_count, &item)) {
+    if (g_undo.cursor <= 0) {
         ui_set_message("Nothing to undo");
         return;
     }
+    g_undo.cursor--;
+    undo_item_t *item = &g_undo.history[undo_history_index(g_undo.cursor)];
     g_undo.replaying = true;
-    undo_apply_item(&item, false);
+    undo_apply_item(item, false);
     g_undo.replaying = false;
-    undo_stack_push(g_undo.redo, &g_undo.redo_count, item);
 }
 
 static void undo_perform_redo(void)
 {
-    undo_item_t item;
-    if (!undo_stack_pop(g_undo.redo, &g_undo.redo_count, &item)) {
+    if (g_undo.cursor >= g_undo.count) {
         ui_set_message("Nothing to redo");
         return;
     }
+    undo_item_t *item = &g_undo.history[undo_history_index(g_undo.cursor)];
     g_undo.replaying = true;
-    undo_apply_item(&item, true);
+    undo_apply_item(item, true);
     g_undo.replaying = false;
-    undo_stack_push(g_undo.undo, &g_undo.undo_count, item);
+    g_undo.cursor++;
 }
 
 static void editor_copy(int cut)
