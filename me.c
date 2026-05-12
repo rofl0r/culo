@@ -82,8 +82,8 @@ static inline int utf8_char_width_and_len(const char *s, size_t max_len, int *ch
 {
     unsigned char c = (unsigned char) *s;
     if (!(c & 0x80)) {
-        if (char_len)
-            *char_len = 1;
+        *char_len = 1;
+        /* C0 controls and DEL are non-printable and consume no screen cells. */
         if (c < 0x20 || c == 0x7F)
             return 0;
         return 1;
@@ -91,12 +91,10 @@ static inline int utf8_char_width_and_len(const char *s, size_t max_len, int *ch
 
     int len = utf8_validate(s, max_len);
     if (len == 0) {
-        if (char_len)
-            *char_len = 1;
+        *char_len = 1;
         return 1;
     }
-    if (char_len)
-        *char_len = len;
+    *char_len = len;
 
     int codepoint;
     if (len == 2) {
@@ -217,104 +215,19 @@ static int utf8_validate(const char *s, size_t max_len)
     return 0;
 }
 
-/* tlist, aka treap list. (C) 2024 rofl0r.
+/* Upstream tlist implementation:
+ * https://github.com/rofl0r/libulz/blob/master/include/tlist.h */
 
-   the core's algorithm is based on the "implicit treap" described on
-   e-maxx.ru.
-
-   tlist behaves like a dynamic array, but unlike a real array supports
-   insertion and deletion with O(log N) performance characteristics.
-
-   indexing is also O(log N), so if you don't need fast insertion and
-   deletion, only appending, picking a traditional dynamic array will be
-   faster for your usecase.
-
-   on a fast machine with plenty of cache, a traditional dynamic array
-   will also be faster if you need to insert or remove some items, and
-   the array is reasonably small (up to about 2k entries).
-   though even there the tlist is quite competitive.
-   for anything else, the tlist outperforms the traditional array by far.
-
-   its most appealing characteristic, aside from the above, is that it
-   can be implemented in less than 100 lines.
-   it comes at a cost though.
-   the memory consumption per node is 24 bytes on 64bit machines, and 16
-   on 32 bit. plus the size of the item being stored in it.
-
-   the list is initialized with the fixed size of a single item that
-   needs to be stored - it could be a single integer, a struct,
-   or a pointer.
-
-   on insertion, you pass a pointer to a single item, the object being
-   pointed to is then copied into the node.
-
-   for non-fixed size data items such as strings, you'd use the size
-   of a pointer for tlist_new(). then you need to allocate the strings
-   yourself and insert a pointer to the string - i.e. a char**.
-   the list can free the pointed to content automatically if you use
-   the _deep suffixed functions.
-
-   the list can hold a maximum of UINT_MAX items.
-
-   note that unlike in my dynamic array implementation "sblist", functions
-   taking an index receive it as second, not third argument.
-   it seems more natural to first pass the list, then the index, then the
-   value, as the index refers to the list.
-   apart from that, the api is almost identical, which allows for a quick
-   swap-out.
-*/
-
-struct tlist;
 typedef struct tlist tlist;
 
-/* allocates a new list prepared to store nodes of itemsize size.
-   may return NULL on resource exhaustion. */
-struct tlist *tlist_new(unsigned itemsize);
-
-/* return the number of items/nodes in the list. */
-size_t tlist_getsize(struct tlist* t);
-
-/* get the pointer to the data of idx'th item in the list.
-   may return NULL if the idx is equal or greater than list size,
-   you have to cast the return value to a pointer to the type
-   that you inserted. */
-void *tlist_get(struct tlist* t, size_t idx);
-
-/* insert value at position idx */
-/* returns 1 on success, 0 otherwise (i.e. not enough ram) */
-int tlist_insert(struct tlist* t, size_t idx, void* val);
-
-/* append value to the end of the list */
-int tlist_append(struct tlist* t, void *val);
-
-/* delete item as position idx */
-/* returns 1 on success, 0 otherwise (invalid index) */
-int tlist_delete(struct tlist *t, size_t idx);
-/* same as tlist_delete, but frees the stored pointer too - only use
-   if you initialized the list with sizeof(pointer) */
-int tlist_delete_deep(struct tlist *t, size_t idx);
-
-/* remove and free all items in list, but not the list itself. */
-void tlist_free_items(struct tlist *t);
-void tlist_free_items_deep(struct tlist *t);
-
-/* free the list and all items in it - returns NULL so you can do
-   mylist = tlist_free(mylist) instead of requiring 2 statements to
-   have your list freed and nulled. */
-void* tlist_free(struct tlist *t);
-void* tlist_free_deep(struct tlist *t);
-
-/* this is just a debug function that prints the node balance of
-   the tree. it's not built-in by default because it prints stuff
-   to stdout. */
-float tlist_getbalance(struct tlist *t);
+#define TLIST_INTERNAL static
 
 
 #ifndef UINT_MAX
 #define UINT_MAX 0xffffffffU
 #endif
 
-static int mrand(unsigned *seed)
+TLIST_INTERNAL int tlist_mrand(unsigned *seed)
 {
        return ((*seed = (*seed+1) * 1103515245 + 12345 - 1)+1) & 0x7fffffff;
 }
@@ -325,86 +238,86 @@ struct item {
 	pitem l, r;
 };
 
-static unsigned cnt (pitem it) {
+TLIST_INTERNAL unsigned tlist_cnt (pitem it) {
 	return it ? it->cnt : 0;
 }
 
-static void upd_cnt (pitem it) {
+TLIST_INTERNAL void tlist_upd_cnt (pitem it) {
 	if (it)
-		it->cnt = cnt(it->l) + cnt(it->r) + 1;
+		it->cnt = tlist_cnt(it->l) + tlist_cnt(it->r) + 1;
 }
 
-static void merge (pitem *t, pitem l, pitem r) {
+TLIST_INTERNAL void tlist_merge (pitem *t, pitem l, pitem r) {
 	if (!l || !r)
 		*t = l ? l : r;
 	else if (l->prior > r->prior)
-		merge (&l->r, l->r, r),  *t = l;
+		tlist_merge (&l->r, l->r, r),  *t = l;
 	else
-		merge (&r->l, l, r->l),  *t = r;
-	upd_cnt (*t);
+		tlist_merge (&r->l, l, r->l),  *t = r;
+	tlist_upd_cnt (*t);
 }
 
-static void split (pitem t, pitem *l, pitem *r, unsigned key, unsigned add) {
+TLIST_INTERNAL void tlist_split (pitem t, pitem *l, pitem *r, unsigned key, unsigned add) {
 	if (!t) {
 		*l = *r = 0;
 		return;
 	}
-	unsigned cur_key = add + cnt(t->l);
+	unsigned cur_key = add + tlist_cnt(t->l);
 	if (key <= cur_key)
-		split (t->l, l, &t->l, key, add),  *r = t;
+		tlist_split (t->l, l, &t->l, key, add),  *r = t;
 	else
-		split (t->r, &t->r, r, key, add + 1 + cnt(t->l)),  *l = t;
-	upd_cnt (t);
+		tlist_split (t->r, &t->r, r, key, add + 1 + tlist_cnt(t->l)),  *l = t;
+	tlist_upd_cnt (t);
 }
 
-static pitem getitem(pitem t, unsigned idx, unsigned add) {
+TLIST_INTERNAL pitem tlist_getitem(pitem t, unsigned idx, unsigned add) {
 	if (!t) return t;
-	unsigned ls = cnt (t->l), cur_key = add + ls;
+	unsigned ls = tlist_cnt (t->l), cur_key = add + ls;
 	if (cur_key == idx) return t;
 	if (cur_key < idx)
-		return getitem (t->r, idx, add + 1 + ls);
+		return tlist_getitem (t->r, idx, add + 1 + ls);
 	else
-		return getitem (t->l, idx, add);
+		return tlist_getitem (t->l, idx, add);
 }
 
-static void insert(pitem *t, pitem n, unsigned idx) {
+TLIST_INTERNAL void tlist_insert_item(pitem *t, pitem n, unsigned idx) {
 	pitem t1, t2;
-	split (*t, &t1, &t2, idx, 0);
-	merge (t, t1, n);
-	merge (t, *t, t2);
+	tlist_split (*t, &t1, &t2, idx, 0);
+	tlist_merge (t, t1, n);
+	tlist_merge (t, *t, t2);
 }
 
-static void tremove(pitem *t, unsigned idx, unsigned add) {
+TLIST_INTERNAL void tlist_remove(pitem *t, unsigned idx, unsigned add) {
 	pitem n;
 	if (!(*t)) return;
-	unsigned cur_key = add + cnt ((*t)->l), new_add = cur_key + 1;
+	unsigned cur_key = add + tlist_cnt ((*t)->l), new_add = cur_key + 1;
 	unsigned lk = UINT_MAX, rk = UINT_MAX;
-	if ((*t)->l) lk = cnt ((*t)->l->l) + add;
-	if ((*t)->r) rk = cnt ((*t)->r->l) + new_add;
+	if ((*t)->l) lk = tlist_cnt ((*t)->l->l) + add;
+	if ((*t)->r) rk = tlist_cnt ((*t)->r->l) + new_add;
 	if (cur_key == idx) {
-		merge (t, (*t)->l, (*t)->r);
+		tlist_merge (t, (*t)->l, (*t)->r);
 	} else if (lk == idx) {
-		merge (&n, (*t)->l->l, (*t)->l->r);
+		tlist_merge (&n, (*t)->l->l, (*t)->l->r);
 		(*t)->l = n;
-		upd_cnt (*t);
+		tlist_upd_cnt (*t);
 	} else if (rk == idx) {
-		merge (&n, (*t)->r->l, (*t)->r->r);
+		tlist_merge (&n, (*t)->r->l, (*t)->r->r);
 		(*t)->r = n;
-		upd_cnt (*t);
+		tlist_upd_cnt (*t);
 	} else if (cur_key < idx) {
-		tremove (&(*t)->r, idx, new_add);
-		upd_cnt (*t);
+		tlist_remove (&(*t)->r, idx, new_add);
+		tlist_upd_cnt (*t);
 	} else {
-		tremove (&(*t)->l, idx, add);
-		upd_cnt (*t);
+		tlist_remove (&(*t)->l, idx, add);
+		tlist_upd_cnt (*t);
 	}
 }
 
-static pitem new_item(void* value, unsigned valsz, unsigned *seed) {
+TLIST_INTERNAL pitem tlist_new_item(void* value, unsigned valsz, unsigned *seed) {
 	pitem n = malloc(sizeof(struct item) + valsz);
 	if(!n) return n;
 	memcpy(n+1, value, valsz);
-	n->prior = mrand(seed);
+	n->prior = tlist_mrand(seed);
 	n->cnt = 1;
 	n->l = n->r = 0;
 	return n;
@@ -416,7 +329,7 @@ struct tlist {
 	pitem root;
 };
 
-struct tlist *tlist_new(unsigned itemsize) {
+static struct tlist *tlist_new(unsigned itemsize) {
 	struct tlist* new = malloc(sizeof (struct tlist));
 	if(!new) return 0;
 	new->seed = 385-1;
@@ -425,81 +338,58 @@ struct tlist *tlist_new(unsigned itemsize) {
 	return new;
 }
 
-static void* data(pitem it) {
+TLIST_INTERNAL void* tlist_data(pitem it) {
 	return it+1;
 }
 
-size_t tlist_getsize(struct tlist* t) {
-	return cnt(t->root);
+static size_t tlist_getsize(struct tlist* t) {
+	return tlist_cnt(t->root);
 }
 
-void* tlist_get(struct tlist* t, size_t idx) {
-	if(idx >= cnt (t->root)) return 0;
-	return data(getitem(t->root, idx, 0));
+static void* tlist_get(struct tlist* t, size_t idx) {
+	if(idx >= tlist_cnt (t->root)) return 0;
+	return tlist_data(tlist_getitem(t->root, idx, 0));
 }
 
-int tlist_insert(struct tlist* t, size_t idx, void *value) {
-	if(idx > cnt (t->root)) return 0;
-	pitem new = new_item(value, t->itemsize, &t->seed);
+static int tlist_insert(struct tlist* t, size_t idx, void *value) {
+	if(idx > tlist_cnt (t->root)) return 0;
+	pitem new = tlist_new_item(value, t->itemsize, &t->seed);
 	if(!new) return 0;
-	insert(&t->root, new, idx);
+	tlist_insert_item(&t->root, new, idx);
 	return 1;
 }
 
-int tlist_append(struct tlist* t, void *value) {
-	return tlist_insert(t, cnt(t->root), value);
-}
-
-static int tlist_delete_impl(struct tlist *t, size_t idx, int deep) {
-	if(idx >= cnt (t->root)) return 0;
-	pitem it = getitem(t->root, idx, 0);
-	if(deep) free(*(void**)data(it));
-	tremove(&t->root, idx, 0);
+TLIST_INTERNAL int tlist_delete_impl(struct tlist *t, size_t idx) {
+	if(idx >= tlist_cnt (t->root)) return 0;
+	pitem it = tlist_getitem(t->root, idx, 0);
+	tlist_remove(&t->root, idx, 0);
 	free(it);
 	return 1;
 }
 
-int tlist_delete(struct tlist *t, size_t idx) {
-	return tlist_delete_impl(t, idx, 0);
+static int tlist_delete(struct tlist *t, size_t idx) {
+	return tlist_delete_impl(t, idx);
 }
 
-int tlist_delete_deep(struct tlist *t, size_t idx) {
-	return tlist_delete_impl(t, idx, 1);
+static void tlist_free_items(struct tlist *t) {
+	while(tlist_cnt(t->root)) tlist_delete_impl(t, 0);
 }
 
-static void tlist_free_items_impl(struct tlist *t, int deep) {
-	while(cnt(t->root)) tlist_delete_impl(t, 0, deep);
-}
-
-void tlist_free_items(struct tlist *t) {
-	tlist_free_items_impl(t, 0);
-}
-
-void tlist_free_items_deep(struct tlist *t) {
-	tlist_free_items_impl(t, 1);
-}
-
-static void* tlist_free_impl(struct tlist *t, int deep) {
-	tlist_free_items_impl(t, deep);
+static void* tlist_free(struct tlist *t) {
+	tlist_free_items(t);
 	free(t);
 	return 0;
 }
 
-void *tlist_free(struct tlist *t) {
-	return tlist_free_impl(t, 0);
-}
-
-void *tlist_free_deep(struct tlist *t) {
-	return tlist_free_impl(t, 1);
-}
+#undef TLIST_INTERNAL
 
 typedef struct {
     int size;
     int render_size;
-    bool render_direct_map;
     char *chars;
     char *render;
     unsigned char *highlight;
+    bool render_direct_map;
     bool hl_open_comment;
     bool hl_valid;
 } editor_row_t;
@@ -1962,10 +1852,10 @@ static search_match_t g_last_match = { .row = -1, .char_off = 0, .char_len = 0 }
 /* Find the LAST match of query in r->chars[0..max_off].
  * Because libc provides only "find first", we scan forward collecting every
  * hit and keep the rightmost one that is still at or before max_off.
- * Works for both plain-text and regex; set use_regex and pass a compiled re.
+ * Works for both plain-text and regex; pass a compiled re for regex mode.
  * Returns true and fills *out_off / *out_len on success. */
 static bool row_find_last_match(editor_row_t *r, int max_off,
-                                bool case_sens, bool use_regex,
+                                bool case_sens,
                                 const char *query, size_t qlen, regex_t *re,
                                 int *out_off, int *out_len)
 {
@@ -1975,7 +1865,7 @@ static bool row_find_last_match(editor_row_t *r, int max_off,
     const char *p = hay;
     while (p <= hay + max_off) {
         int mo, ml;
-        if (use_regex) {
+        if (re) {
             regmatch_t mm;
             if (regexec(re, p, 1, &mm, 0) != 0) break;
             int abs_so = (int)(p - hay) + (int)mm.rm_so;
@@ -2071,10 +1961,10 @@ static bool search_do_from(const char *query, int start_row, int start_char_off,
 
         int match_off = -1, match_len = -1;
         bool hit = backwards
-            ? row_find_last_match(r, search_off, case_sens, use_regex,
-                                  query, qlen, &re, &match_off, &match_len)
+            ? row_find_last_match(r, search_off, case_sens,
+                                  query, qlen, use_regex ? &re : NULL, &match_off, &match_len)
             : row_find_first_match(r, search_off, case_sens, use_regex,
-                                   query, qlen, &re, &match_off, &match_len);
+                                    query, qlen, &re, &match_off, &match_len);
 
         if (hit) {
             ec.cursor_y = ri;
