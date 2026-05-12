@@ -1308,7 +1308,10 @@ static void undo_item_free(undo_item_t *item)
 
 static int undo_history_index(int logical_idx)
 {
-    return (g_undo.start + logical_idx) % UNDO_STACK_CAP;
+    int idx = g_undo.start + logical_idx;
+    if (idx >= UNDO_STACK_CAP)
+        idx -= UNDO_STACK_CAP;
+    return idx;
 }
 
 static void undo_history_clear(void)
@@ -1602,6 +1605,8 @@ static void undo_perform_undo(void)
         ui_set_message("Nothing to undo");
         return;
     }
+    /* cursor points to the first not-yet-applied entry; step back to the
+     * entry we are about to unapply and run its inverse. */
     g_undo.cursor--;
     undo_item_t *item = &g_undo.history[undo_history_index(g_undo.cursor)];
     g_undo.replaying = true;
@@ -3411,7 +3416,7 @@ static void help_render(void)
 
     for (int i = 0; i < visible; i++) {
         int idx = offset + i;
-        buf_append(&eb, "\r\x1b[K", 4); /* clear line from col 1 */
+        buf_append(&eb, "\r\x1b[K", 4); /* move to line start and clear */
         if (idx < HELP_NUM_LINES) {
             int hlen = (int)strlen(help_lines[idx]);
             if (hlen > ec.screen_cols)
