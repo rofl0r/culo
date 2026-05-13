@@ -1341,10 +1341,7 @@ static bool undo_insert_bytes(int row_idx, int col, const char *s, size_t len)
     editor_row_t *row = ROW(row_idx);
     if (!row || len == 0)
         return row != NULL;
-    if (col < 0)
-        col = 0;
-    if (col > row->size)
-        col = row->size;
+    col = col < 0 ? 0 : (col > row->size ? row->size : col);
     char *nc = realloc(row->chars, (size_t)row->size + len + 1);
     if (!nc)
         return false;
@@ -1526,38 +1523,26 @@ static void undo_record_replace(int row, int col, const char *old_text, size_t o
 static void undo_apply_item(const undo_item_t *item, bool redo)
 {
     bool ok;
+    int cy, cx;
     if (redo) {
-        if (item->type == EDIT_INSERT) {
-            ok = undo_apply_insert_text(item->row, item->col, item->text, item->len);
-        } else if (item->type == EDIT_DELETE) {
-            ok = undo_apply_delete_text(item->row, item->col, item->text, item->len);
-        } else {
-            ok = undo_apply_replace_span(item->row, item->col, item->len,
-                                         item->text + item->len, item->aux_len);
-        }
-        if (ok) {
-            ec.cursor_y = item->after_y;
-            ec.cursor_x = item->after_x;
-        }
+        ok = (item->type == EDIT_INSERT) ? undo_apply_insert_text(item->row, item->col, item->text, item->len) :
+             (item->type == EDIT_DELETE) ? undo_apply_delete_text(item->row, item->col, item->text, item->len) :
+             undo_apply_replace_span(item->row, item->col, item->len, item->text + item->len, item->aux_len);
+        cy = item->after_y;
+        cx = item->after_x;
     } else {
-        if (item->type == EDIT_INSERT) {
-            ok = undo_apply_delete_text(item->row, item->col, item->text, item->len);
-        } else if (item->type == EDIT_DELETE) {
-            ok = undo_apply_insert_text(item->row, item->col, item->text, item->len);
-        } else {
-            ok = undo_apply_replace_span(item->row, item->col, item->aux_len,
-                                         item->text, item->len);
-        }
-        if (ok) {
-            ec.cursor_y = item->before_y;
-            ec.cursor_x = item->before_x;
-        }
+        ok = (item->type == EDIT_INSERT) ? undo_apply_delete_text(item->row, item->col, item->text, item->len) :
+             (item->type == EDIT_DELETE) ? undo_apply_insert_text(item->row, item->col, item->text, item->len) :
+             undo_apply_replace_span(item->row, item->col, item->aux_len, item->text, item->len);
+        cy = item->before_y;
+        cx = item->before_x;
     }
-    if (ec.cursor_y < 0) ec.cursor_y = 0;
-    if (ec.cursor_y > NR) ec.cursor_y = NR;
-    if (ec.cursor_y < NR && ec.cursor_x > ROW(ec.cursor_y)->size)
-        ec.cursor_x = ROW(ec.cursor_y)->size;
-    if (ec.cursor_x < 0) ec.cursor_x = 0;
+    if (ok) {
+        ec.cursor_y = cy < 0 ? 0 : (cy > NR ? NR : cy);
+        ec.cursor_x = cx < 0 ? 0 : cx;
+        if (ec.cursor_y < NR && ec.cursor_x > ROW(ec.cursor_y)->size)
+            ec.cursor_x = ROW(ec.cursor_y)->size;
+    }
 }
 
 static void undo_perform_undo(void)
