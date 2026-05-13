@@ -3342,7 +3342,8 @@ static void browser_load_directory(const char *path)
 /* Shared rendering for help and browser screens */
 static void list_screen_render(const char *title, int total_lines, int offset,
                                int selected, const char *const *lines,
-                               char **entries, const char *status_fmt)
+                               char **entries, const char *status_left,
+                               const char *status_right)
 {
     editor_buf_t eb = {NULL, 0};
     int visible = ec.screen_rows - 1;
@@ -3355,8 +3356,10 @@ static void list_screen_render(const char *title, int total_lines, int offset,
     if (tlen > ec.screen_cols)
         tlen = ec.screen_cols;
     buf_append(&eb, title, tlen);
-    while (tlen++ < ec.screen_cols)
+    while (tlen < ec.screen_cols) {
         buf_append(&eb, " ", 1);
+        tlen++;
+    }
     buf_append(&eb, "\x1b[0m\r\n", 6);
 
     /* Content lines */
@@ -3374,6 +3377,8 @@ static void list_screen_render(const char *title, int total_lines, int offset,
                 char line[512];
                 int llen = snprintf(line, sizeof(line), "\x1b[%dm  %s%s\x1b[0m",
                                     color, type_str, entry[0] == '/' ? entry + 1 : entry);
+                if (llen >= (int)sizeof(line))
+                    llen = sizeof(line) - 1;
                 if (llen > ec.screen_cols)
                     llen = ec.screen_cols;
                 buf_append(&eb, line, llen);
@@ -3393,15 +3398,26 @@ static void list_screen_render(const char *title, int total_lines, int offset,
 
     /* Status bar */
     buf_append(&eb, "\r\n\x1b[100m", 8);
-    char status[256];
-    int len = snprintf(status, sizeof(status), status_fmt,
-                       entries ? ec.mode_state.browser.current_dir : "",
-                       selected + 1, total_lines);
+    int len = (int)strlen(status_left);
     if (len > ec.screen_cols)
         len = ec.screen_cols;
-    buf_append(&eb, status, len);
-    while (len++ < ec.screen_cols)
-        buf_append(&eb, " ", 1);
+    buf_append(&eb, status_left, len);
+    if (status_right) {
+        int r_len = (int)strlen(status_right);
+        while (len < ec.screen_cols) {
+            if (ec.screen_cols - len == r_len) {
+                buf_append(&eb, status_right, r_len);
+                break;
+            }
+            buf_append(&eb, " ", 1);
+            len++;
+        }
+    } else {
+        while (len < ec.screen_cols) {
+            buf_append(&eb, " ", 1);
+            len++;
+        }
+    }
     buf_append(&eb, "\x1b[m\r\n", 5);
     ui_draw_messagebar(&eb);
     write(STDOUT_FILENO, eb.buf, eb.len);
@@ -3420,10 +3436,12 @@ static void browser_open_selected(void)
         /* Directory */
         char new_path[PATH_MAX];
         if (!strcmp(entry, "/..")) {
-            char *last_slash = strrchr(ec.mode_state.browser.current_dir, '/');
-            if (last_slash && last_slash != ec.mode_state.browser.current_dir) {
-                *last_slash = '\0';
-                browser_load_directory(ec.mode_state.browser.current_dir);
+            const char *cur = ec.mode_state.browser.current_dir;
+            char *last_slash = strrchr(cur, '/');
+            if (last_slash && last_slash != cur) {
+                snprintf(new_path, sizeof(new_path), "%.*s",
+                         (int)(last_slash - cur), cur);
+                browser_load_directory(new_path);
             } else {
                 browser_load_directory("/");
             }
@@ -3455,8 +3473,11 @@ static void browser_open_selected(void)
 
 static void help_render(void)
 {
+    char status[80];
+    snprintf(status, sizeof(status), " [HELP] %d/%d lines",
+             ec.mode_state.help.offset + 1, HELP_NUM_LINES);
     list_screen_render("  Help", HELP_NUM_LINES, ec.mode_state.help.offset,
-                       -1, help_lines, NULL, " [HELP] %d/%d lines");
+                       -1, help_lines, NULL, status, NULL);
 }
 
 static void browser_render(void)
@@ -3468,11 +3489,13 @@ static void browser_render(void)
     if (ec.mode_state.browser.selected >= ec.mode_state.browser.offset + visible)
         ec.mode_state.browser.offset = ec.mode_state.browser.selected - visible + 1;
 
-    char title[256];
+    char title[256], status_right[80];
     snprintf(title, sizeof(title), " [BROWSER] %s", ec.mode_state.browser.current_dir);
+    snprintf(status_right, sizeof(status_right), "%d/%d files",
+             ec.mode_state.browser.selected + 1, ec.mode_state.browser.num_entries);
     list_screen_render(title, ec.mode_state.browser.num_entries,
                        ec.mode_state.browser.offset, ec.mode_state.browser.selected,
-                       NULL, ec.mode_state.browser.entries, " %s %d/%d files");
+                       NULL, ec.mode_state.browser.entries, title, status_right);
 }
 
 /* Clean up all allocated memory before exit */
