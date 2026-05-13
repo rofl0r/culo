@@ -3494,9 +3494,8 @@ static void browser_render(void)
     if (ec.mode_state.browser.selected >= ec.mode_state.browser.offset + visible)
         ec.mode_state.browser.offset = ec.mode_state.browser.selected - visible + 1;
 
-    char title[256], status_left[256], status_right[80];
+    char title[256], status_right[80];
     snprintf(title, sizeof(title), " [BROWSER] %s", ec.mode_state.browser.current_dir);
-    snprintf(status_left, sizeof(status_left), " [BROWSER] %s", ec.mode_state.browser.current_dir);
     if (ec.mode_state.browser.num_entries > 0) {
         snprintf(status_right, sizeof(status_right), "%d/%d files",
                  ec.mode_state.browser.selected + 1, ec.mode_state.browser.num_entries);
@@ -3505,7 +3504,7 @@ static void browser_render(void)
     }
     list_screen_render(title, ec.mode_state.browser.num_entries,
                        ec.mode_state.browser.offset, ec.mode_state.browser.selected,
-                       NULL, ec.mode_state.browser.entries, status_left, status_right);
+                       NULL, ec.mode_state.browser.entries, title, status_right);
 }
 
 /* Clean up all allocated memory before exit */
