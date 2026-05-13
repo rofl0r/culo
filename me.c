@@ -687,7 +687,6 @@ static void editor_refresh(void);
 static int get_line_number_width(void);
 static void editor_newline(void);
 static void editor_insert_char(int c, bool manual_typing);
-static void undo_reset_history(void);
 static void undo_record_insert(int row, int col, const char *text, size_t len,
                                int before_y, int before_x, int after_y, int after_x);
 static void undo_record_delete(int row, int col, const char *text, size_t len,
@@ -697,9 +696,6 @@ static void undo_record_replace(int row, int col, const char *old_text, size_t o
                                 int before_y, int before_x, int after_y, int after_x);
 static void undo_perform_undo(void);
 static void undo_perform_redo(void);
-static bool undo_is_replaying(void);
-static bool undo_is_batching(void);
-static void undo_set_batching(bool batching);
 
 /* Mode management implementation */
 static void mode_set(editor_mode_t new_mode)
@@ -1309,50 +1305,34 @@ static void undo_item_free(undo_item_t *item)
 static int undo_history_index(int logical_idx)
 {
     int idx = g_undo.start + logical_idx;
-    if (idx >= UNDO_STACK_CAP)
-        idx -= UNDO_STACK_CAP;
-    return idx;
+    return idx >= UNDO_STACK_CAP ? idx - UNDO_STACK_CAP : idx;
 }
 
 static void undo_history_clear(void)
 {
-    for (int i = 0; i < g_undo.count; i++) {
-        int idx = undo_history_index(i);
-        undo_item_free(&g_undo.history[idx]);
-        memset(&g_undo.history[idx], 0, sizeof(g_undo.history[idx]));
-    }
-    g_undo.start = 0;
-    g_undo.count = 0;
-    g_undo.cursor = 0;
+    for (int i = 0; i < g_undo.count; i++)
+        undo_item_free(&g_undo.history[undo_history_index(i)]);
+    g_undo.start = g_undo.count = g_undo.cursor = 0;
 }
 
 static void undo_history_discard_redo(void)
 {
-    while (g_undo.count > g_undo.cursor) {
-        int idx = undo_history_index(g_undo.count - 1);
-        undo_item_free(&g_undo.history[idx]);
-        memset(&g_undo.history[idx], 0, sizeof(g_undo.history[idx]));
-        g_undo.count--;
-    }
+    while (g_undo.count > g_undo.cursor)
+        undo_item_free(&g_undo.history[undo_history_index(--g_undo.count)]);
 }
 
 static void undo_history_append(undo_item_t item)
 {
     undo_history_discard_redo();
     if (g_undo.count == UNDO_STACK_CAP) {
-        int idx = g_undo.start;
-        undo_item_free(&g_undo.history[idx]);
-        memset(&g_undo.history[idx], 0, sizeof(g_undo.history[idx]));
-        g_undo.start++;
-        if (g_undo.start >= UNDO_STACK_CAP)
+        undo_item_free(&g_undo.history[g_undo.start]);
+        if (++g_undo.start >= UNDO_STACK_CAP)
             g_undo.start = 0;
         g_undo.count--;
         if (g_undo.cursor > 0)
             g_undo.cursor--;
     }
-    int write_idx = undo_history_index(g_undo.count);
-    g_undo.history[write_idx] = item;
-    g_undo.count++;
+    g_undo.history[undo_history_index(g_undo.count++)] = item;
     g_undo.cursor = g_undo.count;
 }
 
@@ -1458,26 +1438,6 @@ static bool undo_apply_delete_text(int row, int col, const char *text, size_t le
     return true;
 }
 
-static void undo_reset_history(void)
-{
-    undo_history_clear();
-}
-
-static bool undo_is_replaying(void)
-{
-    return g_undo.replaying;
-}
-
-static bool undo_is_batching(void)
-{
-    return g_undo.batching;
-}
-
-static void undo_set_batching(bool batching)
-{
-    g_undo.batching = batching;
-}
-
 static void undo_record_common(edit_type_t type, int row, int col, const char *text, size_t len,
                                int before_y, int before_x, int after_y, int after_x)
 {
@@ -1494,9 +1454,8 @@ static void undo_record_common(edit_type_t type, int row, int col, const char *t
         .after_y = after_y,
         .after_x = after_x,
     };
-    if (!item.text)
-        return;
-    undo_history_append(item);
+    if (item.text)
+        undo_history_append(item);
 }
 
 static void undo_record_insert(int row, int col, const char *text, size_t len,
@@ -1539,16 +1498,21 @@ static void undo_record_replace(int row, int col, const char *old_text, size_t o
                                 const char *new_text, size_t new_len,
                                 int before_y, int before_x, int after_y, int after_x)
 {
-    if (g_undo.replaying || g_undo.batching || !old_text || !new_text)
-        return;
-    if (old_len > SIZE_MAX - new_len - 1)
+    if (g_undo.replaying || g_undo.batching || !old_text || !new_text ||
+        old_len > SIZE_MAX - new_len - 1)
         return;
     size_t total_len = old_len + new_len;
+    char *text = malloc(total_len + 1);
+    if (!text)
+        return;
+    memcpy(text, old_text, old_len);
+    memcpy(text + old_len, new_text, new_len);
+    text[total_len] = '\0';
     undo_item_t item = {
         .type = EDIT_REPLACE,
         .row = row,
         .col = col,
-        .text = malloc(total_len + 1),
+        .text = text,
         .len = old_len,
         .aux_len = new_len,
         .before_y = before_y,
@@ -1556,11 +1520,6 @@ static void undo_record_replace(int row, int col, const char *old_text, size_t o
         .after_y = after_y,
         .after_x = after_x,
     };
-    if (!item.text)
-        return;
-    memcpy(item.text, old_text, old_len);
-    memcpy(item.text + old_len, new_text, new_len);
-    item.text[total_len] = '\0';
     undo_history_append(item);
 }
 
@@ -1748,14 +1707,14 @@ static void editor_paste(void)
 
     int before_y = ec.cursor_y, before_x = ec.cursor_x;
     size_t paste_len = strlen(ec.copied_char_buffer);
-    undo_set_batching(true);
+    g_undo.batching = true;
     for (size_t i = 0; i < paste_len; i++) {
         if (ec.copied_char_buffer[i] == '\n')
             editor_newline();
         else
             editor_insert_char((unsigned char) ec.copied_char_buffer[i], false);
     }
-    undo_set_batching(false);
+    g_undo.batching = false;
     if (paste_len > 0) {
         undo_record_insert(before_y, before_x, ec.copied_char_buffer, paste_len,
                            before_y, before_x, ec.cursor_y, ec.cursor_x);
@@ -2045,7 +2004,7 @@ static void editor_newline(void)
     ec.cursor_y++;
     ec.cursor_x = 0;
     ec.modified = true;
-    if (!undo_is_replaying() && !undo_is_batching()) {
+    if (!g_undo.replaying && !g_undo.batching) {
         static const char nl[] = "\n";
         undo_record_insert(before_y, before_x, nl, 1, before_y, before_x,
                            ec.cursor_y, ec.cursor_x);
@@ -2112,7 +2071,7 @@ static void editor_insert_char(int c, bool manual_typing)
     row_update(row, ec.cursor_y);
     ec.cursor_x += utf8_buffer.len;
     ec.modified = true;
-    if (!undo_is_replaying() && !undo_is_batching()) {
+    if (!g_undo.replaying && !g_undo.batching) {
         undo_record_insert(before_y, before_x, utf8_buffer.bytes, (size_t)utf8_buffer.len,
                            before_y, before_x, ec.cursor_y, ec.cursor_x);
     }
@@ -2167,7 +2126,7 @@ static void editor_delete_char(void)
             row_erase(ec.cursor_y);
             ec.cursor_y--;
             ec.modified = true;
-            if (!undo_is_replaying() && !undo_is_batching()) {
+            if (!g_undo.replaying && !g_undo.batching) {
                 static const char nl[] = "\n";
                 undo_record_delete(before_y - 1, prev_size, nl, 1,
                                    before_y, before_x, ec.cursor_y, ec.cursor_x);
@@ -2193,7 +2152,7 @@ static char *file_rows_to_string(int *buf_len)
 
 static void file_open(const char *file_name)
 {
-    undo_reset_history();
+    undo_history_clear();
     for (int i = 0; i < NR; i++)
         row_free_contents(ROW(i));
     tlist_free_items(ec.rows);
@@ -3510,7 +3469,7 @@ static void browser_render(void)
 /* Clean up all allocated memory before exit */
 static void editor_cleanup(void)
 {
-    undo_reset_history();
+    undo_history_clear();
     for (int i = 0; i < NR; i++)
         row_free_contents(ROW(i));
     tlist_free(ec.rows);
