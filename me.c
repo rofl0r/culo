@@ -3467,15 +3467,20 @@ static void browser_open_selected(void)
         browser_free_entries();
         mode_set(MODE_NORMAL);
         ui_set_message("Opened: %s", full_path);
-        editor_refresh_full();
+        editor_refresh_full(); /* Fully redraw the editor */
     }
 }
 
 static void help_render(void)
 {
+    int visible = ec.screen_rows - 1;
+    int first_visible = ec.mode_state.help.offset + 1;
+    int last_visible = ec.mode_state.help.offset + visible;
+    if (last_visible > HELP_NUM_LINES)
+        last_visible = HELP_NUM_LINES;
     char status[80];
-    snprintf(status, sizeof(status), " [HELP] %d/%d lines",
-             ec.mode_state.help.offset + 1, HELP_NUM_LINES);
+    snprintf(status, sizeof(status), " [HELP] lines %d-%d of %d",
+             first_visible, last_visible, HELP_NUM_LINES);
     list_screen_render("  Help", HELP_NUM_LINES, ec.mode_state.help.offset,
                        -1, help_lines, NULL, status, NULL);
 }
@@ -3489,13 +3494,18 @@ static void browser_render(void)
     if (ec.mode_state.browser.selected >= ec.mode_state.browser.offset + visible)
         ec.mode_state.browser.offset = ec.mode_state.browser.selected - visible + 1;
 
-    char title[256], status_right[80];
+    char title[256], status_left[256], status_right[80];
     snprintf(title, sizeof(title), " [BROWSER] %s", ec.mode_state.browser.current_dir);
-    snprintf(status_right, sizeof(status_right), "%d/%d files",
-             ec.mode_state.browser.selected + 1, ec.mode_state.browser.num_entries);
+    snprintf(status_left, sizeof(status_left), " [BROWSER] %s", ec.mode_state.browser.current_dir);
+    if (ec.mode_state.browser.num_entries > 0) {
+        snprintf(status_right, sizeof(status_right), "%d/%d files",
+                 ec.mode_state.browser.selected + 1, ec.mode_state.browser.num_entries);
+    } else {
+        snprintf(status_right, sizeof(status_right), "0/0 files");
+    }
     list_screen_render(title, ec.mode_state.browser.num_entries,
                        ec.mode_state.browser.offset, ec.mode_state.browser.selected,
-                       NULL, ec.mode_state.browser.entries, title, status_right);
+                       NULL, ec.mode_state.browser.entries, status_left, status_right);
 }
 
 /* Clean up all allocated memory before exit */
