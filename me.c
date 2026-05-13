@@ -694,8 +694,7 @@ static void undo_record_delete(int row, int col, const char *text, size_t len,
 static void undo_record_replace(int row, int col, const char *old_text, size_t old_len,
                                 const char *new_text, size_t new_len,
                                 int before_y, int before_x, int after_y, int after_x);
-static void undo_perform_undo(void);
-static void undo_perform_redo(void);
+static void undo_perform(bool redo);
 
 /* Mode management implementation */
 static void mode_set(editor_mode_t new_mode)
@@ -1545,32 +1544,19 @@ static void undo_apply_item(const undo_item_t *item, bool redo)
     }
 }
 
-static void undo_perform_undo(void)
+static void undo_perform(bool redo)
 {
-    if (g_undo.cursor <= 0) {
-        ui_set_message("Nothing to undo");
+    if (redo ? g_undo.cursor >= g_undo.count : g_undo.cursor <= 0) {
+        ui_set_message(redo ? "Nothing to redo" : "Nothing to undo");
         return;
     }
-    /* cursor points to the next unapplied entry; step back to the
-     * entry we are about to undo and run its inverse. */
-    g_undo.cursor--;
-    undo_item_t *item = &g_undo.history[undo_history_index(g_undo.cursor)];
+    if (!redo)
+        g_undo.cursor--;
     g_undo.replaying = true;
-    undo_apply_item(item, false);
+    undo_apply_item(&g_undo.history[undo_history_index(g_undo.cursor)], redo);
     g_undo.replaying = false;
-}
-
-static void undo_perform_redo(void)
-{
-    if (g_undo.cursor >= g_undo.count) {
-        ui_set_message("Nothing to redo");
-        return;
-    }
-    undo_item_t *item = &g_undo.history[undo_history_index(g_undo.cursor)];
-    g_undo.replaying = true;
-    undo_apply_item(item, true);
-    g_undo.replaying = false;
-    g_undo.cursor++;
+    if (redo)
+        g_undo.cursor++;
 }
 
 static void editor_copy(int cut)
@@ -3839,12 +3825,12 @@ static void editor_process_key(void)
     case CTRL_('z'):
     case META_('u'):
     case META_('U'):
-        undo_perform_undo();
+        undo_perform(false);
         break;
     case CTRL_('y'):
     case META_('e'):
     case META_('E'):
-        undo_perform_redo();
+        undo_perform(true);
         break;
     case META_('a'):
     case META_('A'): /* Start text marking (GNU nano: M-A Set Mark) */
