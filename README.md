@@ -1,11 +1,21 @@
-# Mazu Editor
+# CULO Editor
 
-Mazu Editor is a minimalist text editor with syntax highlight, copy/paste, and search.
+CULO Editor is a minimalist text editor with syntax highlight,
+copy/paste, search/replace, utf-8 support.
+It tries to provide a replacement for GNU nano, providing the
+most useful features using the same keybindings, but in a fraction
+of the binary and code size, and without external dependencies
+other than libc.
+It's also heavily optimized for speed: opening huge text files
+with millions of lines should be (almost) instant, as well as
+navigating in and/or editing them.
+The same holds true for huge javascript or json files that are
+compressed into a single line.
 
 ## Usage
 
 Command line: (`filename` is optional)
-* me `<filename>`
+* culo `<filename>`
 
 Supported keys:
 * Ctrl-X: Quit (prompts to save if modified)
@@ -39,15 +49,21 @@ Supported keys:
 * Up/Down/Left/Right: Move cursor
 * Home/End: move cursor to the beginning/end of editing line
 
-Mazu Editor does not depend on external library (not even curses). It uses fairly
-standard VT100 (and similar terminals) escape sequences.
+CULO Editor does not depend on external library (not even curses).
+It uses fairly standard VT100 (and similar terminals) escape sequences.
 
 ## Acknowledge
 
-Mazu Editor was inspired by excellent tutorial [Build Your Own Text Editor](https://viewsourcecode.org/snaptoken/kilo/).
+CULO Editor is a fork of Mazu Editor, which in turn was inspired by excellent
+tutorial [Build Your Own Text Editor](https://viewsourcecode.org/snaptoken/kilo/).
+
+The name kilo served as the inspiration for CULO, because kilo is really an
+unfinished PoS full of bugs crashing into your face.
+The original idea was to use COOLO as name, but it's one char too much to type
+so it was shortened to CULO.
 
 ## License
 
-Mazu Editor is freely redistributable under the BSD 2 clause license. Use of
+CULO Editor is freely redistributable under the BSD 2 clause license. Use of
 this source code is governed by a BSD-style license that can be found in the
 LICENSE file.

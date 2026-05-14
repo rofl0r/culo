@@ -27,7 +27,7 @@ TESTS_FAILED=0
 
 # Test directories
 TEST_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-EDITOR_BIN="$TEST_DIR/me"
+EDITOR_BIN="$TEST_DIR/culo"
 TEST_TMP_DIR="$TEST_DIR/test_tmp"
 
 # Error handler

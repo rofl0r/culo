@@ -4,12 +4,12 @@ CFLAGS = -Wall -std=gnu99
 
 -include config.mak
 
-all: me
+all: culo
 
-me: me.c nregex.c
+me: culo.c nregex.c
 	$(CC) $(CFLAGS) -o $@ $^ $(LDFLAGS)
 
-check: me
+check: culo
 	@tests/runner.sh
 
 clean:

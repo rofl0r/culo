@@ -1,7 +1,3 @@
-/* Mazu Editor:
- * A minimalist editor with syntax highlight, copy/paste, and search.
- */
-
 #if defined(__APPLE__) && !defined(_DARWIN_C_SOURCE)
 #define _DARWIN_C_SOURCE	/* Enable SIGWINCH on macOS */
 #endif
@@ -4386,7 +4382,7 @@ int main(int argc, char *argv[])
 	if (argc >= 2)
 		file_open(argv[1]);
 	term_enable_raw();
-	ui_set_message("Mazu Editor | ^G Help");
+	ui_set_message("CULO Editor | ^G Help");
 	editor_refresh();
 
 	/* Main event loop */
