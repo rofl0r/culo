@@ -699,7 +699,7 @@ editor_syntax_t DB[] = {
 const struct syntax_desc syntax_rules[] = {
 #include "nanorc.h"
 	/* terminating sentinel */
-	{0}
+	{.file_regex = NULL, .rule_count = 0, .rules = {{0}}}
 };
 
 static char *ui_prompt(const char *prefix, const char *hint, const char *init, void (*callback) (char *, int));

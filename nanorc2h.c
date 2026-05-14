@@ -43,8 +43,8 @@ static char *skip_ws(char *s)
 static void rstrip(char *s)
 {
 	size_t n = strlen(s);
-	while (n > 0 && (s[n - 1] == '\n' || s[n - 1] == '\r' ||
-					 isspace((unsigned char) s[n - 1]))) {
+	while (n > 0 && (s[n - 1] == '\n' || s[n - 1] == '\r'
+			 || isspace((unsigned char) s[n - 1]))) {
 		s[n - 1] = '\0';
 		--n;
 	}
@@ -53,8 +53,8 @@ static void rstrip(char *s)
 static int starts_with_keyword(const char *s, const char *kw)
 {
 	size_t n = strlen(kw);
-	return strncmp(s, kw, n) == 0 &&
-		   (s[n] == '\0' || isspace((unsigned char) s[n]));
+	return strncmp(s, kw, n) == 0
+	    && (s[n] == '\0' || isspace((unsigned char) s[n]));
 }
 
 static int str_eq_nocase(const char *a, const char *b)
@@ -240,10 +240,8 @@ static int merge_regex(char **dst, const char *regex)
 	return 1;
 }
 
-static int add_or_merge_rule(parse_result_t *pr,
-							 color_id_t fg,
-							 color_id_t bg,
-							 const char *regex)
+static int add_or_merge_rule(parse_result_t *pr, color_id_t fg, color_id_t bg,
+			     const char *regex)
 {
 	size_t i;
 	for (i = 0; i < pr->rule_count; ++i) {
@@ -251,8 +249,8 @@ static int add_or_merge_rule(parse_result_t *pr,
 			return merge_regex(&pr->rules[i].regex, regex);
 	}
 	if (pr->rule_count >= SYNTAX_MAX_RULES) {
-		fprintf(stderr, "nanorc2h: rule limit reached (%d) in %s\n",
-			SYNTAX_MAX_RULES,
+		fprintf(stderr, "nanorc2h: rule limit reached (%zu) in %s\n",
+			(size_t) SYNTAX_MAX_RULES,
 			pr->source_name ? pr->source_name : "(unknown)");
 		return 0;
 	}
@@ -358,7 +356,7 @@ static void parse_color_line(parse_result_t *pr, char *line)
 	normalized = normalize_regex(regex);
 	if (!normalized || !add_or_merge_rule(pr, fg, bg, normalized))
 		fprintf(stderr, "nanorc2h: failed to add rule with regex \"%s\"\n",
-				regex);
+			regex);
 	free(normalized);
 	free(regex);
 }
@@ -448,8 +446,9 @@ static void emit_output(const parse_result_t *pr)
 	printf("\t.rule_count = %zu,\n", pr->rule_count);
 	printf("\t.rules = {\n");
 	for (i = 0; i < pr->rule_count; ++i) {
-		printf("\t\t{ %s, %s, ", color_id_c_name(pr->rules[i].fg),
-			   color_id_c_name(pr->rules[i].bg));
+		printf("\t\t{ %s, %s, ",
+		       color_id_c_name(pr->rules[i].fg),
+		       color_id_c_name(pr->rules[i].bg));
 		emit_c_string(pr->rules[i].regex);
 		printf(" },\n");
 	}
