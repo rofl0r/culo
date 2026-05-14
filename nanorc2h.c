@@ -380,7 +380,7 @@ static void parse_color_line(parse_result_t *pr, char *line)
 		const char *start_pos = strstr(p, "start=");
 		const char *end_pos = strstr(p, "end=");
 		if (start_pos && end_pos && end_pos > start_pos) {
-			size_t seg_len = (size_t) (end_pos - start_pos);
+			size_t seg_len = end_pos - start_pos;
 			char *segment = malloc(seg_len + 1);
 			if (segment) {
 				memcpy(segment, start_pos, seg_len);
