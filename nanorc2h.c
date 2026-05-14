@@ -145,6 +145,7 @@ static char *parse_quoted(const char *s, const char **next_out)
 			--q;
 		}
 		if ((bs % 2) == 0) {
+			/* Take the first unescaped closing quote for this token. */
 			end = p;
 			break;
 		}

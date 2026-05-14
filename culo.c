@@ -1267,16 +1267,15 @@ static void syntax_select(void)
 			regfree(&end_rx);
 			continue;
 		}
-		ec.syntax_span_compiled[ec.syntax_span_compiled_count].
-		    start_compiled = start_rx;
-		ec.syntax_span_compiled[ec.syntax_span_compiled_count].
-		    end_compiled = end_rx;
-		ec.syntax_span_compiled[ec.syntax_span_compiled_count].
-		    valid_start = true;
-		ec.syntax_span_compiled[ec.syntax_span_compiled_count].
-		    valid_end = true;
-		ec.syntax_span_compiled[ec.syntax_span_compiled_count].hl_code =
-		    hl_code;
+		{
+			typeof(ec.syntax_span_compiled[0]) *slot =
+			    &ec.syntax_span_compiled[ec.syntax_span_compiled_count];
+			slot->start_compiled = start_rx;
+			slot->end_compiled = end_rx;
+			slot->valid_start = true;
+			slot->valid_end = true;
+			slot->hl_code = hl_code;
+		}
 		ec.syntax_span_compiled_count++;
 		if (ec.syntax_span_compiled_count >= SYNTAX_MAX_SPAN_RULES)
 			break;
@@ -3159,7 +3158,7 @@ static void ui_draw_rows(editor_buf_t * eb)
 			unsigned char current_style = NORMAL;
 			bool in_selection = false;
 			int prev_tab_cursor_x = -1;
-			bool have_prev_tab_cursor_x = false;
+			bool prev_tab_cursor_x_valid = false;
 
 			for (int j = 0; j < len; j++) {
 				/* Check if this character is in selection */
@@ -3182,7 +3181,7 @@ static void ui_draw_rows(editor_buf_t * eb)
 				int render_pos = ec.col_offset + j;
 				int tab_cursor_x =
 				    row_renderx_to_cursorx(row, render_pos);
-				int prev_cursor_x = have_prev_tab_cursor_x ?
+				int prev_cursor_x = prev_tab_cursor_x_valid ?
 				    prev_tab_cursor_x : ((render_pos > 0) ?
 							 row_renderx_to_cursorx
 							 (row, render_pos - 1) :
@@ -3193,7 +3192,7 @@ static void ui_draw_rows(editor_buf_t * eb)
 				    && (render_pos == 0
 					|| prev_cursor_x != tab_cursor_x);
 				prev_tab_cursor_x = tab_cursor_x;
-				have_prev_tab_cursor_x = true;
+				prev_tab_cursor_x_valid = true;
 				if (tab_head) {
 					if (!in_selection)
 						buf_append(eb, TAB_HEAD_STYLE,
