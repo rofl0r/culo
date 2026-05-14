@@ -144,11 +144,8 @@ static char *parse_quoted(const char *s, const char **next_out)
 			++bs;
 			--q;
 		}
-		if ((bs % 2) == 0) {
-			/* Take the first unescaped closing quote for this token. */
+		if ((bs % 2) == 0)
 			end = p;
-			break;
-		}
 	}
 	if (!end) {
 		if (next_out)
@@ -258,12 +255,6 @@ static int add_or_merge_rule(parse_result_t *pr, color_id_t fg, color_id_t bg,
 		if (pr->rules[i].fg == fg && pr->rules[i].bg == bg)
 			return merge_regex(&pr->rules[i].regex, regex);
 	}
-	if (pr->rule_count >= SYNTAX_MAX_RULES) {
-		fprintf(stderr, "nanorc2h: rule limit reached (%zu) in %s\n",
-			(size_t) SYNTAX_MAX_RULES,
-			pr->source_name ? pr->source_name : "(unknown)");
-		return 0;
-	}
 	if (!ensure_rule_capacity(pr))
 		return 0;
 	pr->rules[pr->rule_count].fg = fg;
@@ -278,12 +269,6 @@ static int add_or_merge_rule(parse_result_t *pr, color_id_t fg, color_id_t bg,
 static int add_span_rule(parse_result_t *pr, color_id_t fg, color_id_t bg,
 			 const char *start_regex, const char *end_regex)
 {
-	if (pr->span_rule_count >= SYNTAX_MAX_SPAN_RULES) {
-		fprintf(stderr, "nanorc2h: span rule limit reached (%zu) in %s\n",
-			(size_t) SYNTAX_MAX_SPAN_RULES,
-			pr->source_name ? pr->source_name : "(unknown)");
-		return 0;
-	}
 	if (!ensure_span_rule_capacity(pr))
 		return 0;
 	pr->span_rules[pr->span_rule_count].fg = fg;
@@ -389,8 +374,16 @@ static void parse_color_line(parse_result_t *pr, char *line)
 	if (strstr(p, "start=") && strstr(p, "end=")) {
 		const char *start_pos = strstr(p, "start=");
 		const char *end_pos = strstr(p, "end=");
-		if (start_pos)
-			start_regex = parse_quoted(start_pos, NULL);
+		if (start_pos && end_pos && end_pos > start_pos) {
+			size_t seg_len = (size_t) (end_pos - start_pos);
+			char *segment = malloc(seg_len + 1);
+			if (segment) {
+				memcpy(segment, start_pos, seg_len);
+				segment[seg_len] = '\0';
+				start_regex = parse_quoted(segment, NULL);
+				free(segment);
+			}
+		}
 		if (end_pos)
 			end_regex = parse_quoted(end_pos, NULL);
 		if (!start_regex || !end_regex)
@@ -500,22 +493,20 @@ static void emit_c_string(const char *s)
 static void emit_output(const parse_result_t *pr)
 {
 	size_t i;
+	size_t total = pr->rule_count + pr->span_rule_count;
 	printf("{\n");
 	printf("\t.file_regex = ");
 	emit_c_string(pr->file_regex ? pr->file_regex : "");
 	printf(",\n");
-	printf("\t.rule_count = %zu,\n", pr->rule_count);
-	printf("\t.rules = {\n");
+	printf("\t.rule_count = %zu,\n", total);
+	printf("\t.rules = (const struct syntax_rule[]) {\n");
 	for (i = 0; i < pr->rule_count; ++i) {
 		printf("\t\t{ %s, %s, ",
 		       color_id_c_name(pr->rules[i].fg),
 		       color_id_c_name(pr->rules[i].bg));
 		emit_c_string(pr->rules[i].regex);
-		printf(" },\n");
+		printf(", NULL },\n");
 	}
-	printf("\t},\n");
-	printf("\t.span_rule_count = %zu,\n", pr->span_rule_count);
-	printf("\t.span_rules = {\n");
 	for (i = 0; i < pr->span_rule_count; ++i) {
 		printf("\t\t{ %s, %s, ",
 		       color_id_c_name(pr->span_rules[i].fg),

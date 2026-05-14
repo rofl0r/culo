@@ -481,6 +481,20 @@ typedef union {
 	} help;
 } mode_data_t;
 
+typedef struct {
+	regex_t compiled;
+	bool valid;
+	unsigned char hl_code;
+} compiled_rule_t;
+
+typedef struct {
+	regex_t start_compiled;
+	regex_t end_compiled;
+	bool valid_start;
+	bool valid_end;
+	unsigned char hl_code;
+} compiled_span_rule_t;
+
 /* Editor config structure */
 struct {
 	int cursor_x, cursor_y, render_x;
@@ -493,19 +507,9 @@ struct {
 	time_t status_msg_time;
 	char *copied_char_buffer;
 	const struct syntax_desc *syntax;
-	struct {
-		regex_t compiled;
-		bool valid;
-		unsigned char hl_code;
-	} syntax_compiled[SYNTAX_MAX_RULES];
+	compiled_rule_t *syntax_compiled;
 	size_t syntax_compiled_count;
-	struct {
-		regex_t start_compiled;
-		regex_t end_compiled;
-		bool valid_start;
-		bool valid_end;
-		unsigned char hl_code;
-	} syntax_span_compiled[SYNTAX_MAX_SPAN_RULES];
+	compiled_span_rule_t *syntax_span_compiled;
 	size_t syntax_span_compiled_count;
 	struct {
 		color_id_t fg;
@@ -645,7 +649,7 @@ typedef enum {
 const struct syntax_desc syntax_rules[] = {
 #include "nanorc.h"
 	/* terminating sentinel */
-	{.file_regex = NULL, .rule_count = 0, .rules = {{0}}}
+	{.file_regex = NULL, .rule_count = 0, .rules = NULL}
 };
 
 static char *ui_prompt(const char *prefix, const char *hint, const char *init, void (*callback) (char *, int));
@@ -1013,17 +1017,18 @@ static void syntax_reset_compiled_rules(void)
 	for (size_t i = 0; i < ec.syntax_compiled_count; i++) {
 		if (ec.syntax_compiled[i].valid)
 			regfree(&ec.syntax_compiled[i].compiled);
-		ec.syntax_compiled[i].valid = false;
 	}
+	free(ec.syntax_compiled);
+	ec.syntax_compiled = NULL;
 	ec.syntax_compiled_count = 0;
 	for (size_t i = 0; i < ec.syntax_span_compiled_count; i++) {
 		if (ec.syntax_span_compiled[i].valid_start)
 			regfree(&ec.syntax_span_compiled[i].start_compiled);
 		if (ec.syntax_span_compiled[i].valid_end)
 			regfree(&ec.syntax_span_compiled[i].end_compiled);
-		ec.syntax_span_compiled[i].valid_start = false;
-		ec.syntax_span_compiled[i].valid_end = false;
 	}
+	free(ec.syntax_span_compiled);
+	ec.syntax_span_compiled = NULL;
 	ec.syntax_span_compiled_count = 0;
 	ec.syntax_palette_count = HIGHLIGHT_DYNAMIC_BASE;
 }
@@ -1226,59 +1231,84 @@ static void syntax_select(void)
 	}
 	if (!ec.syntax)
 		return;
-	for (size_t i = 0; i < ec.syntax->rule_count; i++) {
-		const struct syntax_color_rule *rule = &ec.syntax->rules[i];
-		regex_t rule_rx = NULL;
-		unsigned char hl_code;
-		if (!rule->regex || (rule->fg == COLOR_NONE &&
-				     rule->bg == COLOR_NONE))
-			continue;
-		if (regcomp(&rule_rx, rule->regex, REG_EXTENDED) != 0)
-			continue;
-		hl_code = syntax_palette_code(rule->fg, rule->bg);
-		if (hl_code == NORMAL) {
-			regfree(&rule_rx);
-			continue;
+	{
+		size_t single_count = 0;
+		size_t span_count = 0;
+		size_t single_idx = 0;
+		size_t span_idx = 0;
+
+		for (size_t i = 0; i < ec.syntax->rule_count; i++) {
+			const struct syntax_rule *rule = &ec.syntax->rules[i];
+			if (!rule->regex || (rule->fg == COLOR_NONE &&
+					     rule->bg == COLOR_NONE))
+				continue;
+			if (rule->end_regex)
+				span_count++;
+			else
+				single_count++;
 		}
-		ec.syntax_compiled[ec.syntax_compiled_count].compiled = rule_rx;
-		ec.syntax_compiled[ec.syntax_compiled_count].valid = true;
-		ec.syntax_compiled[ec.syntax_compiled_count].hl_code = hl_code;
-		ec.syntax_compiled_count++;
-		if (ec.syntax_compiled_count >= SYNTAX_MAX_RULES)
-			break;
-	}
-	for (size_t i = 0; i < ec.syntax->span_rule_count; i++) {
-		const struct syntax_span_rule *rule = &ec.syntax->span_rules[i];
-		regex_t start_rx = NULL;
-		regex_t end_rx = NULL;
-		unsigned char hl_code;
-		if (!rule->start_regex || !rule->end_regex ||
-		    (rule->fg == COLOR_NONE && rule->bg == COLOR_NONE))
-			continue;
-		if (regcomp(&start_rx, rule->start_regex, REG_EXTENDED) != 0)
-			continue;
-		if (regcomp(&end_rx, rule->end_regex, REG_EXTENDED) != 0) {
-			regfree(&start_rx);
-			continue;
+
+		if (single_count > 0) {
+			ec.syntax_compiled =
+			    calloc(single_count, sizeof(*ec.syntax_compiled));
+			if (!ec.syntax_compiled)
+				return;
 		}
-		hl_code = syntax_palette_code(rule->fg, rule->bg);
-		if (hl_code == NORMAL) {
-			regfree(&start_rx);
-			regfree(&end_rx);
-			continue;
+		if (span_count > 0) {
+			ec.syntax_span_compiled =
+			    calloc(span_count, sizeof(*ec.syntax_span_compiled));
+			if (!ec.syntax_span_compiled) {
+				free(ec.syntax_compiled);
+				ec.syntax_compiled = NULL;
+				return;
+			}
 		}
-		{
-			typeof(ec.syntax_span_compiled[0]) *slot =
-			    &ec.syntax_span_compiled[ec.syntax_span_compiled_count];
-			slot->start_compiled = start_rx;
-			slot->end_compiled = end_rx;
-			slot->valid_start = true;
-			slot->valid_end = true;
-			slot->hl_code = hl_code;
+
+		for (size_t i = 0; i < ec.syntax->rule_count; i++) {
+			const struct syntax_rule *rule = &ec.syntax->rules[i];
+			unsigned char hl_code;
+
+			if (!rule->regex || (rule->fg == COLOR_NONE &&
+					     rule->bg == COLOR_NONE))
+				continue;
+			hl_code = syntax_palette_code(rule->fg, rule->bg);
+			if (hl_code == NORMAL)
+				continue;
+
+			if (rule->end_regex) {
+				regex_t start_rx = NULL;
+				regex_t end_rx = NULL;
+				if (regcomp(&start_rx, rule->regex,
+					    REG_EXTENDED) != 0)
+					continue;
+				if (regcomp(&end_rx, rule->end_regex,
+					    REG_EXTENDED) != 0) {
+					regfree(&start_rx);
+					continue;
+				}
+				ec.syntax_span_compiled[span_idx].start_compiled =
+				    start_rx;
+				ec.syntax_span_compiled[span_idx].end_compiled =
+				    end_rx;
+				ec.syntax_span_compiled[span_idx].valid_start =
+				    true;
+				ec.syntax_span_compiled[span_idx].valid_end = true;
+				ec.syntax_span_compiled[span_idx].hl_code =
+				    hl_code;
+				span_idx++;
+			} else {
+				regex_t rule_rx = NULL;
+				if (regcomp(&rule_rx, rule->regex,
+					    REG_EXTENDED) != 0)
+					continue;
+				ec.syntax_compiled[single_idx].compiled = rule_rx;
+				ec.syntax_compiled[single_idx].valid = true;
+				ec.syntax_compiled[single_idx].hl_code = hl_code;
+				single_idx++;
+			}
 		}
-		ec.syntax_span_compiled_count++;
-		if (ec.syntax_span_compiled_count >= SYNTAX_MAX_SPAN_RULES)
-			break;
+		ec.syntax_compiled_count = single_idx;
+		ec.syntax_span_compiled_count = span_idx;
 	}
 }
 
