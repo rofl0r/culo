@@ -3916,11 +3916,12 @@ static void editor_process_key(void)
 						}
 					}
 					if (valid) {
-						int line = atoi(ec.mode_state.goto_line.buf);
+						char *endp;
+						long lnum = strtol(ec.mode_state.goto_line.buf, &endp, 10);
 						mode_set(MODE_NORMAL);
-						if (line < 1) line = 1;
-						if (line > NR && NR > 0) line = NR;
-						ec.cursor_y = line - 1;
+						if (lnum < 1) lnum = 1;
+						if (NR > 0 && lnum > NR) lnum = NR;
+						ec.cursor_y = (int)lnum - 1;
 						ec.cursor_x = 0;
 					} else {
 						mode_set(MODE_NORMAL);
@@ -3939,10 +3940,10 @@ static void editor_process_key(void)
 				if (ec.mode_state.goto_line.len > 0)
 					ec.mode_state.goto_line.buf[--ec.mode_state.goto_line.len] = '\0';
 			} else if (c >= '0' && c <= '9') {
-				int len = ec.mode_state.goto_line.len;
-				if (len + 1 < (int)sizeof(ec.mode_state.goto_line.buf) - 1) {
-					ec.mode_state.goto_line.buf[len] = (char)c;
-					ec.mode_state.goto_line.buf[len + 1] = '\0';
+				int cur_len = ec.mode_state.goto_line.len;
+				if (cur_len < (int)sizeof(ec.mode_state.goto_line.buf) - 1) {
+					ec.mode_state.goto_line.buf[cur_len] = (char)c;
+					ec.mode_state.goto_line.buf[cur_len + 1] = '\0';
 					ec.mode_state.goto_line.len++;
 				}
 			}
