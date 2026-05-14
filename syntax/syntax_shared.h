@@ -145,7 +145,7 @@ static inline const char *color_id_to_vt100_bg(color_id_t id)
 	}
 }
 
-static inline int syntax_str_eq_nocase(const char *a, const char *b)
+static inline int str_eq_nocase(const char *a, const char *b)
 {
 	while (*a && *b) {
 		int ca = tolower((unsigned char) *a);
@@ -160,40 +160,40 @@ static inline int syntax_str_eq_nocase(const char *a, const char *b)
 
 static inline color_id_t color_id_from_name(const char *name)
 {
-	if (!name || !*name || syntax_str_eq_nocase(name, "normal")
-	    || syntax_str_eq_nocase(name, "default"))
+	if (!name || !*name || str_eq_nocase(name, "normal")
+	    || str_eq_nocase(name, "default"))
 		return COLOR_NONE;
-	if (syntax_str_eq_nocase(name, "black"))
+	if (str_eq_nocase(name, "black"))
 		return COLOR_BLACK;
-	if (syntax_str_eq_nocase(name, "red"))
+	if (str_eq_nocase(name, "red"))
 		return COLOR_RED;
-	if (syntax_str_eq_nocase(name, "green"))
+	if (str_eq_nocase(name, "green"))
 		return COLOR_GREEN;
-	if (syntax_str_eq_nocase(name, "yellow"))
+	if (str_eq_nocase(name, "yellow"))
 		return COLOR_YELLOW;
-	if (syntax_str_eq_nocase(name, "blue"))
+	if (str_eq_nocase(name, "blue"))
 		return COLOR_BLUE;
-	if (syntax_str_eq_nocase(name, "magenta"))
+	if (str_eq_nocase(name, "magenta"))
 		return COLOR_MAGENTA;
-	if (syntax_str_eq_nocase(name, "cyan"))
+	if (str_eq_nocase(name, "cyan"))
 		return COLOR_CYAN;
-	if (syntax_str_eq_nocase(name, "white"))
+	if (str_eq_nocase(name, "white"))
 		return COLOR_WHITE;
-	if (syntax_str_eq_nocase(name, "brightblack"))
+	if (str_eq_nocase(name, "brightblack"))
 		return COLOR_BRIGHTBLACK;
-	if (syntax_str_eq_nocase(name, "brightred"))
+	if (str_eq_nocase(name, "brightred"))
 		return COLOR_BRIGHTRED;
-	if (syntax_str_eq_nocase(name, "brightgreen"))
+	if (str_eq_nocase(name, "brightgreen"))
 		return COLOR_BRIGHTGREEN;
-	if (syntax_str_eq_nocase(name, "brightyellow"))
+	if (str_eq_nocase(name, "brightyellow"))
 		return COLOR_BRIGHTYELLOW;
-	if (syntax_str_eq_nocase(name, "brightblue"))
+	if (str_eq_nocase(name, "brightblue"))
 		return COLOR_BRIGHTBLUE;
-	if (syntax_str_eq_nocase(name, "brightmagenta"))
+	if (str_eq_nocase(name, "brightmagenta"))
 		return COLOR_BRIGHTMAGENTA;
-	if (syntax_str_eq_nocase(name, "brightcyan"))
+	if (str_eq_nocase(name, "brightcyan"))
 		return COLOR_BRIGHTCYAN;
-	if (syntax_str_eq_nocase(name, "brightwhite"))
+	if (str_eq_nocase(name, "brightwhite"))
 		return COLOR_BRIGHTWHITE;
 	return COLOR_NONE;
 }

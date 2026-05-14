@@ -7,7 +7,7 @@
 
 #define LINE_BUF_SIZE 8192
 /* "(%s)|(%s)" + NUL */
-#define MERGE_REGEX_OVERHEAD 8
+#define MERGE_REGEX_OVERHEAD 6
 
 typedef struct {
 	color_id_t fg;
@@ -70,6 +70,8 @@ static char *parse_quoted(const char *s, const char **next_out)
 			*next_out = s;
 		return NULL;
 	}
+	/* Keep the last unescaped quote as delimiter because nanorc regexes may
+	 * contain unescaped " inside character classes and alternations. */
 	for (p = start + 1; *p; ++p) {
 		int bs = 0;
 		const char *q = p;
@@ -253,7 +255,8 @@ static void parse_color_line(parse_result_t *pr, char *line)
 	if (!regex)
 		return;
 	if (!add_or_merge_rule(pr, fg, bg, regex))
-		fprintf(stderr, "nanorc2h: failed to add rule\n");
+		fprintf(stderr, "nanorc2h: failed to add rule with regex \"%s\"\n",
+			regex);
 	free(regex);
 }
 
@@ -388,6 +391,13 @@ int main(int argc, char **argv)
 
 	while (fgets(line, sizeof(line), fp)) {
 		char *p;
+		if (!strchr(line, '\n') && !feof(fp)) {
+			int c;
+			fprintf(stderr, "nanorc2h: skipping oversized line\n");
+			while ((c = fgetc(fp)) != EOF && c != '\n')
+				;
+			continue;
+		}
 		rstrip(line);
 		p = skip_ws(line);
 		if (*p == '\0' || *p == '#')
@@ -400,7 +410,7 @@ int main(int argc, char **argv)
 			parse_color_line(&pr, p);
 			continue;
 		}
-		/* Intentionally ignore: header, magic, comment and everything else. */
+		/* Intentionally ignore: header, magic, comment markers, and everything else. */
 	}
 
 	fclose(fp);
