@@ -1134,7 +1134,7 @@ static void syntax_apply_span_rules(editor_row_t *row, int row_idx)
 
 		bool found_start = false;
 		size_t best_from = 0, best_to = 0;
-		size_t best_rule = 0;
+		int best_rule = 0;
 		for (size_t r = 0; r < ec.syntax_span_compiled_count; r++) {
 			size_t from, to;
 			if (!syntax_find_match
@@ -1142,11 +1142,11 @@ static void syntax_apply_span_rules(editor_row_t *row, int row_idx)
 			     row->render, pos, &from, &to))
 				continue;
 			if (!found_start || from < best_from ||
-			    (from == best_from && r < best_rule)) {
+			    (from == best_from && (int)r < best_rule)) {
 				found_start = true;
 				best_from = from;
 				best_to = to;
-				best_rule = r;
+				best_rule = (int)r;
 			}
 		}
 		if (!found_start)
@@ -1160,7 +1160,7 @@ static void syntax_apply_span_rules(editor_row_t *row, int row_idx)
 						  ec.syntax_span_compiled
 						  [best_rule].hl_code, false);
 				row->span_open = true;
-				row->span_rule = (int)best_rule;
+				row->span_rule = best_rule;
 				return;
 			}
 			syntax_fill_range(row, best_from, end_to,
