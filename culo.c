@@ -3158,6 +3158,8 @@ static void ui_draw_rows(editor_buf_t * eb)
 			unsigned char *hl = row->highlight + ec.col_offset;
 			unsigned char current_style = NORMAL;
 			bool in_selection = false;
+			int prev_tab_cursor_x = -1;
+			bool have_prev_tab_cursor_x = false;
 
 			for (int j = 0; j < len; j++) {
 				/* Check if this character is in selection */
@@ -3180,16 +3182,18 @@ static void ui_draw_rows(editor_buf_t * eb)
 				int render_pos = ec.col_offset + j;
 				int tab_cursor_x =
 				    row_renderx_to_cursorx(row, render_pos);
-				int prev_cursor_x =
-				    (render_pos > 0) ? row_renderx_to_cursorx(row,
-									       render_pos
-									       - 1)
-				    : -1;
+				int prev_cursor_x = have_prev_tab_cursor_x ?
+				    prev_tab_cursor_x : ((render_pos > 0) ?
+							 row_renderx_to_cursorx
+							 (row, render_pos - 1) :
+							 -1);
 				bool tab_head =
 				    tab_cursor_x < row->size
 				    && row->chars[tab_cursor_x] == '\t'
 				    && (render_pos == 0
 					|| prev_cursor_x != tab_cursor_x);
+				prev_tab_cursor_x = tab_cursor_x;
+				have_prev_tab_cursor_x = true;
 				if (tab_head) {
 					if (!in_selection)
 						buf_append(eb, TAB_HEAD_STYLE,
