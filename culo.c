@@ -418,6 +418,8 @@ typedef struct {
 	unsigned char *highlight;
 	bool render_direct_map;
 	bool hl_valid;
+	bool span_open;
+	int span_rule;
 } editor_row_t;
 
 /* X-macro for editor modes */
@@ -496,6 +498,14 @@ struct {
 		unsigned char hl_code;
 	} syntax_compiled[SYNTAX_MAX_RULES];
 	size_t syntax_compiled_count;
+	struct {
+		regex_t start_compiled;
+		regex_t end_compiled;
+		bool valid_start;
+		bool valid_end;
+		unsigned char hl_code;
+	} syntax_span_compiled[SYNTAX_MAX_SPAN_RULES];
+	size_t syntax_span_compiled_count;
 	struct {
 		color_id_t fg;
 		color_id_t bg;
@@ -1005,6 +1015,15 @@ static void syntax_reset_compiled_rules(void)
 		ec.syntax_compiled[i].valid = false;
 	}
 	ec.syntax_compiled_count = 0;
+	for (size_t i = 0; i < ec.syntax_span_compiled_count; i++) {
+		if (ec.syntax_span_compiled[i].valid_start)
+			regfree(&ec.syntax_span_compiled[i].start_compiled);
+		if (ec.syntax_span_compiled[i].valid_end)
+			regfree(&ec.syntax_span_compiled[i].end_compiled);
+		ec.syntax_span_compiled[i].valid_start = false;
+		ec.syntax_span_compiled[i].valid_end = false;
+	}
+	ec.syntax_span_compiled_count = 0;
 	ec.syntax_palette_count = HIGHLIGHT_DYNAMIC_BASE;
 }
 
@@ -1043,17 +1062,144 @@ static void syntax_apply_rules(editor_row_t *row)
 	}
 }
 
+static void syntax_fill_range(editor_row_t *row, size_t from, size_t to,
+			      unsigned char hl_code, bool only_normal)
+{
+	if (from > (size_t) row->render_size)
+		return;
+	if (to > (size_t) row->render_size)
+		to = (size_t) row->render_size;
+	if (to <= from)
+		return;
+	if (!only_normal) {
+		memset(row->highlight + from, hl_code, to - from);
+		return;
+	}
+	for (size_t i = from; i < to; i++)
+		if (row->highlight[i] == NORMAL)
+			row->highlight[i] = hl_code;
+}
+
+static bool syntax_find_match(regex_t *rx, const char *s, size_t offset,
+			      size_t * out_from, size_t * out_to)
+{
+	regmatch_t m;
+	int rc = regexec(rx, s + offset, 1, &m, (offset == 0) ? 0 : REG_NOTBOL);
+	if (rc != 0 || m.rm_so < 0 || m.rm_eo < 0)
+		return false;
+	*out_from = offset + (size_t) m.rm_so;
+	*out_to = offset + (size_t) m.rm_eo;
+	return *out_to > *out_from;
+}
+
+static void syntax_apply_span_rules(editor_row_t *row, int row_idx)
+{
+	size_t pos = 0;
+	bool in_span = false;
+	int active_span = -1;
+	size_t len = (size_t) row->render_size;
+
+	row->span_open = false;
+	row->span_rule = -1;
+	if (ec.syntax_span_compiled_count == 0)
+		return;
+
+	if (row_idx > 0 && ROW(row_idx - 1)->span_open) {
+		in_span = true;
+		active_span = ROW(row_idx - 1)->span_rule;
+	}
+
+	while (pos < len) {
+		if (in_span) {
+			size_t end_from, end_to;
+			if (!syntax_find_match
+			    (&ec.syntax_span_compiled[active_span].end_compiled,
+			     row->render, pos, &end_from, &end_to)) {
+				syntax_fill_range(row, pos, len,
+						  ec.syntax_span_compiled
+						  [active_span].hl_code, false);
+				row->span_open = true;
+				row->span_rule = active_span;
+				return;
+			}
+			syntax_fill_range(row, pos, end_to,
+					  ec.syntax_span_compiled
+					  [active_span].hl_code, false);
+			pos = end_to;
+			in_span = false;
+			active_span = -1;
+			continue;
+		}
+
+		bool found_start = false;
+		size_t best_from = 0, best_to = 0;
+		int best_rule = -1;
+		for (size_t r = 0; r < ec.syntax_span_compiled_count; r++) {
+			size_t from, to;
+			if (!syntax_find_match
+			    (&ec.syntax_span_compiled[r].start_compiled,
+			     row->render, pos, &from, &to))
+				continue;
+			if (!found_start || from < best_from ||
+			    (from == best_from && (int)r < best_rule)) {
+				found_start = true;
+				best_from = from;
+				best_to = to;
+				best_rule = (int)r;
+			}
+		}
+		if (!found_start)
+			break;
+		{
+			size_t end_from, end_to;
+			if (!syntax_find_match
+			    (&ec.syntax_span_compiled[best_rule].end_compiled,
+			     row->render, best_to, &end_from, &end_to)) {
+				syntax_fill_range(row, best_from, len,
+						  ec.syntax_span_compiled
+						  [best_rule].hl_code, false);
+				row->span_open = true;
+				row->span_rule = best_rule;
+				return;
+			}
+			syntax_fill_range(row, best_from, end_to,
+					  ec.syntax_span_compiled
+					  [best_rule].hl_code, false);
+			pos = end_to;
+		}
+	}
+}
+
+static void syntax_highlight(editor_row_t *row, int row_idx);
+
+static void syntax_ensure_row_highlighted(int row_idx)
+{
+	int start = row_idx;
+	if (row_idx < 0 || row_idx >= NR)
+		return;
+	if (ROW(row_idx)->hl_valid)
+		return;
+	if (ec.syntax_span_compiled_count > 0)
+		while (start > 0 && !ROW(start - 1)->hl_valid)
+			start--;
+	for (int i = start; i <= row_idx; i++)
+		if (!ROW(i)->hl_valid)
+			syntax_highlight(ROW(i), i);
+}
+
 static void syntax_highlight(editor_row_t *row, int row_idx)
 {
-	(void) row_idx;
 	row->highlight = realloc(row->highlight, row->render_size);
 	memset(row->highlight, NORMAL, row->render_size);
+	row->span_open = false;
+	row->span_rule = -1;
 	if (!ec.syntax)
 	{
 		row->hl_valid = true;
 		return;
 	}
 	syntax_apply_rules(row);
+	syntax_apply_span_rules(row, row_idx);
 	row->hl_valid = true;
 }
 
@@ -1098,6 +1244,40 @@ static void syntax_select(void)
 		ec.syntax_compiled[ec.syntax_compiled_count].hl_code = hl_code;
 		ec.syntax_compiled_count++;
 		if (ec.syntax_compiled_count >= SYNTAX_MAX_RULES)
+			break;
+	}
+	for (size_t i = 0; i < ec.syntax->span_rule_count; i++) {
+		const struct syntax_span_rule *rule = &ec.syntax->span_rules[i];
+		regex_t start_rx = NULL;
+		regex_t end_rx = NULL;
+		unsigned char hl_code;
+		if (!rule->start_regex || !rule->end_regex ||
+		    (rule->fg == COLOR_NONE && rule->bg == COLOR_NONE))
+			continue;
+		if (regcomp(&start_rx, rule->start_regex, REG_EXTENDED) != 0)
+			continue;
+		if (regcomp(&end_rx, rule->end_regex, REG_EXTENDED) != 0) {
+			regfree(&start_rx);
+			continue;
+		}
+		hl_code = syntax_palette_code(rule->fg, rule->bg);
+		if (hl_code == NORMAL) {
+			regfree(&start_rx);
+			regfree(&end_rx);
+			continue;
+		}
+		ec.syntax_span_compiled[ec.syntax_span_compiled_count].
+		    start_compiled = start_rx;
+		ec.syntax_span_compiled[ec.syntax_span_compiled_count].
+		    end_compiled = end_rx;
+		ec.syntax_span_compiled[ec.syntax_span_compiled_count].
+		    valid_start = true;
+		ec.syntax_span_compiled[ec.syntax_span_compiled_count].
+		    valid_end = true;
+		ec.syntax_span_compiled[ec.syntax_span_compiled_count].hl_code =
+		    hl_code;
+		ec.syntax_span_compiled_count++;
+		if (ec.syntax_span_compiled_count >= SYNTAX_MAX_SPAN_RULES)
 			break;
 	}
 }
@@ -1175,7 +1355,6 @@ static int row_renderx_to_cursorx(editor_row_t * row, int render_x)
 
 static void row_update(editor_row_t * row, int row_idx)
 {
-	(void) row_idx;
 	int tabs = 0;
 	int wide_chars = 0;
 	bool direct_map = true;
@@ -1234,7 +1413,12 @@ static void row_update(editor_row_t * row, int row_idx)
 	}
 	row->render[idx] = '\0';
 	row->render_size = idx;
-	row->hl_valid = false;
+	if (ec.syntax_span_compiled_count > 0) {
+		for (int i = row_idx; i < NR; i++)
+			ROW(i)->hl_valid = false;
+	} else {
+		row->hl_valid = false;
+	}
 }
 
 static void row_insert(int at, const char *s, size_t line_len)
@@ -2245,7 +2429,7 @@ static void search_highlight_match(int row_idx, int match_offset, int match_len)
 {
 	editor_row_t *r = ROW(row_idx);
 	if (r && !r->hl_valid)
-		syntax_highlight(r, row_idx);
+		syntax_ensure_row_highlighted(row_idx);
 	if (!r->highlight || r->render_size <= 0)
 		return;
 
@@ -2962,7 +3146,7 @@ static void ui_draw_rows(editor_buf_t * eb)
 		} else {
 			editor_row_t *row = ROW(file_row);
 			if (!row->hl_valid)
-				syntax_highlight(row, file_row);
+				syntax_ensure_row_highlighted(file_row);
 			int available_cols = ec.screen_cols - line_num_width;
 			int len = row->render_size - ec.col_offset;
 			if (len < 0)

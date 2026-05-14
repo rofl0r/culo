@@ -16,11 +16,21 @@ typedef struct {
 } merged_rule_t;
 
 typedef struct {
+	color_id_t fg;
+	color_id_t bg;
+	char *start_regex;
+	char *end_regex;
+} span_rule_t;
+
+typedef struct {
 	char *file_regex;
 	const char *source_name;
 	merged_rule_t *rules;
 	size_t rule_count;
 	size_t rule_cap;
+	span_rule_t *span_rules;
+	size_t span_rule_count;
+	size_t span_rule_cap;
 } parse_result_t;
 
 static char *xstrdup(const char *s)
@@ -134,8 +144,10 @@ static char *parse_quoted(const char *s, const char **next_out)
 			++bs;
 			--q;
 		}
-		if ((bs % 2) == 0)
+		if ((bs % 2) == 0) {
 			end = p;
+			break;
+		}
 	}
 	if (!end) {
 		if (next_out)
@@ -199,6 +211,23 @@ static int ensure_rule_capacity(parse_result_t *pr)
 	return 1;
 }
 
+static int ensure_span_rule_capacity(parse_result_t *pr)
+{
+	size_t new_cap;
+	span_rule_t *new_rules;
+
+	if (pr->span_rule_count < pr->span_rule_cap)
+		return 1;
+	new_cap = pr->span_rule_cap ? pr->span_rule_cap * 2 : 8;
+	new_rules =
+	    realloc(pr->span_rules, new_cap * sizeof(pr->span_rules[0]));
+	if (!new_rules)
+		return 0;
+	pr->span_rules = new_rules;
+	pr->span_rule_cap = new_cap;
+	return 1;
+}
+
 static int merge_regex(char **dst, const char *regex)
 {
 	size_t dst_len, regex_len, total;
@@ -242,6 +271,28 @@ static int add_or_merge_rule(parse_result_t *pr, color_id_t fg, color_id_t bg,
 	if (!pr->rules[pr->rule_count].regex)
 		return 0;
 	++pr->rule_count;
+	return 1;
+}
+
+static int add_span_rule(parse_result_t *pr, color_id_t fg, color_id_t bg,
+			 const char *start_regex, const char *end_regex)
+{
+	if (pr->span_rule_count >= SYNTAX_MAX_SPAN_RULES) {
+		fprintf(stderr, "nanorc2h: span rule limit reached (%zu) in %s\n",
+			(size_t) SYNTAX_MAX_SPAN_RULES,
+			pr->source_name ? pr->source_name : "(unknown)");
+		return 0;
+	}
+	if (!ensure_span_rule_capacity(pr))
+		return 0;
+	pr->span_rules[pr->span_rule_count].fg = fg;
+	pr->span_rules[pr->span_rule_count].bg = bg;
+	pr->span_rules[pr->span_rule_count].start_regex = xstrdup(start_regex);
+	pr->span_rules[pr->span_rule_count].end_regex = xstrdup(end_regex);
+	if (!pr->span_rules[pr->span_rule_count].start_regex ||
+	    !pr->span_rules[pr->span_rule_count].end_regex)
+		return 0;
+	++pr->span_rule_count;
 	return 1;
 }
 
@@ -308,10 +359,12 @@ static void parse_color_line(parse_result_t *pr, char *line)
 	char spec[128];
 	char *regex;
 	char *normalized;
+	char *start_regex = NULL;
+	char *end_regex = NULL;
+	char *normalized_start = NULL;
+	char *normalized_end = NULL;
 	color_id_t fg, bg;
 
-	if (strstr(p, "start=") || strstr(p, "end="))
-		return;
 	p += strlen("color");
 	p = skip_ws(p);
 	if (!*p)
@@ -332,15 +385,40 @@ static void parse_color_line(parse_result_t *pr, char *line)
 	parse_color_spec(spec, &fg, &bg);
 	if (fg == COLOR_NONE && bg == COLOR_NONE)
 		return;
+	if (strstr(p, "start=") && strstr(p, "end=")) {
+		const char *start_pos = strstr(p, "start=");
+		const char *end_pos = strstr(p, "end=");
+		if (start_pos)
+			start_regex = parse_quoted(start_pos, NULL);
+		if (end_pos)
+			end_regex = parse_quoted(end_pos, NULL);
+		if (!start_regex || !end_regex)
+			goto out;
+		normalized_start = normalize_regex(start_regex);
+		normalized_end = normalize_regex(end_regex);
+		if (!normalized_start || !normalized_end
+		    || !add_span_rule(pr, fg, bg, normalized_start,
+				      normalized_end))
+			fprintf(stderr,
+				"nanorc2h: failed to add span rule start=\"%s\" end=\"%s\"\n",
+				start_regex ? start_regex : "",
+				end_regex ? end_regex : "");
+		goto out;
+	}
 	regex = parse_quoted(p, NULL);
 	if (!regex)
-		return;
+		goto out;
 	normalized = normalize_regex(regex);
 	if (!normalized || !add_or_merge_rule(pr, fg, bg, normalized))
 		fprintf(stderr, "nanorc2h: failed to add rule with regex \"%s\"\n",
 			regex);
 	free(normalized);
 	free(regex);
+ out:
+	free(normalized_start);
+	free(normalized_end);
+	free(start_regex);
+	free(end_regex);
 }
 
 static const char *color_id_c_name(color_id_t id)
@@ -435,6 +513,18 @@ static void emit_output(const parse_result_t *pr)
 		printf(" },\n");
 	}
 	printf("\t},\n");
+	printf("\t.span_rule_count = %zu,\n", pr->span_rule_count);
+	printf("\t.span_rules = {\n");
+	for (i = 0; i < pr->span_rule_count; ++i) {
+		printf("\t\t{ %s, %s, ",
+		       color_id_c_name(pr->span_rules[i].fg),
+		       color_id_c_name(pr->span_rules[i].bg));
+		emit_c_string(pr->span_rules[i].start_regex);
+		printf(", ");
+		emit_c_string(pr->span_rules[i].end_regex);
+		printf(" },\n");
+	}
+	printf("\t},\n");
 	printf("},\n");
 }
 
@@ -444,7 +534,12 @@ static void free_parse_result(parse_result_t *pr)
 	free(pr->file_regex);
 	for (i = 0; i < pr->rule_count; ++i)
 		free(pr->rules[i].regex);
+	for (i = 0; i < pr->span_rule_count; ++i) {
+		free(pr->span_rules[i].start_regex);
+		free(pr->span_rules[i].end_regex);
+	}
 	free(pr->rules);
+	free(pr->span_rules);
 	memset(pr, 0, sizeof(*pr));
 }
 
