@@ -4220,7 +4220,11 @@ static void editor_process_key(void)
 		indent_level--;
 		break;
 	default:
-		editor_insert_char(c, true);
+		/* Only insert printable ASCII and high bytes (UTF-8);
+		 * silently ignore unassigned control chars (< 0x20) and
+		 * unassigned Meta/ESC sequences (>= 0x800). */
+		if (c >= 0x20 && c < 0x100)
+			editor_insert_char(c, true);
 	}
 }
 
