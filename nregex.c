@@ -76,13 +76,13 @@ struct rstate_mark {
 	int num, val;		/* updated mark and its value */
 };
 struct rstate {
-	const char *s;			/* the current position in the string */
-	const char *o;			/* the beginning of the string */
-	int pc;				/* program counter */
-	int flg;			/* flags passed to regcomp() and regexec() */
+	const char *s;		/* the current position in the string */
+	const char *o;		/* the beginning of the string */
+	int pc;			/* program counter */
+	int flg;		/* flags passed to regcomp() and regexec() */
 	int subcnt;		/* number of groups to return */
 	struct rstate_mark *mark;	/* mark updates */
-	int mark_pos, mark_len;		/* last item in mark_num[] and mark_val[] */
+	int mark_pos, mark_len;	/* last item in mark_num[] and mark_val[] */
 	struct rstate_saved *saved;	/* saved rstate states */
 	int saved_pos, saved_len;	/* last pushed value in past_s and past_mpos[] */
 	/* before heap allocations, these buffers are used */
@@ -116,7 +116,8 @@ static int rstate_push(struct rstate *rs, int pc)
 {
 	if (rs->saved_pos >= rs->saved_len) {
 		int saved_len = rs->saved_len * 2;
-		struct rstate_saved *saved = malloc(saved_len * sizeof(saved[0]));
+		struct rstate_saved *saved =
+		    malloc(saved_len * sizeof(saved[0]));
 		if (!saved)
 			return 1;
 		memcpy(saved, rs->saved, rs->saved_len * sizeof(saved[0]));
@@ -209,7 +210,7 @@ static void rnode_free(struct rnode *rnode)
 
 static int uc_len(const char *s)
 {
-	int c = (unsigned char) s[0];
+	int c = (unsigned char)s[0];
 	if (~c & 0xc0)		/* ASCII or invalid */
 		return c > 0;
 	if (~c & 0x20)
@@ -223,15 +224,17 @@ static int uc_len(const char *s)
 
 static int uc_dec(const char *s)
 {
-	int c = (unsigned char) s[0];
+	int c = (unsigned char)s[0];
 	if (~c & 0xc0)		/* ASCII or invalid */
 		return c;
 	if (~c & 0x20)
 		return ((c & 0x1f) << 6) | (s[1] & 0x3f);
 	if (~c & 0x10)
-		return ((c & 0x0f) << 12) | ((s[1] & 0x3f) << 6) | (s[2] & 0x3f);
+		return ((c & 0x0f) << 12) | ((s[1] & 0x3f) << 6) | (s[2] &
+								    0x3f);
 	if (~c & 0x08)
-		return ((c & 0x07) << 18) | ((s[1] & 0x3f) << 12) | ((s[2] & 0x3f) << 6) | (s[3] & 0x3f);
+		return ((c & 0x07) << 18) | ((s[1] & 0x3f) << 12) |
+		    ((s[2] & 0x3f) << 6) | (s[3] & 0x3f);
 	return c;
 }
 
@@ -263,7 +266,7 @@ static int brk_len(const char *s)
 	return s[n] == ']' ? n + 1 : n;
 }
 
-static void ratom_readbrk(struct ratom *ra, const char* restrict* pat)
+static void ratom_readbrk(struct ratom *ra, const char *restrict * pat)
 {
 	int len = brk_len(*pat);
 	ra->ra = RA_BRK;
@@ -273,11 +276,11 @@ static void ratom_readbrk(struct ratom *ra, const char* restrict* pat)
 	*pat += len;
 }
 
-static void ratom_read(struct ratom *ra, const char* restrict* pat)
+static void ratom_read(struct ratom *ra, const char *restrict * pat)
 {
 	const char *s;
 	int len;
-	switch ((unsigned char) **pat) {
+	switch ((unsigned char)**pat) {
 	case '.':
 		ra->ra = RA_ANY;
 		(*pat)++;
@@ -304,9 +307,11 @@ static void ratom_read(struct ratom *ra, const char* restrict* pat)
 	default:
 		ra->ra = RA_CHR;
 		s = *pat;
-		while ((s == *pat) || !strchr(".^$[(|)*?+{\\", (unsigned char) s[0])) {
+		while ((s == *pat)
+		       || !strchr(".^$[(|)*?+{\\", (unsigned char)s[0])) {
 			int l = uc_len(s);
-			if (s != *pat && s[l] != '\0' && strchr("*?+{", (unsigned char) s[l]))
+			if (s != *pat && s[l] != '\0'
+			    && strchr("*?+{", (unsigned char)s[l]))
 				break;
 			s += uc_len(s);
 		}
@@ -320,14 +325,14 @@ static void ratom_read(struct ratom *ra, const char* restrict* pat)
 
 static const char *uc_beg(const char *beg, const char *s)
 {
-	while (s > beg && (((unsigned char) *s) & 0xc0) == 0x80)
+	while (s > beg && (((unsigned char)*s) & 0xc0) == 0x80)
 		s--;
 	return s;
 }
 
 static int isword(const char *s)
 {
-	int c = (unsigned char) s[0];
+	int c = (unsigned char)s[0];
 	return isalnum(c) || c == '_' || c > 127;
 }
 
@@ -413,14 +418,17 @@ static int ratom_match(struct ratom *ra, struct rstate *rs)
 		return 0;
 	}
 	if (ra->ra == RA_ANY) {
-		if (!rs->s[0] || (rs->s[0] == '\n' && !!(rs->flg & REG_NEWLINE)))
+		if (!rs->s[0]
+		    || (rs->s[0] == '\n' && !!(rs->flg & REG_NEWLINE)))
 			return 1;
 		rs->s += uc_len(rs->s);
 		return 0;
 	}
 	if (ra->ra == RA_BRK) {
 		int c = uc_dec(rs->s);
-		if (!c || (c == '\n' && !!(rs->flg & REG_NEWLINE) && ra->s[1] == '^'))
+		if (!c
+		    || (c == '\n' && !!(rs->flg & REG_NEWLINE)
+			&& ra->s[1] == '^'))
 			return 1;
 		rs->s += uc_len(rs->s);
 		return brk_match(ra->s + 1, c, rs->flg);
@@ -434,17 +442,17 @@ static int ratom_match(struct ratom *ra, struct rstate *rs)
 	if (ra->ra == RA_END && rs->s[0] == '\n')
 		return !(rs->flg & REG_NEWLINE);
 	if (ra->ra == RA_WBEG)
-		return !((rs->s == rs->o || !isword(uc_beg(rs->o, rs->s - 1))) &&
-			isword(rs->s));
+		return !((rs->s == rs->o || !isword(uc_beg(rs->o, rs->s - 1)))
+			 && isword(rs->s));
 	if (ra->ra == RA_WEND)
 		return !(rs->s != rs->o && isword(uc_beg(rs->o, rs->s - 1)) &&
-			(!rs->s[0] || !isword(rs->s)));
+			 (!rs->s[0] || !isword(rs->s)));
 	return 1;
 }
 
-static struct rnode *rnode_parse(const char* restrict* pat);
+static struct rnode *rnode_parse(const char *restrict * pat);
 
-static struct rnode *rnode_grp(const char* restrict* pat)
+static struct rnode *rnode_grp(const char *restrict * pat)
 {
 	struct rnode *rnode = NULL;
 	if ((*pat)[0] != '(')
@@ -463,7 +471,7 @@ static struct rnode *rnode_grp(const char* restrict* pat)
 	return rnode_make(RN_GRP, rnode, NULL);
 }
 
-static struct rnode *rnode_atom(const char* restrict* pat)
+static struct rnode *rnode_atom(const char *restrict * pat)
 {
 	struct rnode *rnode;
 	if (!**pat)
@@ -493,22 +501,22 @@ static struct rnode *rnode_atom(const char* restrict* pat)
 		int maxcnt = 0;
 		const char *p;
 		p = *pat + 1;
-		if (!isdigit((unsigned char) *p)) {
+		if (!isdigit((unsigned char)*p)) {
 			rnode_free(rnode);
 			return NULL;
 		}
-		while (isdigit((unsigned char) *p))
+		while (isdigit((unsigned char)*p))
 			mincnt = mincnt * 10 + *p++ - '0';
 		if (*p == ',') {
 			p++;
 			if (*p == '}') {
 				maxcnt = -1;
 			} else {
-				if (!isdigit((unsigned char) *p)) {
+				if (!isdigit((unsigned char)*p)) {
 					rnode_free(rnode);
 					return NULL;
 				}
-				while (isdigit((unsigned char) *p))
+				while (isdigit((unsigned char)*p))
 					maxcnt = maxcnt * 10 + *p++ - '0';
 			}
 		} else {
@@ -525,7 +533,7 @@ static struct rnode *rnode_atom(const char* restrict* pat)
 	return rnode;
 }
 
-static struct rnode *rnode_seq(const char* restrict* pat)
+static struct rnode *rnode_seq(const char *restrict * pat)
 {
 	struct rnode *c1 = rnode_atom(pat);
 	struct rnode *c2;
@@ -535,7 +543,7 @@ static struct rnode *rnode_seq(const char* restrict* pat)
 	return c2 ? rnode_make(RN_CAT, c1, c2) : c1;
 }
 
-static struct rnode *rnode_parse(const char* restrict* pat)
+static struct rnode *rnode_parse(const char *restrict * pat)
 {
 	struct rnode *c1 = rnode_seq(pat);
 	struct rnode *c2;
@@ -565,7 +573,7 @@ static int rnode_count(struct rnode *rnode)
 		n = (rnode->mincnt + 1) * n + 2;
 	} else {
 		n = (rnode->mincnt + rnode->maxcnt) * n +
-			rnode->maxcnt - rnode->mincnt;
+		    rnode->maxcnt - rnode->mincnt;
 	}
 	if (!rnode->mincnt)
 		n++;
@@ -622,7 +630,7 @@ static void rnode_emitnorep(struct rnode *n, struct regex *p)
 
 static void rnode_emit(struct rnode *n, struct regex *p)
 {
-	int jump = -1;	/* the last jump to repetition end */
+	int jump = -1;		/* the last jump to repetition end */
 	int i;
 	if (!n)
 		return;
@@ -654,7 +662,7 @@ static void rnode_emit(struct rnode *n, struct regex *p)
 	}
 }
 
-int regcomp(regex_t *restrict preg, const char *restrict pat, int flg)
+int regcomp(regex_t * restrict preg, const char *restrict pat, int flg)
 {
 	struct rnode *rnode;
 	struct regex *re;
@@ -686,7 +694,7 @@ int regcomp(regex_t *restrict preg, const char *restrict pat, int flg)
 	return 0;
 }
 
-void regfree(regex_t *preg)
+void regfree(regex_t * preg)
 {
 	struct regex *re = *preg;
 	int i;
@@ -706,7 +714,7 @@ static int re_rec(struct regex *re, struct rstate *rs)
 			if (!ratom_match(&ri->ra, rs)) {
 				rs->pc++;
 			} else if (rstate_pop(rs)) {
-					return 1;
+				return 1;
 			}
 			continue;
 		}
@@ -743,7 +751,7 @@ static int re_recmatch(struct regex *re, struct rstate *rs)
 	return 1;
 }
 
-int regexec(const regex_t *restrict preg, const char *restrict s,
+int regexec(const regex_t * restrict preg, const char *restrict s,
 	    int nsub, regmatch_t psub[restrict], int flg)
 {
 	struct regex *re = *preg;
@@ -775,9 +783,12 @@ int regexec(const regex_t *restrict preg, const char *restrict s,
 	return REG_NOMATCH;
 }
 
-int regerror(int errcode, const regex_t *restrict preg, char *restrict errbuf,
+int regerror(int errcode, const regex_t * restrict preg, char *restrict errbuf,
 	     int errbuf_size)
 {
-	(void) errcode; (void) preg; (void) errbuf; (void) errbuf_size;
+	(void)errcode;
+	(void)preg;
+	(void)errbuf;
+	(void)errbuf_size;
 	return 0;
 }
