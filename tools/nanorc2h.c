@@ -6,6 +6,8 @@
 #include "../syntax/syntax_shared.h"
 
 #define LINE_BUF_SIZE 8192
+/* "(%s)|(%s)" + NUL */
+#define MERGE_REGEX_OVERHEAD 8
 
 typedef struct {
 	color_id_t fg;
@@ -58,7 +60,8 @@ static int starts_with_keyword(const char *s, const char *kw)
 static char *parse_quoted(const char *s, const char **next_out)
 {
 	const char *start = strchr(s, '"');
-	const char *end;
+	const char *p;
+	const char *end = NULL;
 	char *out;
 	size_t n;
 
@@ -67,25 +70,19 @@ static char *parse_quoted(const char *s, const char **next_out)
 			*next_out = s;
 		return NULL;
 	}
-	end = start + strlen(start);
-	while (end > start) {
-		const char *q = end - 1;
+	for (p = start + 1; *p; ++p) {
 		int bs = 0;
-		if (*q != '"') {
-			end = q;
+		const char *q = p;
+		if (*p != '"')
 			continue;
-		}
-		while (q > start && q[-1] == '\\') {
+		while (q > start + 1 && q[-1] == '\\') {
 			++bs;
 			--q;
 		}
-		if ((bs % 2) == 0) {
-			end = q;
-			break;
-		}
-		end = q;
+		if ((bs % 2) == 0)
+			end = p;
 	}
-	if (end <= start || *end != '"') {
+	if (!end) {
 		if (next_out)
 			*next_out = start;
 		return NULL;
@@ -129,7 +126,7 @@ static int merge_regex(char **dst, const char *regex)
 	}
 	dst_len = strlen(*dst);
 	regex_len = strlen(regex);
-	total = dst_len + regex_len + 8;
+	total = dst_len + regex_len + MERGE_REGEX_OVERHEAD;
 	merged = malloc(total);
 	if (!merged)
 		return 0;
@@ -197,7 +194,11 @@ static void parse_color_spec(const char *spec, color_id_t *fg, color_id_t *bg)
 	*fg = COLOR_NONE;
 	*bg = COLOR_NONE;
 	if (!comma) {
-		snprintf(lhs, sizeof(lhs), "%s", spec);
+		size_t n = strlen(spec);
+		if (n >= sizeof(lhs))
+			n = sizeof(lhs) - 1;
+		memcpy(lhs, spec, n);
+		lhs[n] = '\0';
 		*fg = color_id_from_name(lhs);
 		return;
 	}
@@ -210,7 +211,11 @@ static void parse_color_spec(const char *spec, color_id_t *fg, color_id_t *bg)
 		*fg = color_id_from_name(lhs);
 	}
 	if (comma[1]) {
-		snprintf(rhs, sizeof(rhs), "%s", comma + 1);
+		size_t n = strlen(comma + 1);
+		if (n >= sizeof(rhs))
+			n = sizeof(rhs) - 1;
+		memcpy(rhs, comma + 1, n);
+		rhs[n] = '\0';
 		*bg = color_id_from_name(rhs);
 	}
 }
