@@ -27,6 +27,7 @@
 #include <termios.h>
 #include <unistd.h>
 #include "nregex.h"
+#include "syntax.h"
 
 #ifndef PATH_MAX
 #define PATH_MAX 4096
@@ -694,6 +695,11 @@ editor_syntax_t DB[] = {
 };
 
 #define DB_ENTRIES (sizeof(DB) / sizeof(DB[0]))
+
+const struct syntax_desc syntax_rules[] = {
+#include "nanorc.h"
+	{0}
+};
 
 static char *ui_prompt(const char *prefix, const char *hint, const char *init, void (*callback) (char *, int));
 static void editor_refresh(void);

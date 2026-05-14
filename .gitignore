@@ -2,6 +2,8 @@
 me
 culo
 nanorc2h
+nanorc.h
+syntax/*.h
 
 # Build artifacts
 *.o
