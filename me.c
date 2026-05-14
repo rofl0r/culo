@@ -699,7 +699,7 @@ editor_syntax_t DB[] = {
 
 #define DB_ENTRIES (sizeof(DB) / sizeof(DB[0]))
 
-static char *ui_prompt(const char *msg, void (*callback) (char *, int));
+static char *ui_prompt(const char *msg, const char *init, void (*callback) (char *, int));
 static void editor_refresh(void);
 static int get_line_number_width(void);
 static void editor_newline(void);
@@ -2274,14 +2274,17 @@ static void file_open(const char *file_name)
 
 static void file_save(void)
 {
-	if (!ec.file_name) {
-		ec.file_name = ui_prompt("Save as: %s (^C to cancel)", NULL);
-		if (!ec.file_name) {
-			ui_set_message("Save aborted");
-			return;
-		}
-		syntax_select();
+	char *name = ui_prompt("Save as: %s (^C to cancel)",
+			       ec.file_name, NULL);
+	if (!name) {
+		ui_set_message("Save aborted");
+		return;
 	}
+	bool name_changed = !ec.file_name || strcmp(ec.file_name, name) != 0;
+	free(ec.file_name);
+	ec.file_name = name;
+	if (name_changed)
+		syntax_select();
 	int len;
 	char *buf = file_rows_to_string(&len);
 	int fd = open(ec.file_name, O_RDWR | O_CREAT, 0644);
@@ -3233,7 +3236,7 @@ static int ui_confirm(const char *msg)
 	return r;
 }
 
-static char *ui_prompt(const char *msg, void (*callback) (char *, int))
+static char *ui_prompt(const char *msg, const char *init, void (*callback) (char *, int))
 {
 	size_t buf_size = 128;
 	char *buf = malloc(buf_size);
@@ -3241,6 +3244,20 @@ static char *ui_prompt(const char *msg, void (*callback) (char *, int))
 		return NULL;
 	size_t buf_len = 0;
 	buf[0] = '\0';
+
+	if (init) {
+		buf_len = strlen(init);
+		if (buf_len + 1 > buf_size) {
+			buf_size = buf_len + 1;
+			char *new_buf = realloc(buf, buf_size);
+			if (!new_buf) {
+				free(buf);
+				return NULL;
+			}
+			buf = new_buf;
+		}
+		memcpy(buf, init, buf_len + 1);
+	}
 
 	while (1) {
 		char formatted_msg[256];
@@ -4190,7 +4207,7 @@ static void editor_process_key(void)
 		break;
 	case META_('g'):	/* M-G Go to line number */
 	case META_('G'):{
-			char *s = ui_prompt("Enter line number: %s", NULL);
+			char *s = ui_prompt("Enter line number: %s", NULL, NULL);
 			if (s) {
 				char *endp;
 				long lnum = strtol(s, &endp, 10);
