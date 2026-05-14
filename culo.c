@@ -698,6 +698,7 @@ editor_syntax_t DB[] = {
 
 const struct syntax_desc syntax_rules[] = {
 #include "nanorc.h"
+	/* terminating sentinel */
 	{0}
 };
 
