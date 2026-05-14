@@ -64,7 +64,7 @@ test_save_modifications() {
         set timeout 2
         spawn $EDITOR_BIN $test_file
         expect -re {.*}
-        send \"\x11\"  ;# Ctrl-Q to quit
+        send \"\x18\"  ;# Ctrl-X to quit
         send \"n\"     ;# Don't save
         expect eof
     " > /dev/null 2>&1
@@ -94,8 +94,8 @@ test_save_without_changes() {
         set timeout 2
         spawn $EDITOR_BIN $test_file
         expect -re {.*}
-        send \"\x13\"      ;# Ctrl-S (Save)
-        send \"\x11\"      ;# Ctrl-Q (Quit)
+        send \"\x0F\"      ;# Ctrl-O (Save)
+        send \"\x18\"      ;# Ctrl-X (Quit)
         expect eof
     " > /dev/null 2>&1
 
@@ -125,8 +125,8 @@ test_insert_character() {
         spawn $EDITOR_BIN $test_file
         after 100
         send -- \"hello\"
-        send \"\x13\"      ;# Ctrl-S
-        send \"\x11\"      ;# Ctrl-Q
+        send \"\x0F\"      ;# Ctrl-O (Save)
+        send \"\x18\"      ;# Ctrl-X (Quit)
         expect eof
     " > /dev/null 2>&1
 
@@ -158,8 +158,8 @@ test_delete_character() {
         send \"\033\[C\"   ;# Right
         send \"\033\[C\"
         send \"\x7f\"      ;# Backspace (DEL)
-        send \"\x13\"
-        send \"\x11\"
+        send \"\x0F\"      ;# Ctrl-O (Save)
+        send \"\x18\"      ;# Ctrl-X (Quit)
         expect eof
     " > /dev/null 2>&1
 
@@ -203,8 +203,8 @@ test_interleaved_nav_ins() {
         send \"\033\[C\"	
         send \"\033\[C\"	
         send -- \"!!\"	
-        send \"\x13\"
-        send \"\x11\"
+        send \"\x0F\"      ;# Ctrl-O (Save)
+        send \"\x18\"      ;# Ctrl-X (Quit)
         expect eof
     " > /dev/null 2>&1
 

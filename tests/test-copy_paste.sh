@@ -37,15 +37,15 @@ Another line"
         set timeout 3
         spawn $EDITOR_BIN $test_file
         expect -re {.*}
-        send \"\x18\"      ;# Ctrl-X to start selection
-        send \"\033\[F\"   ;# End key to select whole line
+        send \"\033a\"     ;# M-A to set mark
+        send \"\033\[F\"   ;# End key to select to end of line
         send \"\x0B\"      ;# Ctrl-K to cut
         send \"\033\[B\"   ;# Move down
         send \"\033\[B\"
         send \"\033\[B\"
-        send \"\x16\"      ;# Ctrl-V to paste
-        send \"\x13\"      ;# Ctrl-S to save
-        send \"\x11\"      ;# Ctrl-Q to quit
+        send \"\x15\"      ;# Ctrl-U to paste
+        send \"\x0F\"      ;# Ctrl-O to save
+        send \"\x18\"      ;# Ctrl-X to quit
         expect eof
     " > /dev/null 2>&1
 

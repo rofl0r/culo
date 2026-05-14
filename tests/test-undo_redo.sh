@@ -23,8 +23,8 @@ test_basic_undo() {
         send \"\033\[F\"   ;# End of line
         send \" added\"    ;# Add text
         send \"\x1A\"      ;# Ctrl-Z to undo
-        send \"\x13\"      ;# Ctrl-S to save
-        send \"\x11\"      ;# Ctrl-Q to quit
+        send \"\x0F\"      ;# Ctrl-O to save
+        send \"\x18\"      ;# Ctrl-X to quit
         expect eof
     " > /dev/null 2>&1
 
@@ -68,8 +68,8 @@ test_multiple_undo() {
         send \"\x1A\"      ;# Undo 1
         send \"\x1A\"      ;# Undo 2
         send \"\x1A\"      ;# Undo 3
-        send \"\x13\"      ;# Ctrl-S to save
-        send \"\x11\"      ;# Ctrl-Q to quit
+        send \"\x0F\"      ;# Ctrl-O to save
+        send \"\x18\"      ;# Ctrl-X to quit
         expect eof
     " > /dev/null 2>&1
 
@@ -102,15 +102,15 @@ Line 3"
         set timeout 3
         spawn $EDITOR_BIN $test_file
         expect -re {.*}
-        send \"\x18\"      ;# Ctrl-X to select
-        send \"\033\[F\"   ;# Select line
+        send \"\033a\"     ;# M-A to set mark
+        send \"\033\[F\"   ;# End key to select to end of line
         send \"\x0B\"      ;# Ctrl-K to cut
         send \"\033\[B\"   ;# Move down
-        send \"\x16\"      ;# Ctrl-V to paste
+        send \"\x15\"      ;# Ctrl-U to paste
         send \"\x1A\"      ;# Ctrl-Z to undo paste
         send \"\x1A\"      ;# Ctrl-Z to undo cut
-        send \"\x13\"      ;# Ctrl-S to save
-        send \"\x11\"      ;# Ctrl-Q to quit
+        send \"\x0F\"      ;# Ctrl-O to save
+        send \"\x18\"      ;# Ctrl-X to quit
         expect eof
     " > /dev/null 2>&1
 

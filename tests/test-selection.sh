@@ -19,9 +19,9 @@ test_selection_mode_toggle() {
         set timeout 2
         spawn $EDITOR_BIN $test_file
         expect -re {.*}
-        send \"\x18\"      ;# Ctrl-X to enter selection mode
-        send \"\033\"      ;# ESC to exit selection mode
-        send \"\x11\"      ;# Ctrl-Q to quit
+        send \"\033a\"     ;# M-A to enter selection mode
+        send \"\x03\"      ;# Ctrl-C to cancel selection
+        send \"\x18\"      ;# Ctrl-X to quit
         expect eof
     " > /dev/null 2>&1
 
@@ -50,13 +50,13 @@ And this line too"
         set timeout 2
         spawn $EDITOR_BIN $test_file
         expect -re {.*}
-        send \"\x18\"      ;# Ctrl-X to start selection
+        send \"\033a\"     ;# M-A to start selection
         send \"\033\[C\"   ;# Right arrow
         send \"\033\[C\"
         send \"\033\[C\"
         send \"\033\[B\"   ;# Down arrow
-        send \"\x03\"      ;# Ctrl-C to copy
-        send \"\x11\"      ;# Ctrl-Q to quit
+        send \"\0336\"     ;# M-6 to copy marked region
+        send \"\x18\"      ;# Ctrl-X to quit
         expect eof
     " > /dev/null 2>&1
 
@@ -84,10 +84,10 @@ test_selection_home_end() {
         set timeout 2
         spawn $EDITOR_BIN $test_file
         expect -re {.*}
-        send \"\x18\"      ;# Ctrl-X to start selection
+        send \"\033a\"     ;# M-A to start selection
         send \"\033\[F\"   ;# End key
-        send \"\x03\"      ;# Ctrl-C to copy
-        send \"\x11\"      ;# Ctrl-Q to quit
+        send \"\0336\"     ;# M-6 to copy marked region
+        send \"\x18\"      ;# Ctrl-X to quit
         expect eof
     " > /dev/null 2>&1
 
@@ -115,11 +115,11 @@ test_cancel_selection() {
         set timeout 2
         spawn $EDITOR_BIN $test_file
         expect -re {.*}
-        send \"\x18\"      ;# Ctrl-X to start selection
+        send \"\033a\"     ;# M-A to start selection
         send \"\033\[C\"   ;# Move right
         send \"\033\[C\"
-        send \"\033\"      ;# ESC to cancel
-        send \"\x11\"      ;# Ctrl-Q to quit
+        send \"\x03\"      ;# Ctrl-C to cancel selection
+        send \"\x18\"      ;# Ctrl-X to quit
         expect eof
     " > /dev/null 2>&1
 
