@@ -47,7 +47,7 @@ typedef enum {
 #define CTRL_(k) ((k) & (0x1f))
 #define META_(k) (0x800 | (unsigned char)(k))
 #define TAB_STOP 4
-#define TAB_HEAD_STYLE "\x1b[90;47m"
+#define TAB_HEAD_STYLE "\x1b[90m"
 #define UNDO_STACK_CAP 64
 
 /* UTF-8 handling functions */
@@ -3198,7 +3198,7 @@ static void ui_draw_rows(editor_buf_t * eb)
 						buf_append(eb, TAB_HEAD_STYLE,
 							   sizeof(TAB_HEAD_STYLE)
 							   - 1);
-					buf_append(eb, "\xE2\x80\xBA", 3);
+					buf_append(eb, "\xC2\xBB", 2);
 					if (!in_selection) {
 						if (current_style != NORMAL) {
 							char buf[16];
