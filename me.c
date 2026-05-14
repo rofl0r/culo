@@ -450,8 +450,7 @@ typedef struct {
     _(SELECT, "SELECT", "Text selection mode")        \
     _(CONFIRM, "CONFIRM", "Confirmation dialog mode") \
     _(HELP, "HELP", "Help screen mode")               \
-    _(BROWSER, "BROWSER", "File browser mode")        \
-    _(GOTO, "GOTO", "Go to line number mode")
+    _(BROWSER, "BROWSER", "File browser mode")
 
 /* X-macro for key bindings - centralizes all shortcuts */
 #define KEY_BINDINGS                      \
@@ -499,10 +498,6 @@ typedef union {
 	struct {
 		int offset;	/* Scroll offset (lines from top) */
 	} help;
-	struct {
-		char buf[20];	/* line number input buffer */
-		int len;	/* current length of input */
-	} goto_line;
 } mode_data_t;
 
 /* Editor config structure */
@@ -796,10 +791,6 @@ static void mode_set(editor_mode_t new_mode)
 		ec.mode_state.help.offset = 0;
 		ui_set_message
 		    ("^X or ^G or ^C to exit, arrows/PgUp/PgDn to scroll");
-		break;
-	case MODE_GOTO:
-		ec.mode_state.goto_line.buf[0] = '\0';
-		ec.mode_state.goto_line.len = 0;
 		break;
 	case MODE_NORMAL:
 		ec.selection.active = false;
@@ -2791,12 +2782,7 @@ static void ui_draw_statusbar(editor_buf_t * eb)
 	char status[80], r_status[80];
 
 	int len, r_len;
-	if (ec.mode == MODE_GOTO) {
-		len = snprintf(status, sizeof(status), " Enter line number: %s",
-			       ec.mode_state.goto_line.buf);
-		r_len = 0;
-		r_status[0] = '\0';
-	} else if (ec.mode == MODE_SEARCH) {
+	if (ec.mode == MODE_SEARCH) {
 		if (ec.search.replace_phase == 1) {
 			/* Phase 1: entering replacement text */
 			const char *rq =
@@ -3265,7 +3251,7 @@ static char *ui_prompt(const char *msg, void (*callback) (char *, int))
 		if ((c == DEL_KEY) || (c == CTRL_('h')) || (c == BACKSPACE)) {
 			if (buf_len != 0)
 				buf[--buf_len] = '\0';
-		} else if (c == CTRL_('c')) {
+		} else if (c == CTRL_('c') || c == CTRL_('x') || c == '\x1b') {
 			ui_set_message("");
 			if (callback)
 				callback(buf, c);
@@ -3904,53 +3890,6 @@ static void editor_process_key(void)
 			return;
 		}
 
-	case MODE_GOTO:{
-			if (c == '\r') {
-				/* Enter: parse and jump */
-				if (ec.mode_state.goto_line.len > 0) {
-					bool valid = true;
-					for (int i = 0; i < ec.mode_state.goto_line.len; i++) {
-						if (!isdigit((unsigned char)ec.mode_state.goto_line.buf[i])) {
-							valid = false;
-							break;
-						}
-					}
-					if (valid) {
-						char *endp;
-						long lnum = strtol(ec.mode_state.goto_line.buf, &endp, 10);
-						mode_set(MODE_NORMAL);
-						if (lnum < 1) lnum = 1;
-						if (NR > 0 && lnum > NR) lnum = NR;
-						ec.cursor_y = (int)lnum - 1;
-						ec.cursor_x = 0;
-					} else {
-						mode_set(MODE_NORMAL);
-						set_overlay_msg("[ Invalid line or column number ]");
-					}
-				} else {
-					mode_set(MODE_NORMAL);
-				}
-				editor_refresh();
-				return;
-			} else if (c == CTRL_('c') || c == CTRL_('x') || c == '\x1b') {
-				mode_set(MODE_NORMAL);
-				editor_refresh();
-				return;
-			} else if (c == BACKSPACE || c == DEL_KEY || c == CTRL_('h')) {
-				if (ec.mode_state.goto_line.len > 0)
-					ec.mode_state.goto_line.buf[--ec.mode_state.goto_line.len] = '\0';
-			} else if (c >= '0' && c <= '9') {
-				int cur_len = ec.mode_state.goto_line.len;
-				if (cur_len < (int)sizeof(ec.mode_state.goto_line.buf) - 1) {
-					ec.mode_state.goto_line.buf[cur_len] = (char)c;
-					ec.mode_state.goto_line.buf[cur_len + 1] = '\0';
-					ec.mode_state.goto_line.len++;
-				}
-			}
-			editor_refresh();
-			return;
-		}
-
 	case MODE_SEARCH:{
 			/* Phase 1: entering replacement text */
 			if (ec.search.replace_phase == 1) {
@@ -4250,10 +4189,24 @@ static void editor_process_key(void)
 		}
 		break;
 	case META_('g'):	/* M-G Go to line number */
-	case META_('G'):
-		mode_set(MODE_GOTO);
-		editor_refresh();
-		return;		/* Don't continue to normal refresh */
+	case META_('G'):{
+			char *s = ui_prompt("Enter line number: %s", NULL);
+			if (s) {
+				char *endp;
+				long lnum = strtol(s, &endp, 10);
+				if (endp > s && *endp == '\0') {
+					if (lnum < 1) lnum = 1;
+					if (NR > 0 && lnum > NR) lnum = NR;
+					ec.cursor_y = (int)lnum - 1;
+					ec.cursor_x = 0;
+				} else {
+					set_overlay_msg
+					    ("[ Invalid line or column number ]");
+				}
+				free(s);
+			}
+			break;
+		}
 	case CTRL_('g'):	/* Show help (GNU nano: ^G) */
 		mode_set(MODE_HELP);
 		help_render();
