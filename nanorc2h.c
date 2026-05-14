@@ -144,6 +144,11 @@ static char *parse_quoted(const char *s, const char **next_out)
 			++bs;
 			--q;
 		}
+		if ((bs % 2) == 0 &&
+		    (p[1] == '\0' || isspace((unsigned char)p[1]))) {
+			end = p;
+			break;
+		}
 		if ((bs % 2) == 0)
 			end = p;
 	}
