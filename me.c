@@ -3286,6 +3286,8 @@ static char *ui_prompt(const char *prefix, const char *hint,
 		return NULL;
 	size_t buf_len = 0;
 	buf[0] = '\0';
+	int trunc_visible_chars = -1;
+	const int min_trunc_visible_chars = 2;
 
 	if (init) {
 		buf_len = strlen(init);
@@ -3315,17 +3317,28 @@ static char *ui_prompt(const char *prefix, const char *hint,
 		int vis_blen;	/* visible buffer chars shown */
 		int slen;
 		if (blen <= max_bvis) {
+			trunc_visible_chars = -1;
 			vis_blen = blen;
 			slen =
 			    snprintf(ec.status_msg, sizeof(ec.status_msg),
 				     "%s%s", prefix, buf);
 		} else {
 			/* Tail-truncate: show '<' + tail of buffer */
-			int tail = max_bvis > 0 ? max_bvis - 1 : 0;
-			vis_blen = max_bvis;
-			slen =
-			    snprintf(ec.status_msg, sizeof(ec.status_msg),
-				     "%s<%s", prefix, buf + blen - tail);
+			if (max_bvis <= 0)
+				trunc_visible_chars = 0;
+			/* Initialize or clamp truncation window to current width */
+			else if (trunc_visible_chars < 0 || trunc_visible_chars > max_bvis)
+				trunc_visible_chars = max_bvis;
+			vis_blen = trunc_visible_chars;
+			int tail = vis_blen > 0 ? vis_blen - 1 : 0;
+			if (vis_blen > 0)
+				slen =
+				    snprintf(ec.status_msg, sizeof(ec.status_msg),
+					     "%s<%s", prefix, buf + blen - tail);
+			else
+				slen =
+				    snprintf(ec.status_msg, sizeof(ec.status_msg),
+					     "%s", prefix);
 		}
 		/* Pad then right-align hint (always shown) */
 		int spaces = cols - pfx_len - vis_blen - hlen;
@@ -3351,8 +3364,16 @@ static char *ui_prompt(const char *prefix, const char *hint,
 
 		int c = term_read_key();
 		if ((c == DEL_KEY) || (c == CTRL_('h')) || (c == BACKSPACE)) {
-			if (buf_len != 0)
+			if (buf_len != 0) {
 				buf[--buf_len] = '\0';
+				if (blen > max_bvis &&
+				    max_bvis >= min_trunc_visible_chars) {
+					if (trunc_visible_chars > min_trunc_visible_chars)
+						trunc_visible_chars--;
+					else
+						trunc_visible_chars = max_bvis;
+				}
+			}
 		} else if (c == CTRL_('c') || c == CTRL_('x') || c == '\x1b') {
 			ui_set_message("");
 			if (callback)
@@ -3379,6 +3400,8 @@ static char *ui_prompt(const char *prefix, const char *hint,
 			}
 			buf[buf_len++] = c;
 			buf[buf_len] = '\0';
+			if ((int)buf_len > max_bvis && max_bvis > 0)
+				trunc_visible_chars = max_bvis;
 		}
 		if (callback)
 			callback(buf, c);
