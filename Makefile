@@ -9,7 +9,7 @@ all: culo nanorc2h
 me: culo.c nregex.c
 	$(CC) $(CFLAGS) -o $@ $^ $(LDFLAGS)
 
-nanorc2h: tools/nanorc2h.c
+nanorc2h: nanorc2h.c
 	$(CC) $(CFLAGS) -o $@ $^ $(LDFLAGS)
 
 check: culo

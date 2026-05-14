@@ -3,7 +3,7 @@
 #include <stdlib.h>
 #include <string.h>
 
-#include "../syntax/syntax_shared.h"
+#include "syntax/syntax_shared.h"
 
 #define LINE_BUF_SIZE 8192
 /* "(%s)|(%s)" + NUL */
