@@ -57,34 +57,47 @@ static int starts_with_keyword(const char *s, const char *kw)
 
 static char *parse_quoted(const char *s, const char **next_out)
 {
-	const char *p = strchr(s, '"');
+	const char *start = strchr(s, '"');
+	const char *end;
 	char *out;
-	size_t out_len = 0;
+	size_t n;
 
-	if (!p) {
+	if (!start) {
 		if (next_out)
 			*next_out = s;
 		return NULL;
 	}
-	++p;
-	out = malloc(strlen(p) + 1);
-	if (!out)
-		return NULL;
-	while (*p) {
-		if (*p == '\\' && p[1]) {
-			out[out_len++] = *p++;
-			out[out_len++] = *p++;
+	end = start + strlen(start);
+	while (end > start) {
+		const char *q = end - 1;
+		int bs = 0;
+		if (*q != '"') {
+			end = q;
 			continue;
 		}
-		if (*p == '"') {
-			++p;
+		while (q > start && q[-1] == '\\') {
+			++bs;
+			--q;
+		}
+		if ((bs % 2) == 0) {
+			end = q;
 			break;
 		}
-		out[out_len++] = *p++;
+		end = q;
 	}
-	out[out_len] = '\0';
+	if (end <= start || *end != '"') {
+		if (next_out)
+			*next_out = start;
+		return NULL;
+	}
+	n = (size_t) (end - (start + 1));
+	out = malloc(n + 1);
+	if (!out)
+		return NULL;
+	memcpy(out, start + 1, n);
+	out[n] = '\0';
 	if (next_out)
-		*next_out = p;
+		*next_out = end + 1;
 	return out;
 }
 
