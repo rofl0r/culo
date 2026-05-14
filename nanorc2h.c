@@ -180,27 +180,7 @@ static char *html_unescape(const char *s)
 
 static char *normalize_regex(const char *regex)
 {
-	char *tmp = html_unescape(regex);
-	char *out;
-	size_t i, o = 0;
-
-	if (!tmp)
-		return NULL;
-	out = malloc(strlen(tmp) + 1);
-	if (!out) {
-		free(tmp);
-		return NULL;
-	}
-	for (i = 0; tmp[i]; ++i) {
-		if (tmp[i] == '\\' && (tmp[i + 1] == '<' || tmp[i + 1] == '>')) {
-			++i;
-			continue;
-		}
-		out[o++] = tmp[i];
-	}
-	out[o] = '\0';
-	free(tmp);
-	return out;
+	return html_unescape(regex);
 }
 
 static int ensure_rule_capacity(parse_result_t *pr)

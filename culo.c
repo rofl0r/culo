@@ -417,6 +417,7 @@ typedef struct {
 	char *render;
 	unsigned char *highlight;
 	bool render_direct_map;
+	bool hl_valid;
 } editor_row_t;
 
 /* X-macro for editor modes */
@@ -1025,10 +1026,12 @@ static void syntax_apply_rules(editor_row_t *row)
 				break;
 			if (to > (size_t) row->render_size)
 				to = (size_t) row->render_size;
-			if (to > from)
-				memset(row->highlight + from,
-				       ec.syntax_compiled[r].hl_code,
-				       to - from);
+			if (to > from) {
+				for (size_t i = from; i < to; i++)
+					if (row->highlight[i] == NORMAL)
+						row->highlight[i] =
+						    ec.syntax_compiled[r].hl_code;
+			}
 			if (to <= offset) {
 				if (offset == (size_t) row->render_size)
 					break;
@@ -1046,14 +1049,20 @@ static void syntax_highlight(editor_row_t *row, int row_idx)
 	row->highlight = realloc(row->highlight, row->render_size);
 	memset(row->highlight, NORMAL, row->render_size);
 	if (!ec.syntax)
+	{
+		row->hl_valid = true;
 		return;
+	}
 	syntax_apply_rules(row);
+	row->hl_valid = true;
 }
 
 static void syntax_select(void)
 {
 	syntax_reset_compiled_rules();
 	ec.syntax = NULL;
+	for (int file_row = 0; file_row < NR; file_row++)
+		ROW(file_row)->hl_valid = false;
 	if (!ec.file_name)
 		return;
 	for (size_t j = 0; syntax_rules[j].file_regex; j++) {
@@ -1091,8 +1100,6 @@ static void syntax_select(void)
 		if (ec.syntax_compiled_count >= SYNTAX_MAX_RULES)
 			break;
 	}
-	for (int file_row = 0; file_row < NR; file_row++)
-		syntax_highlight(ROW(file_row), file_row);
 }
 
 static int row_cursorx_to_renderx(editor_row_t * row, int cursor_x)
@@ -1168,6 +1175,7 @@ static int row_renderx_to_cursorx(editor_row_t * row, int render_x)
 
 static void row_update(editor_row_t * row, int row_idx)
 {
+	(void) row_idx;
 	int tabs = 0;
 	int wide_chars = 0;
 	bool direct_map = true;
@@ -1226,7 +1234,7 @@ static void row_update(editor_row_t * row, int row_idx)
 	}
 	row->render[idx] = '\0';
 	row->render_size = idx;
-	syntax_highlight(row, row_idx);
+	row->hl_valid = false;
 }
 
 static void row_insert(int at, const char *s, size_t line_len)
@@ -2236,6 +2244,8 @@ static void file_save(void)
 static void search_highlight_match(int row_idx, int match_offset, int match_len)
 {
 	editor_row_t *r = ROW(row_idx);
+	if (r && !r->hl_valid)
+		syntax_highlight(r, row_idx);
 	if (!r->highlight || r->render_size <= 0)
 		return;
 
@@ -2950,23 +2960,24 @@ static void ui_draw_rows(editor_buf_t * eb)
 		if (file_row >= NR) {
 			buf_append(eb, "~", 1);
 		} else {
+			editor_row_t *row = ROW(file_row);
+			if (!row->hl_valid)
+				syntax_highlight(row, file_row);
 			int available_cols = ec.screen_cols - line_num_width;
-			int len = ROW(file_row)->render_size - ec.col_offset;
+			int len = row->render_size - ec.col_offset;
 			if (len < 0)
 				len = 0;
 			if (len > available_cols)
 				len = available_cols;
-			char *c = ROW(file_row)->render + ec.col_offset;
-			unsigned char *hl =
-			    ROW(file_row)->highlight + ec.col_offset;
+			char *c = row->render + ec.col_offset;
+			unsigned char *hl = row->highlight + ec.col_offset;
 			unsigned char current_style = NORMAL;
 			bool in_selection = false;
 
 			for (int j = 0; j < len; j++) {
 				/* Check if this character is in selection */
 				int cursor_x =
-				    row_renderx_to_cursorx(ROW(file_row),
-							   ec.col_offset + j);
+				    row_renderx_to_cursorx(row, ec.col_offset + j);
 				bool is_selected =
 				    selection_contains(cursor_x, file_row);
 
