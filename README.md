@@ -8,23 +8,33 @@ Command line: (`filename` is optional)
 * me `<filename>`
 
 Supported keys:
-* Ctrl-S: Save
-* Ctrl-Q: Quit
+* Ctrl-X: Quit (prompts to save if modified)
+* Ctrl-O: Save file
 * Ctrl-Z: Undo
-* Ctrl-R: Redo
-* Ctrl-F: Find string in file
+* Ctrl-Y: Redo (also M-E)
+* Ctrl-W: Find string in file
     - ESC to cancel search, Enter to exit search, arrows to navigate
+    - M-C: Toggle case sensitivity
+    - M-B: Toggle backwards search
+    - M-R: Toggle regex mode
+    - Ctrl-R: Toggle replace mode
+* Ctrl-K: Cut current line (consecutive Ctrl-K appends to cut buffer)
+* Ctrl-U: Paste/uncut
 * Ctrl-N: Toggle line numbers display
-* Ctrl-O: Open file browser
+* Ctrl-G: Show help screen
+* M-A: Set/toggle mark (text selection)
+    - Move cursor to select text while marking
+    - M-6: Copy marked region
+    - Ctrl-K: Cut marked text
+    - Ctrl-C: Cancel selection
+* M-B: Open file browser
     - Arrow keys to navigate files and directories
     - Enter to open file or enter directory
-    - ESC or Ctrl-Q to cancel
-* Ctrl-X: Start/stop text marking (selection mode)
-    - Move cursor to select text while marking
-    - ESC to cancel selection
-* Ctrl-C: Copy marked text (or current line if no selection)
-* Ctrl-K: Cut marked text (or cut from cursor to end of line)
-* Ctrl-V: Paste copied/cut text
+    - ESC or Ctrl-X to cancel
+* M-G: Go to line number
+    - Type line number, Enter to jump, ESC to cancel
+* M-\\: Go to first line of file
+* M-/: Go to last line of file
 * PageUp, PageDown: Scroll up/down
 * Up/Down/Left/Right: Move cursor
 * Home/End: move cursor to the beginning/end of editing line
