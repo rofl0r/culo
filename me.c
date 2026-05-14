@@ -508,7 +508,7 @@ struct {
 	tlist *rows;
 	bool modified;
 	char *file_name;
-	char status_msg[90];
+	char status_msg[512];
 	time_t status_msg_time;
 	char *copied_char_buffer;
 	editor_syntax_t *syntax;
@@ -699,7 +699,7 @@ editor_syntax_t DB[] = {
 
 #define DB_ENTRIES (sizeof(DB) / sizeof(DB[0]))
 
-static char *ui_prompt(const char *msg, const char *init, void (*callback) (char *, int));
+static char *ui_prompt(const char *prefix, const char *hint, const char *init, void (*callback) (char *, int));
 static void editor_refresh(void);
 static int get_line_number_width(void);
 static void editor_newline(void);
@@ -2274,7 +2274,7 @@ static void file_open(const char *file_name)
 
 static void file_save(void)
 {
-	char *name = ui_prompt("Save as: %s (^C to cancel)",
+	char *name = ui_prompt("Save as: ", "(^C to cancel)",
 			       ec.file_name, NULL);
 	if (!name) {
 		ui_set_message("Save aborted");
@@ -2784,7 +2784,7 @@ static void ui_draw_statusbar(editor_buf_t * eb)
 	buf_append(eb, "\x1b[100m", 6);	/* Dark gray */
 	char status[80], r_status[80];
 
-	int len, r_len;
+	int len = 0, r_len = 0;
 	if (ec.mode == MODE_SEARCH) {
 		if (ec.search.replace_phase == 1) {
 			/* Phase 1: entering replacement text */
@@ -2822,25 +2822,66 @@ static void ui_draw_statusbar(editor_buf_t * eb)
 		}
 		r_len = 0;
 		r_status[0] = '\0';
+		if (len > ec.screen_cols)
+			len = ec.screen_cols;
+		buf_append(eb, status, len);
 	} else {
-		/* Include mode in status line */
+		/* Build " [MODE] " left prefix */
 		const char *mode_name = mode_get_name(ec.mode);
-		len = snprintf(status, sizeof(status), " [%s] File: %.20s %s",
-			       mode_name,
-			       ec.file_name ? ec.file_name : "< New >",
-			       ec.modified ? "(modified)" : "");
+		char left[32];
+		int left_vis =
+		    snprintf(left, sizeof(left), " [%s] ", mode_name);
+		if (left_vis > ec.screen_cols)
+			left_vis = ec.screen_cols;
+
+		/* Build right side: col/row info */
 		int col_size =
 		    (ec.cursor_y <= NR - 1) ? ROW(ec.cursor_y)->size : 0;
 		r_len =
 		    snprintf(r_status, sizeof(r_status),
 			     "%d/%d lines  %d/%d cols",
-			     (ec.cursor_y + 1 > NR) ? NR : ec.cursor_y + 1, NR,
-			     ec.cursor_x + 1, col_size);
+			     (ec.cursor_y + 1 > NR) ? NR : ec.cursor_y + 1,
+			     NR, ec.cursor_x + 1, col_size);
+
+		const char *fname =
+		    ec.file_name ? ec.file_name : "< New >";
+		int fname_len = strlen(fname);
+		int mod_vis = ec.modified ? 1 : 0;	/* asterisk */
+
+		/* Max visible chars for filename: leave room for modified
+		 * marker and at least 1 space before the col/row display */
+		int max_fname_vis =
+		    ec.screen_cols - left_vis - mod_vis -
+		    (r_len > 0 ? 1 + r_len : 0);
+		if (max_fname_vis < 0)
+			max_fname_vis = 0;
+
+		buf_append(eb, left, left_vis);
+		len = left_vis;
+
+		/* Append filename, tail-truncated with '<' if too long */
+		if (fname_len <= max_fname_vis) {
+			buf_append(eb, fname, fname_len);
+			len += fname_len;
+		} else if (max_fname_vis > 0) {
+			buf_append(eb, "<", 1);
+			len++;
+			int tail = max_fname_vis - 1;
+			if (tail > 0) {
+				buf_append(eb, fname + fname_len - tail, tail);
+				len += tail;
+			}
+		}
+
+		/* Append red asterisk if modified, then restore bar color */
+		if (ec.modified) {
+			buf_append(eb, "\x1b[31m", 5);
+			buf_append(eb, "*", 1);
+			len++;
+			buf_append(eb, "\x1b[100m", 6);
+		}
 	}
 
-	if (len > ec.screen_cols)
-		len = ec.screen_cols;
-	buf_append(eb, status, len);
 	while (len < ec.screen_cols) {
 		if (r_len > 0 && ec.screen_cols - len == r_len) {
 			buf_append(eb, r_status, r_len);
@@ -3236,7 +3277,8 @@ static int ui_confirm(const char *msg)
 	return r;
 }
 
-static char *ui_prompt(const char *msg, const char *init, void (*callback) (char *, int))
+static char *ui_prompt(const char *prefix, const char *hint,
+		       const char *init, void (*callback) (char *, int))
 {
 	size_t buf_size = 128;
 	char *buf = malloc(buf_size);
@@ -3260,10 +3302,52 @@ static char *ui_prompt(const char *msg, const char *init, void (*callback) (char
 	}
 
 	while (1) {
-		char formatted_msg[256];
-		snprintf(formatted_msg, sizeof(formatted_msg), msg, buf);
-		ui_set_message("%s", formatted_msg);
+		/* Build prompt display: prefix + [<]buf + spaces + hint */
+		int pfx_len = (int)strlen(prefix);
+		int hlen = hint ? (int)strlen(hint) : 0;
+		int blen = (int)buf_len;
+		int cols = ec.screen_cols;
+		/* Visible chars available for the buffer content */
+		int max_bvis = cols - pfx_len - hlen;
+		if (max_bvis < 0)
+			max_bvis = 0;
+		int vis_blen;	/* visible buffer chars shown */
+		int slen;
+		if (blen <= max_bvis) {
+			vis_blen = blen;
+			slen =
+			    snprintf(ec.status_msg, sizeof(ec.status_msg),
+				     "%s%s", prefix, buf);
+		} else {
+			/* Tail-truncate: show '<' + tail of buffer */
+			int tail = max_bvis > 0 ? max_bvis - 1 : 0;
+			vis_blen = max_bvis;
+			slen =
+			    snprintf(ec.status_msg, sizeof(ec.status_msg),
+				     "%s<%s", prefix, buf + blen - tail);
+		}
+		/* Pad then right-align hint (always shown) */
+		int spaces = cols - pfx_len - vis_blen - hlen;
+		if (spaces < 0)
+			spaces = 0;
+		if (slen + spaces + hlen < (int)sizeof(ec.status_msg)) {
+			memset(ec.status_msg + slen, ' ', spaces);
+			slen += spaces;
+			if (hint) {
+				memcpy(ec.status_msg + slen, hint, hlen);
+				slen += hlen;
+			}
+			ec.status_msg[slen] = '\0';
+		}
+		ec.status_msg_time = time(NULL);
 		editor_refresh();
+		/* Move terminal cursor to end of displayed input in message bar */
+		char posbuf[32];
+		int n =
+		    snprintf(posbuf, sizeof(posbuf), "\x1b[%d;%dH",
+			     ec.screen_rows + 2, pfx_len + vis_blen + 1);
+		write(STDOUT_FILENO, posbuf, n);
+
 		int c = term_read_key();
 		if ((c == DEL_KEY) || (c == CTRL_('h')) || (c == BACKSPACE)) {
 			if (buf_len != 0)
@@ -4207,7 +4291,7 @@ static void editor_process_key(void)
 		break;
 	case META_('g'):	/* M-G Go to line number */
 	case META_('G'):{
-			char *s = ui_prompt("Enter line number: %s", NULL, NULL);
+			char *s = ui_prompt("Enter line number: ", "(^C to cancel)", NULL, NULL);
 			if (s) {
 				char *endp;
 				long lnum = strtol(s, &endp, 10);
