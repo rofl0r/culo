@@ -47,6 +47,7 @@ typedef enum {
 #define CTRL_(k) ((k) & (0x1f))
 #define META_(k) (0x800 | (unsigned char)(k))
 #define TAB_STOP 4
+#define TAB_HEAD_STYLE "\x1b[90;47m"
 #define UNDO_STACK_CAP 64
 
 /* UTF-8 handling functions */
@@ -1133,7 +1134,7 @@ static void syntax_apply_span_rules(editor_row_t *row, int row_idx)
 
 		bool found_start = false;
 		size_t best_from = 0, best_to = 0;
-		int best_rule = -1;
+		size_t best_rule = 0;
 		for (size_t r = 0; r < ec.syntax_span_compiled_count; r++) {
 			size_t from, to;
 			if (!syntax_find_match
@@ -1141,11 +1142,11 @@ static void syntax_apply_span_rules(editor_row_t *row, int row_idx)
 			     row->render, pos, &from, &to))
 				continue;
 			if (!found_start || from < best_from ||
-			    (from == best_from && (int)r < best_rule)) {
+			    (from == best_from && r < best_rule)) {
 				found_start = true;
 				best_from = from;
 				best_to = to;
-				best_rule = (int)r;
+				best_rule = r;
 			}
 		}
 		if (!found_start)
@@ -1159,7 +1160,7 @@ static void syntax_apply_span_rules(editor_row_t *row, int row_idx)
 						  ec.syntax_span_compiled
 						  [best_rule].hl_code, false);
 				row->span_open = true;
-				row->span_rule = best_rule;
+				row->span_rule = (int)best_rule;
 				return;
 			}
 			syntax_fill_range(row, best_from, end_to,
@@ -3191,7 +3192,9 @@ static void ui_draw_rows(editor_buf_t * eb)
 					|| prev_cursor_x != tab_cursor_x);
 				if (tab_head) {
 					if (!in_selection)
-						buf_append(eb, "\x1b[90;47m", 8);
+						buf_append(eb, TAB_HEAD_STYLE,
+							   sizeof(TAB_HEAD_STYLE)
+							   - 1);
 					buf_append(eb, "\xE2\x80\xBA", 3);
 					if (!in_selection) {
 						if (current_style != NORMAL) {
