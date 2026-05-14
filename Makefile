@@ -3,10 +3,11 @@ CFLAGS = -Wall -std=gnu99
 .PHONY: all clean check
 
 -include config.mak
+
 all: me
 
-me: me.c
-	$(CC) $(CFLAGS) -o $@ $< $(LDFLAGS)
+me: me.c nregex.c
+	$(CC) $(CFLAGS) -o $@ $^ $(LDFLAGS)
 
 check: me
 	@tests/runner.sh

@@ -30,7 +30,7 @@
 #include <sys/types.h>
 #include <termios.h>
 #include <unistd.h>
-#include <regex.h>
+#include "nregex.h"
 
 #ifndef PATH_MAX
 #define PATH_MAX 4096
