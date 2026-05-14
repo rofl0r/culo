@@ -3176,7 +3176,38 @@ static void ui_draw_rows(editor_buf_t * eb)
 					in_selection = false;
 				}
 
-				if (iscntrl(c[j])) {
+				int render_pos = ec.col_offset + j;
+				int tab_cursor_x =
+				    row_renderx_to_cursorx(row, render_pos);
+				int prev_cursor_x =
+				    (render_pos > 0) ? row_renderx_to_cursorx(row,
+									       render_pos
+									       - 1)
+				    : -1;
+				bool tab_head =
+				    tab_cursor_x < row->size
+				    && row->chars[tab_cursor_x] == '\t'
+				    && (render_pos == 0
+					|| prev_cursor_x != tab_cursor_x);
+				if (tab_head) {
+					if (!in_selection)
+						buf_append(eb, "\x1b[90;47m", 8);
+					buf_append(eb, "\xE2\x80\xBA", 3);
+					if (!in_selection) {
+						if (current_style != NORMAL) {
+							char buf[16];
+							int c_len =
+							    syntax_style_escape
+							    (current_style, buf,
+							     sizeof(buf));
+							buf_append(eb, buf, c_len);
+						} else {
+							buf_append(eb,
+								   "\x1b[39;49m",
+								   8);
+						}
+					}
+				} else if (iscntrl(c[j])) {
 					char sym =
 					    (c[j] <= 26) ? '@' + c[j] : '?';
 					buf_append(eb, "\x1b[7m", 4);
@@ -4461,6 +4492,9 @@ static void editor_process_key(void)
 	case '{':
 		editor_insert_char(c, true);
 		indent_level++;
+		break;
+	case '\t':
+		editor_insert_char('\t', true);
 		break;
 	case '}':
 		if (ec.cursor_y == NR)
