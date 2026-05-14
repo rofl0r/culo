@@ -350,6 +350,8 @@ static void parse_color_line(parse_result_t *pr, char *line)
 		spec[n] = '\0';
 	}
 	parse_color_spec(spec, &fg, &bg);
+	if (fg == COLOR_NONE && bg == COLOR_NONE)
+		return;
 	regex = parse_quoted(p, NULL);
 	if (!regex)
 		return;

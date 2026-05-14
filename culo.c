@@ -417,27 +417,7 @@ typedef struct {
 	char *render;
 	unsigned char *highlight;
 	bool render_direct_map;
-	bool hl_open_comment;
-	bool hl_valid;
 } editor_row_t;
-
-/* One entry in a keyword table.  len is a compile-time sizeof(literal)-1 so
- * the highlight loop never calls strlen(). */
-typedef struct {
-	const char *str;
-	int len;
-	unsigned char type;
-} keyword_t;
-
-/* Syntax highlighting structure */
-typedef struct {
-	char *file_type;
-	char **file_match;
-	const keyword_t *keywords;
-	char *sl_comment_start;	/* single line */
-	char *ml_comment_start, *ml_comment_end;	/* multiple lines */
-	int flags;
-} editor_syntax_t;
 
 /* X-macro for editor modes */
 #define EDITOR_MODES                                  \
@@ -508,7 +488,18 @@ struct {
 	char status_msg[512];
 	time_t status_msg_time;
 	char *copied_char_buffer;
-	editor_syntax_t *syntax;
+	const struct syntax_desc *syntax;
+	struct {
+		regex_t compiled;
+		bool valid;
+		unsigned char hl_code;
+	} syntax_compiled[SYNTAX_MAX_RULES];
+	size_t syntax_compiled_count;
+	struct {
+		color_id_t fg;
+		color_id_t bg;
+	} syntax_palette[256];
+	unsigned char syntax_palette_count;
 	struct termios orig_termios;
 	/* Editor mode state machine */
 	editor_mode_t mode;
@@ -632,69 +623,12 @@ enum editor_key {
 	HOME_KEY, END_KEY, DEL_KEY,
 };
 
-/* X-macro for syntax highlighting types */
-#define HIGHLIGHT_TYPES                         \
-    _(NORMAL, 97, "Default text")               \
-    _(MATCH, 43, "Search match")                \
-    _(SL_COMMENT, 36, "Single-line comment")    \
-    _(ML_COMMENT, 36, "Multi-line comment")     \
-    _(KEYWORD_1, 93, "Primary keyword")         \
-    _(KEYWORD_2, 92, "Secondary keyword")       \
-    _(KEYWORD_3, 36, "Preprocessor")            \
-    _(STRING, 91, "String literal")             \
-    _(NUMBER, 31, "Numeric literal")
-
-/* Generate highlight enum using X-macro */
 typedef enum {
-#define _(type, color, desc) type,
-	HIGHLIGHT_TYPES
-#undef _
-	HIGHLIGHT_COUNT
+	NORMAL = 0,
+	MATCH = 1,
+	HIGHLIGHT_DYNAMIC_BASE = 2
 } highlight_type_t;
 /* clang-format on */
-
-#define HIGHLIGHT_NUMBERS (1 << 0)
-#define HIGHLIGHT_STRINGS (1 << 1)
-
-char *C_extensions[] = { ".c", ".cc", ".cxx", ".cpp", ".h", NULL };
-
-/* Macros to build keyword table entries with compile-time lengths. */
-#define KW1(s) { s, sizeof(s)-1, KEYWORD_1 }
-#define KW2(s) { s, sizeof(s)-1, KEYWORD_2 }
-#define KW3(s) { s, sizeof(s)-1, KEYWORD_3 }
-
-keyword_t C_keywords[] = {
-	KW1("switch"), KW1("if"), KW1("while"), KW1("for"), KW1("break"),
-	KW1("continue"), KW1("return"), KW1("else"), KW1("struct"),
-	    KW1("union"),
-	KW1("typedef"), KW1("static"), KW1("enum"), KW1("class"), KW1("case"),
-	KW1("volatile"), KW1("register"), KW1("sizeof"), KW1("goto"),
-	    KW1("const"),
-	KW1("auto"),
-	KW3("#if"), KW3("#endif"), KW3("#error"), KW3("#ifdef"), KW3("#ifndef"),
-	KW3("#elif"), KW3("#define"), KW3("#undef"), KW3("#include"),
-	KW2("int"), KW2("long"), KW2("double"), KW2("float"), KW2("char"),
-	KW2("unsigned"), KW2("signed"), KW2("void"), KW2("bool"),
-	{NULL, 0, 0},
-};
-
-#undef KW1
-#undef KW2
-#undef KW3
-
-editor_syntax_t DB[] = {
-	{
-	 "c",
-	 C_extensions,
-	 C_keywords,
-	 "//",
-	 "/*",
-	 "*/",
-	 HIGHLIGHT_NUMBERS | HIGHLIGHT_STRINGS,
-	 },
-};
-
-#define DB_ENTRIES (sizeof(DB) / sizeof(DB[0]))
 
 const struct syntax_desc syntax_rules[] = {
 #include "nanorc.h"
@@ -1011,166 +945,154 @@ static void term_close_buffer(void)
 	term_clear();
 }
 
-static bool syntax_is_separator(int c)
+static int color_id_to_ansi_fg_code(color_id_t id)
 {
-	return isspace(c) || !c || strchr(",.()+-/*=~%<>[]:;", c);
+	if (id == COLOR_NONE)
+		return 39;
+	if (id >= COLOR_BLACK && id <= COLOR_WHITE)
+		return 30 + (int) id;
+	if (id >= COLOR_BRIGHTBLACK && id <= COLOR_BRIGHTWHITE)
+		return 90 + ((int) id - (int) COLOR_BRIGHTBLACK);
+	return 39;
 }
 
-static bool syntax_is_number_part(int c)
+static int color_id_to_ansi_bg_code(color_id_t id)
 {
-	return c == '.' || c == 'x' || c == 'a' || c == 'b' || c == 'c' ||
-	    c == 'd' || c == 'e' || c == 'f' || c == 'A' || c == 'X' ||
-	    c == 'B' || c == 'C' || c == 'D' || c == 'E' || c == 'F' ||
-	    c == 'h' || c == 'H';
+	if (id == COLOR_NONE)
+		return 49;
+	if (id >= COLOR_BLACK && id <= COLOR_WHITE)
+		return 40 + (int) id;
+	if (id >= COLOR_BRIGHTBLACK && id <= COLOR_BRIGHTWHITE)
+		return 100 + ((int) id - (int) COLOR_BRIGHTBLACK);
+	return 49;
 }
 
-static void syntax_highlight(editor_row_t * row, int row_idx)
+static int syntax_style_escape(unsigned char highlight, char *buf, size_t buflen)
 {
+	if (highlight == MATCH)
+		return snprintf(buf, buflen, "\x1b[43m");
+	if (highlight >= HIGHLIGHT_DYNAMIC_BASE &&
+	    highlight < ec.syntax_palette_count) {
+		color_id_t fg = ec.syntax_palette[highlight].fg;
+		color_id_t bg = ec.syntax_palette[highlight].bg;
+		return snprintf(buf, buflen, "\x1b[%d;%dm",
+				color_id_to_ansi_fg_code(fg),
+				color_id_to_ansi_bg_code(bg));
+	}
+	return snprintf(buf, buflen, "\x1b[39;49m");
+}
+
+static unsigned char syntax_palette_code(color_id_t fg, color_id_t bg)
+{
+	for (unsigned char i = HIGHLIGHT_DYNAMIC_BASE;
+	     i < ec.syntax_palette_count; i++) {
+		if (ec.syntax_palette[i].fg == fg && ec.syntax_palette[i].bg == bg)
+			return i;
+	}
+	if (ec.syntax_palette_count == 255)
+		return NORMAL;
+	ec.syntax_palette[ec.syntax_palette_count].fg = fg;
+	ec.syntax_palette[ec.syntax_palette_count].bg = bg;
+	return ec.syntax_palette_count++;
+}
+
+static void syntax_reset_compiled_rules(void)
+{
+	for (size_t i = 0; i < ec.syntax_compiled_count; i++) {
+		if (ec.syntax_compiled[i].valid)
+			regfree(&ec.syntax_compiled[i].compiled);
+		ec.syntax_compiled[i].valid = false;
+	}
+	ec.syntax_compiled_count = 0;
+	ec.syntax_palette_count = HIGHLIGHT_DYNAMIC_BASE;
+}
+
+static void syntax_apply_rules(editor_row_t *row)
+{
+	for (size_t r = 0; r < ec.syntax_compiled_count; r++) {
+		size_t offset = 0;
+		regmatch_t match;
+		while (offset <= (size_t) row->render_size) {
+			int rc = regexec(&ec.syntax_compiled[r].compiled,
+					 row->render + offset, 1, &match,
+					 (offset == 0) ? 0 : REG_NOTBOL);
+			size_t from, to;
+			if (rc != 0 || match.rm_so < 0 || match.rm_eo < 0)
+				break;
+			from = offset + (size_t) match.rm_so;
+			to = offset + (size_t) match.rm_eo;
+			if (from > (size_t) row->render_size)
+				break;
+			if (to > (size_t) row->render_size)
+				to = (size_t) row->render_size;
+			if (to > from)
+				memset(row->highlight + from,
+				       ec.syntax_compiled[r].hl_code,
+				       to - from);
+			if (to <= offset) {
+				if (offset == (size_t) row->render_size)
+					break;
+				offset++;
+			} else {
+				offset = to;
+			}
+		}
+	}
+}
+
+static void syntax_highlight(editor_row_t *row, int row_idx)
+{
+	(void) row_idx;
 	row->highlight = realloc(row->highlight, row->render_size);
 	memset(row->highlight, NORMAL, row->render_size);
 	if (!ec.syntax)
 		return;
-	const keyword_t *keywords = ec.syntax->keywords;
-	char *scs = ec.syntax->sl_comment_start;
-	char *mcs = ec.syntax->ml_comment_start;
-	char *mce = ec.syntax->ml_comment_end;
-	int scs_len = scs ? strlen(scs) : 0;
-	int mcs_len = mcs ? strlen(mcs) : 0;
-	int mce_len = mce ? strlen(mce) : 0;
-	bool prev_sep = true;
-	int in_string = 0;
-	bool in_comment = (row_idx > 0 && ROW(row_idx - 1)->hl_open_comment);
-	int i = 0;
-	while (i < row->render_size) {
-		char c = row->render[i];
-		unsigned char prev_highlight =
-		    (i > 0) ? row->highlight[i - 1] : NORMAL;
-		if (scs_len && !in_string && !in_comment) {
-			if (!strncmp(&row->render[i], scs, scs_len)) {
-				memset(&row->highlight[i], SL_COMMENT,
-				       row->render_size - i);
-				break;
-			}
-		}
-		if (mcs_len && mce_len && !in_string) {
-			if (in_comment) {
-				row->highlight[i] = ML_COMMENT;
-				if (!strncmp(&row->render[i], mce, mce_len)) {
-					memset(&row->highlight[i], ML_COMMENT,
-					       mce_len);
-					i += mce_len;
-					in_comment = 0;
-					prev_sep = true;
-					continue;
-				} else {
-					i++;
-					continue;
-				}
-			} else if (!strncmp(&row->render[i], mcs, mcs_len)) {
-				memset(&row->highlight[i], ML_COMMENT, mcs_len);
-				i += mcs_len;
-				in_comment = 1;
-				continue;
-			}
-		}
-		if (ec.syntax->flags & HIGHLIGHT_STRINGS) {
-			if (in_string) {
-				row->highlight[i] = STRING;
-				if ((c == '\\') && (i + 1 < row->render_size)) {
-					row->highlight[i + 1] = STRING;
-					i += 2;
-					continue;
-				}
-				if (c == in_string)
-					in_string = 0;
-				i++;
-				prev_sep = true;
-				continue;
-			} else {
-				if ((c == '"') || (c == '\'')) {
-					in_string = c;
-					row->highlight[i] = STRING;
-					i++;
-					continue;
-				}
-			}
-		}
-		if (ec.syntax->flags & HIGHLIGHT_NUMBERS) {
-			if ((isdigit(c)
-			     && (prev_sep || (prev_highlight == NUMBER)))
-			    || (syntax_is_number_part(c)
-				&& (prev_highlight == NUMBER))) {
-				row->highlight[i] = NUMBER;
-				i++;
-				prev_sep = false;
-				continue;
-			}
-		}
-		if (prev_sep) {
-			const keyword_t *kw;
-			for (kw = keywords; kw->str; kw++) {
-				if (!strncmp(&row->render[i], kw->str, kw->len)
-				    && syntax_is_separator(row->
-							   render[i +
-								  kw->len])) {
-					memset(&row->highlight[i], kw->type,
-					       kw->len);
-					i += kw->len;
-					break;
-				}
-			}
-			if (kw->str) {
-				prev_sep = false;
-				continue;
-			}
-		}
-		prev_sep = syntax_is_separator(c);
-		i++;
-	}
-	bool changed = (row->hl_open_comment != in_comment);
-	row->hl_open_comment = in_comment;
-	if (changed && row_idx + 1 < NR)
-		syntax_highlight(ROW(row_idx + 1), row_idx + 1);
-}
-
-/* Reference: https://misc.flogisoft.com/bash/tip_colors_and_formatting */
-static int syntax_token_color(int highlight)
-{
-	/* Generate color mapping using X-macro */
-	static const int highlight_colors[] = {
-#define _(type, color, desc) [type] = color,
-		HIGHLIGHT_TYPES
-#undef _
-	};
-
-	if (highlight >= 0 && highlight < HIGHLIGHT_COUNT)
-		return highlight_colors[highlight];
-	return 97;		/* Default white */
+	syntax_apply_rules(row);
 }
 
 static void syntax_select(void)
 {
+	syntax_reset_compiled_rules();
 	ec.syntax = NULL;
 	if (!ec.file_name)
 		return;
-	for (size_t j = 0; j < DB_ENTRIES; j++) {
-		editor_syntax_t *es = &DB[j];
-		for (size_t i = 0; es->file_match[i]; i++) {
-			char *p = strstr(ec.file_name, es->file_match[i]);
-			if (!p)
-				continue;
-			int pat_len = strlen(es->file_match[i]);
-			if ((es->file_match[i][0] != '.')
-			    || (p[pat_len] == '\0')) {
-				ec.syntax = es;
-				for (int file_row = 0; file_row < NR;
-				     file_row++)
-					syntax_highlight(ROW(file_row),
-							 file_row);
-				return;
-			}
+	for (size_t j = 0; syntax_rules[j].file_regex; j++) {
+		regex_t file_rx = NULL;
+		if (regcomp(&file_rx, syntax_rules[j].file_regex,
+			    REG_EXTENDED | REG_NOSUB) != 0)
+			continue;
+		if (regexec(&file_rx, ec.file_name, 0, NULL, 0) == 0) {
+			ec.syntax = &syntax_rules[j];
+			regfree(&file_rx);
+			break;
 		}
+		regfree(&file_rx);
 	}
+	if (!ec.syntax)
+		return;
+	for (size_t i = 0; i < ec.syntax->rule_count; i++) {
+		const struct syntax_color_rule *rule = &ec.syntax->rules[i];
+		regex_t rule_rx = NULL;
+		unsigned char hl_code;
+		if (!rule->regex || (rule->fg == COLOR_NONE &&
+				     rule->bg == COLOR_NONE))
+			continue;
+		if (regcomp(&rule_rx, rule->regex, REG_EXTENDED) != 0)
+			continue;
+		hl_code = syntax_palette_code(rule->fg, rule->bg);
+		if (hl_code == NORMAL) {
+			regfree(&rule_rx);
+			continue;
+		}
+		ec.syntax_compiled[ec.syntax_compiled_count].compiled = rule_rx;
+		ec.syntax_compiled[ec.syntax_compiled_count].valid = true;
+		ec.syntax_compiled[ec.syntax_compiled_count].hl_code = hl_code;
+		ec.syntax_compiled_count++;
+		if (ec.syntax_compiled_count >= SYNTAX_MAX_RULES)
+			break;
+	}
+	for (int file_row = 0; file_row < NR; file_row++)
+		syntax_highlight(ROW(file_row), file_row);
 }
 
 static int row_cursorx_to_renderx(editor_row_t * row, int cursor_x)
@@ -3037,7 +2959,7 @@ static void ui_draw_rows(editor_buf_t * eb)
 			char *c = ROW(file_row)->render + ec.col_offset;
 			unsigned char *hl =
 			    ROW(file_row)->highlight + ec.col_offset;
-			int current_color = -1;
+			unsigned char current_style = NORMAL;
 			bool in_selection = false;
 
 			for (int j = 0; j < len; j++) {
@@ -3065,48 +2987,40 @@ static void ui_draw_rows(editor_buf_t * eb)
 					buf_append(eb, "\x1b[7m", 4);
 					buf_append(eb, &sym, 1);
 					buf_append(eb, "\x1b[m", 3);
-					if (current_color != -1) {
+					if (current_style != NORMAL) {
 						char buf[16];
-						int c_len =
-						    snprintf(buf, sizeof(buf),
-							     "\x1b[%dm",
-							     current_color);
+						int c_len = syntax_style_escape(
+							current_style, buf,
+							sizeof(buf));
 						buf_append(eb, buf, c_len);
 					}
 				} else if (hl[j] == NORMAL) {
-					if (current_color != -1) {
-						buf_append(eb, "\x1b[39m", 5);
-						current_color = -1;
+					if (current_style != NORMAL) {
+						buf_append(eb, "\x1b[39;49m", 8);
+						current_style = NORMAL;
 					}
 					buf_append(eb, &c[j], 1);
 				} else {
-					int color = syntax_token_color(hl[j]);
 					if (hl[j] == MATCH) {
 						/* Use inverse video for search matches */
 						buf_append(eb, "\x1b[7m", 4);
 						buf_append(eb, &c[j], 1);
 						buf_append(eb, "\x1b[27m", 5);
-						if (current_color != -1) {
+						if (current_style != NORMAL) {
 							char buf[16];
-							int c_len =
-							    snprintf(buf,
-								     sizeof
-								     (buf),
-								     "\x1b[%dm",
-								     current_color);
+							int c_len = syntax_style_escape(
+								current_style, buf,
+								sizeof(buf));
 							buf_append(eb, buf,
 								   c_len);
 						}
 					} else {
-						if (color != current_color) {
-							current_color = color;
+						if (hl[j] != current_style) {
+							current_style = hl[j];
 							char buf[16];
-							int c_len =
-							    snprintf(buf,
-								     sizeof
-								     (buf),
-								     "\x1b[%dm",
-								     color);
+							int c_len = syntax_style_escape(
+								hl[j], buf,
+								sizeof(buf));
 							buf_append(eb, buf,
 								   c_len);
 						}
@@ -3117,7 +3031,7 @@ static void ui_draw_rows(editor_buf_t * eb)
 			/* Ensure selection highlighting is turned off at end of line */
 			if (in_selection)
 				buf_append(eb, "\x1b[27m", 5);
-			buf_append(eb, "\x1b[39m", 5);
+			buf_append(eb, "\x1b[39;49m", 8);
 		}
 		buf_append(eb, "\x1b[K", 3);
 		buf_append(eb, "\r\n", 2);
