@@ -831,8 +831,6 @@ static const char *mode_get_name(editor_mode_t mode)
 
 /* Static help content shown by ^G */
 static const char *const help_lines[] = {
-	"Help  (^X or ^G or ^C to exit, arrows/PgUp/PgDn to scroll)",
-	"",
 	"File:",
 	"  ^X      Exit (prompts to save if modified)",
 	"  ^O      Write/save file",
