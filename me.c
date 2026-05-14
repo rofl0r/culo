@@ -450,7 +450,8 @@ typedef struct {
     _(SELECT, "SELECT", "Text selection mode")        \
     _(CONFIRM, "CONFIRM", "Confirmation dialog mode") \
     _(HELP, "HELP", "Help screen mode")               \
-    _(BROWSER, "BROWSER", "File browser mode")
+    _(BROWSER, "BROWSER", "File browser mode")        \
+    _(GOTO, "GOTO", "Go to line number mode")
 
 /* X-macro for key bindings - centralizes all shortcuts */
 #define KEY_BINDINGS                      \
@@ -498,6 +499,10 @@ typedef union {
 	struct {
 		int offset;	/* Scroll offset (lines from top) */
 	} help;
+	struct {
+		char buf[20];	/* line number input buffer */
+		int len;	/* current length of input */
+	} goto_line;
 } mode_data_t;
 
 /* Editor config structure */
@@ -792,6 +797,10 @@ static void mode_set(editor_mode_t new_mode)
 		ui_set_message
 		    ("^X or ^G or ^C to exit, arrows/PgUp/PgDn to scroll");
 		break;
+	case MODE_GOTO:
+		ec.mode_state.goto_line.buf[0] = '\0';
+		ec.mode_state.goto_line.len = 0;
+		break;
 	case MODE_NORMAL:
 		ec.selection.active = false;
 		ui_set_message("");
@@ -853,6 +862,7 @@ static const char *const help_lines[] = {
 	"  End     End of line",
 	"  M-\\     Go to first line of file",
 	"  M-/     Go to last line of file",
+	"  M-G     Go to line number",
 	"",
 	"View:",
 	"  ^N      Toggle line numbers",
@@ -2783,7 +2793,12 @@ static void ui_draw_statusbar(editor_buf_t * eb)
 	char status[80], r_status[80];
 
 	int len, r_len;
-	if (ec.mode == MODE_SEARCH) {
+	if (ec.mode == MODE_GOTO) {
+		len = snprintf(status, sizeof(status), " Enter line number: %s",
+			       ec.mode_state.goto_line.buf);
+		r_len = 0;
+		r_status[0] = '\0';
+	} else if (ec.mode == MODE_SEARCH) {
 		if (ec.search.replace_phase == 1) {
 			/* Phase 1: entering replacement text */
 			const char *rq =
@@ -3891,6 +3906,52 @@ static void editor_process_key(void)
 			return;
 		}
 
+	case MODE_GOTO:{
+			if (c == '\r') {
+				/* Enter: parse and jump */
+				if (ec.mode_state.goto_line.len > 0) {
+					bool valid = true;
+					for (int i = 0; i < ec.mode_state.goto_line.len; i++) {
+						if (!isdigit((unsigned char)ec.mode_state.goto_line.buf[i])) {
+							valid = false;
+							break;
+						}
+					}
+					if (valid) {
+						int line = atoi(ec.mode_state.goto_line.buf);
+						mode_set(MODE_NORMAL);
+						if (line < 1) line = 1;
+						if (line > NR && NR > 0) line = NR;
+						ec.cursor_y = line - 1;
+						ec.cursor_x = 0;
+					} else {
+						mode_set(MODE_NORMAL);
+						set_overlay_msg("[ Invalid line or column number ]");
+					}
+				} else {
+					mode_set(MODE_NORMAL);
+				}
+				editor_refresh();
+				return;
+			} else if (c == CTRL_('c') || c == CTRL_('x') || c == '\x1b') {
+				mode_set(MODE_NORMAL);
+				editor_refresh();
+				return;
+			} else if (c == BACKSPACE || c == DEL_KEY || c == CTRL_('h')) {
+				if (ec.mode_state.goto_line.len > 0)
+					ec.mode_state.goto_line.buf[--ec.mode_state.goto_line.len] = '\0';
+			} else if (c >= '0' && c <= '9') {
+				int len = ec.mode_state.goto_line.len;
+				if (len + 1 < (int)sizeof(ec.mode_state.goto_line.buf) - 1) {
+					ec.mode_state.goto_line.buf[len] = (char)c;
+					ec.mode_state.goto_line.buf[len + 1] = '\0';
+					ec.mode_state.goto_line.len++;
+				}
+			}
+			editor_refresh();
+			return;
+		}
+
 	case MODE_SEARCH:{
 			/* Phase 1: entering replacement text */
 			if (ec.search.replace_phase == 1) {
@@ -4189,6 +4250,11 @@ static void editor_process_key(void)
 			ec.cursor_x = 0;
 		}
 		break;
+	case META_('g'):	/* M-G Go to line number */
+	case META_('G'):
+		mode_set(MODE_GOTO);
+		editor_refresh();
+		return;		/* Don't continue to normal refresh */
 	case CTRL_('g'):	/* Show help (GNU nano: ^G) */
 		mode_set(MODE_HELP);
 		help_render();
