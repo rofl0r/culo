@@ -541,24 +541,18 @@ struct {
 		bool has_wrapped;	/* true once any search_do_from call in this session returned wrapped=true */
 	} search;
 	char notfound_msg[200];	/* transient "not found" overlay; cleared on next keypress */
-} ec = {
-	.cursor_x = 0,.cursor_y = 0,.render_x = 0,.row_offset = 0,.col_offset =
-	    0,.rows = NULL,.modified = false,.file_name = NULL,.status_msg =
-	    "",.status_msg_time = 0,.copied_char_buffer = NULL,.file_size_bytes =
-	    0,.syntax =
-	    NULL,.mode = MODE_NORMAL,.prev_mode = MODE_NORMAL,.mode_state = { {
-	0}},.selection = {
-	.start_x = 0,.start_y = 0,.end_x = 0,.end_y = 0,.active =
-		    false,},.show_line_numbers = false,.show_whitespace = true,.last_was_cut =
-	    false,.search = {
-		.query = NULL,.query_len = 0,.query_cap = 0,.mode =
-		    SM_NONE,.replace_query = NULL,.replace_len =
-		    0,.replace_cap = 0,
-		    /* orig_row=-1 means "no active replace cycle"; orig_char is only
-		     * meaningful when orig_row >= 0, so 0 is a fine default. */
-.replace_phase = 0,.replace_count = 0,.orig_row =
-		    -1,.orig_char = 0,.has_wrapped =
-		    false},.notfound_msg = "",};
+} ec;
+
+static void init_ec(void)
+{
+	memset(&ec, 0, sizeof(ec));
+	ec.mode = MODE_NORMAL;
+	ec.prev_mode = MODE_NORMAL;
+	ec.show_whitespace = true;
+	/* orig_row=-1 means "no active replace cycle"; orig_char is only
+	 * meaningful when orig_row >= 0, so 0 is a fine default. */
+	ec.search.orig_row = -1;
+}
 
 typedef enum {
 	EDIT_INSERT = 0,
@@ -3747,6 +3741,12 @@ static const char *get_file_extension(const char *filename)
 /* Get file type indicator and color */
 static const char *get_file_type_info(const char *filename, int *color)
 {
+	static const char source_exts[][5] = {
+		"c", "h", "cpp", "cxx", "hpp", "cc", "sh", "py", "rb",
+		"js", "rs", "go", "java", "php", "pl", "lua", "vim", "asm",
+		"s"
+	};
+
 	if (filename[0] == '/') {
 		*color = 34;	/* Blue for directories */
 		return "[DIR]  ";
@@ -3754,19 +3754,11 @@ static const char *get_file_type_info(const char *filename, int *color)
 
 	const char *ext = get_file_extension(filename);
 
-	/* Source and script files */
-	if (!strcasecmp(ext, "c") || !strcasecmp(ext, "h") ||
-	    !strcasecmp(ext, "cpp") || !strcasecmp(ext, "cxx") ||
-	    !strcasecmp(ext, "hpp") || !strcasecmp(ext, "cc") ||
-	    !strcasecmp(ext, "sh") || !strcasecmp(ext, "py") ||
-	    !strcasecmp(ext, "rb") || !strcasecmp(ext, "js") ||
-	    !strcasecmp(ext, "rs") || !strcasecmp(ext, "go") ||
-	    !strcasecmp(ext, "java") || !strcasecmp(ext, "php") ||
-	    !strcasecmp(ext, "pl") || !strcasecmp(ext, "lua") ||
-	    !strcasecmp(ext, "vim") || !strcasecmp(ext, "asm") ||
-	    !strcasecmp(ext, "s")) {
-		*color = 32;	/* Green for source */
-		return "[SRC]  ";
+	for (size_t i = 0; i < sizeof(source_exts) / sizeof(source_exts[0]); i++) {
+		if (!strcasecmp(ext, source_exts[i])) {
+			*color = 32;	/* Green for source */
+			return "[SRC]  ";
+		}
 	}
 
 	/* All other files */
@@ -3809,9 +3801,11 @@ static int browser_compare_entries(const void *a, const void *b)
 
 static void browser_load_directory(const char *path)
 {
+	const char *dir_path = path ? path : ".";
+	char resolved_dir[PATH_MAX];
 	browser_free_entries();
 
-	DIR *dir = opendir(path ? path : ".");
+	DIR *dir = opendir(dir_path);
 	if (!dir) {
 		ui_set_message("Cannot open directory: %s", strerror(errno));
 		mode_set(MODE_NORMAL);
@@ -3819,7 +3813,10 @@ static void browser_load_directory(const char *path)
 	}
 
 	/* Store current directory */
-	ec.mode_state.browser.current_dir = strdup(path ? path : ".");
+	if (realpath(dir_path, resolved_dir))
+		ec.mode_state.browser.current_dir = strdup(resolved_dir);
+	else
+		ec.mode_state.browser.current_dir = strdup(dir_path);
 
 	/* Count entries first */
 	int capacity = 32;
@@ -4681,6 +4678,7 @@ static void editor_process_key(void)
 
 static void editor_init(void)
 {
+	init_ec();
 	term_update_size();
 	signal(SIGWINCH, sig_winch_handler);
 	signal(SIGCONT, sig_cont_handler);
