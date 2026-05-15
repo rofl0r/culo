@@ -507,6 +507,7 @@ struct {
 	char status_msg[512];
 	time_t status_msg_time;
 	char *copied_char_buffer;
+	size_t file_size_bytes;
 	const struct syntax_desc *syntax;
 	compiled_rule_t *syntax_compiled;
 	size_t syntax_compiled_count;
@@ -543,7 +544,8 @@ struct {
 } ec = {
 	.cursor_x = 0,.cursor_y = 0,.render_x = 0,.row_offset = 0,.col_offset =
 	    0,.rows = NULL,.modified = false,.file_name = NULL,.status_msg =
-	    "",.status_msg_time = 0,.copied_char_buffer = NULL,.syntax =
+	    "",.status_msg_time = 0,.copied_char_buffer = NULL,.file_size_bytes =
+	    0,.syntax =
 	    NULL,.mode = MODE_NORMAL,.prev_mode = MODE_NORMAL,.mode_state = { {
 	0}},.selection = {
 	.start_x = 0,.start_y = 0,.end_x = 0,.end_y = 0,.active =
@@ -1038,6 +1040,21 @@ static void syntax_reset_compiled_rules(void)
 	ec.syntax_palette_count = HIGHLIGHT_DYNAMIC_BASE;
 }
 
+static void syntax_invalidate_all_rows(void)
+{
+	for (int file_row = 0; file_row < NR; file_row++)
+		ROW(file_row)->hl_valid = false;
+}
+
+static void syntax_disable(bool announce)
+{
+	syntax_reset_compiled_rules();
+	ec.syntax = NULL;
+	syntax_invalidate_all_rows();
+	if (announce)
+		ui_set_message("Syntax highlighting disabled");
+}
+
 static void syntax_apply_rules(editor_row_t *row)
 {
 	for (size_t r = 0; r < ec.syntax_compiled_count; r++) {
@@ -1232,8 +1249,7 @@ static void syntax_select(void)
 {
 	syntax_reset_compiled_rules();
 	ec.syntax = NULL;
-	for (int file_row = 0; file_row < NR; file_row++)
-		ROW(file_row)->hl_valid = false;
+	syntax_invalidate_all_rows();
 	if (!ec.file_name)
 		return;
 	for (size_t j = 0; syntax_rules[j].file_regex; j++) {
@@ -4079,6 +4095,7 @@ static void editor_cleanup(void)
 	ec.mode_state.search.saved_highlight = NULL;
 	free(ec.mode_state.prompt.buffer);
 	ec.mode_state.prompt.buffer = NULL;
+	syntax_reset_compiled_rules();
 	browser_free_entries();
 }
 
