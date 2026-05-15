@@ -546,8 +546,7 @@ struct {
 	    NULL,.mode = MODE_NORMAL,.prev_mode = MODE_NORMAL,.mode_state = { {
 	0}},.selection = {
 	.start_x = 0,.start_y = 0,.end_x = 0,.end_y = 0,.active =
-		    false,},.show_line_numbers = false,.show_whitespace =
-	    true,.last_was_cut =
+		    false,},.show_line_numbers = false,.show_whitespace = true,.last_was_cut =
 	    false,.search = {
 		.query = NULL,.query_len = 0,.query_cap = 0,.mode =
 		    SM_NONE,.replace_query = NULL,.replace_len =
@@ -3730,7 +3729,7 @@ static void editor_goto_matching_bracket(void)
 		}
 	}
 
-not_found:
+ not_found:
 	set_overlay_msg("[ No matching bracket ]");
 }
 
