@@ -523,6 +523,7 @@ struct {
 	mode_data_t mode_state;	/* Mode-specific state data */
 	selection_state_t selection;	/* Text selection state */
 	bool show_line_numbers;	/* Toggle line numbers display */
+	bool show_whitespace;	/* Toggle tab/whitespace markers */
 	bool last_was_cut;	/* True if previous key was ^K (for appending cuts) */
 	struct {
 		char *query;	/* Persists across ^W invocations; NULL until first search */
@@ -554,7 +555,7 @@ struct {
 		     * meaningful when orig_row >= 0, so 0 is a fine default. */
 .replace_phase = 0,.replace_count = 0,.orig_row =
 		    -1,.orig_char = 0,.has_wrapped =
-		    false},.notfound_msg = "",};
+		    false},.notfound_msg = "",.show_whitespace = true,};
 
 typedef enum {
 	EDIT_INSERT = 0,
@@ -805,9 +806,11 @@ static const char *const help_lines[] = {
 	"  M-\\     Go to first line of file",
 	"  M-/     Go to last line of file",
 	"  M-G     Go to line number",
+	"  M-]     Go to matching bracket",
 	"",
 	"View:",
-	"  ^N      Toggle line numbers",
+	"  M-#     Toggle line numbers",
+	"  M-P     Toggle whitespace display",
 	"  ^G      Show this help screen",
 	"",
 };
@@ -3242,7 +3245,7 @@ static void ui_draw_rows(editor_buf_t * eb)
 					|| prev_cursor_x != tab_cursor_x);
 				prev_tab_cursor_x = tab_cursor_x;
 				prev_tab_cursor_x_valid = true;
-				if (tab_head) {
+				if (ec.show_whitespace && tab_head) {
 					if (!in_selection)
 						buf_append(eb, TAB_HEAD_STYLE,
 							   sizeof(TAB_HEAD_STYLE)
@@ -3652,6 +3655,82 @@ static void editor_move_cursor(int key)
 	int row_len = row ? row->size : 0;
 	if (ec.cursor_x > row_len)
 		ec.cursor_x = row_len;
+}
+
+static void editor_goto_matching_bracket(void)
+{
+	static const char brackets[] = "{}()[]";
+	int row = ec.cursor_y;
+	int col = ec.cursor_x;
+	int idx = -1;
+	int dir;
+	char open_ch, close_ch;
+	int depth = 0;
+
+	if (row < 0 || row >= NR)
+		goto not_found;
+	if (col < 0 || col >= ROW(row)->size)
+		goto not_found;
+
+	for (int i = 0; i < 6; i++) {
+		if (ROW(row)->chars[col] == brackets[i]) {
+			idx = i;
+			break;
+		}
+	}
+	if (idx < 0)
+		goto not_found;
+
+	if ((idx & 1) == 0) {
+		open_ch = brackets[idx];
+		close_ch = brackets[idx + 1];
+		dir = 1;
+	} else {
+		open_ch = brackets[idx - 1];
+		close_ch = brackets[idx];
+		dir = -1;
+	}
+
+	if (dir > 0) {
+		for (int y = row; y < NR; y++) {
+			editor_row_t *r = ROW(y);
+			int x0 = (y == row) ? col + 1 : 0;
+			for (int x = x0; x < r->size; x++) {
+				char c = r->chars[x];
+				if (c == open_ch) {
+					depth++;
+				} else if (c == close_ch) {
+					if (depth == 0) {
+						ec.cursor_y = y;
+						ec.cursor_x = x;
+						return;
+					}
+					depth--;
+				}
+			}
+		}
+	} else {
+		for (int y = row; y >= 0; y--) {
+			editor_row_t *r = ROW(y);
+			int x0 = (y == row) ? col - 1 : r->size - 1;
+			for (int x = x0; x >= 0; x--) {
+				char c = r->chars[x];
+				if (c == close_ch) {
+					depth++;
+				} else if (c == open_ch) {
+					if (depth == 0) {
+						ec.cursor_y = y;
+						ec.cursor_x = x;
+						return;
+					}
+					depth--;
+				}
+			}
+		}
+	}
+
+ not_found:
+	set_overlay_msg("[ No matching bracket ]");
 }
 
 /* File browser implementation */
@@ -4489,10 +4568,16 @@ static void editor_process_key(void)
 	case CTRL_('w'):	/* Find/search (GNU nano: ^W Where Is) */
 		search_find();
 		return;		/* editor_refresh() already called inside search_find */
-	case CTRL_('n'):	/* Toggle line numbers */
+	case META_('#'):	/* Toggle line numbers */
 		ec.show_line_numbers = !ec.show_line_numbers;
 		ui_set_message("Line numbers %s",
 			       ec.show_line_numbers ? "enabled" : "disabled");
+		break;
+	case META_('p'):
+	case META_('P'):	/* Toggle whitespace display */
+		ec.show_whitespace = !ec.show_whitespace;
+		ui_set_message("Whitespace display %s",
+			       ec.show_whitespace ? "enabled" : "disabled");
 		break;
 	case META_('b'):
 	case META_('B'):	/* Open file browser (M-B) */
@@ -4530,6 +4615,9 @@ static void editor_process_key(void)
 			}
 			break;
 		}
+	case META_(']'):	/* M-] Go to matching bracket */
+		editor_goto_matching_bracket();
+		break;
 	case CTRL_('g'):	/* Show help (GNU nano: ^G) */
 		mode_set(MODE_HELP);
 		help_render();
