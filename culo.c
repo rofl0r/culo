@@ -46,6 +46,7 @@ typedef enum {
 
 #define CTRL_(k) ((k) & (0x1f))
 #define META_(k) (0x800 | (unsigned char)(k))
+#define BRACKET_PAIRS "{}()[]"
 #define TAB_STOP 4
 #define TAB_HEAD_STYLE "\x1b[90m"
 #define UNDO_STACK_CAP 64
@@ -3659,7 +3660,7 @@ static void editor_move_cursor(int key)
 
 static void editor_goto_matching_bracket(void)
 {
-	static const char brackets[] = "{}()[]";
+	static const char brackets[] = BRACKET_PAIRS;
 	int row = ec.cursor_y;
 	int col = ec.cursor_x;
 	int idx = -1;
@@ -3672,7 +3673,7 @@ static void editor_goto_matching_bracket(void)
 	if (col < 0 || col >= ROW(row)->size)
 		goto not_found;
 
-	for (int i = 0; i < 6; i++) {
+	for (int i = 0; i < (int)sizeof(brackets) - 1; i++) {
 		if (ROW(row)->chars[col] == brackets[i]) {
 			idx = i;
 			break;
