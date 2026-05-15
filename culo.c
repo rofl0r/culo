@@ -546,7 +546,8 @@ struct {
 	    NULL,.mode = MODE_NORMAL,.prev_mode = MODE_NORMAL,.mode_state = { {
 	0}},.selection = {
 	.start_x = 0,.start_y = 0,.end_x = 0,.end_y = 0,.active =
-		    false,},.show_line_numbers = false,.last_was_cut =
+		    false,},.show_line_numbers = false,.show_whitespace =
+	    true,.last_was_cut =
 	    false,.search = {
 		.query = NULL,.query_len = 0,.query_cap = 0,.mode =
 		    SM_NONE,.replace_query = NULL,.replace_len =
@@ -555,7 +556,7 @@ struct {
 		     * meaningful when orig_row >= 0, so 0 is a fine default. */
 .replace_phase = 0,.replace_count = 0,.orig_row =
 		    -1,.orig_char = 0,.has_wrapped =
-		    false},.notfound_msg = "",.show_whitespace = true,};
+		    false},.notfound_msg = "",};
 
 typedef enum {
 	EDIT_INSERT = 0,
@@ -3729,7 +3730,7 @@ static void editor_goto_matching_bracket(void)
 		}
 	}
 
- not_found:
+not_found:
 	set_overlay_msg("[ No matching bracket ]");
 }
 
