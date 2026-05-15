@@ -24,6 +24,7 @@ typedef struct {
 
 typedef struct {
 	char *file_regex;
+	char *file_magic;
 	const char *source_name;
 	merged_rule_t *rules;
 	size_t rule_count;
@@ -307,6 +308,30 @@ static void parse_syntax_line(parse_result_t *pr, char *line)
 		pr->file_regex = quoted;
 }
 
+static void parse_header_line(parse_result_t *pr, char *line)
+{
+	char *p = skip_ws(line);
+	char *quoted;
+	char *normalized;
+
+	if (pr->file_magic) {
+		fprintf(stderr,
+			"nanorc2h: duplicate header declaration in %s (ignored)\n",
+			pr->source_name ? pr->source_name : "(unknown)");
+		return;
+	}
+	p += strlen("header");
+	p = skip_ws(p);
+	quoted = parse_quoted(p, NULL);
+	if (!quoted)
+		return;
+	normalized = normalize_regex(quoted);
+	free(quoted);
+	if (!normalized)
+		return;
+	pr->file_magic = normalized;
+}
+
 static void parse_color_spec(const char *spec, color_id_t *fg, color_id_t *bg)
 {
 	const char *comma = strchr(spec, ',');
@@ -503,6 +528,9 @@ static void emit_output(const parse_result_t *pr)
 	printf("\t.file_regex = ");
 	emit_c_string(pr->file_regex ? pr->file_regex : "");
 	printf(",\n");
+	printf("\t.file_magic = ");
+	emit_c_string(pr->file_magic ? pr->file_magic : "");
+	printf(",\n");
 	printf("\t.rule_count = %zu,\n", total);
 	printf("\t.rules = (const struct syntax_rule[]) {\n");
 	for (i = 0; i < pr->rule_count; ++i) {
@@ -529,6 +557,7 @@ static void free_parse_result(parse_result_t *pr)
 {
 	size_t i;
 	free(pr->file_regex);
+	free(pr->file_magic);
 	for (i = 0; i < pr->rule_count; ++i)
 		free(pr->rules[i].regex);
 	for (i = 0; i < pr->span_rule_count; ++i) {
@@ -575,12 +604,15 @@ int main(int argc, char **argv)
 			parse_syntax_line(&pr, p);
 			continue;
 		}
+		if (starts_with_keyword(p, "header")) {
+			parse_header_line(&pr, p);
+			continue;
+		}
 		if (starts_with_keyword(p, "color")) {
 			parse_color_line(&pr, p);
 			continue;
 		}
-		/* Intentionally ignore: header, magic, comment markers, and everything
-		 * else. */
+		/* Intentionally ignore comment markers and everything else. */
 	}
 
 	fclose(fp);

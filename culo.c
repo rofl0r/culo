@@ -1209,6 +1209,20 @@ static void syntax_highlight(editor_row_t *row, int row_idx)
 	row->hl_valid = true;
 }
 
+static bool syntax_match_regex(const char *pattern, const char *text)
+{
+	regex_t rx = NULL;
+	bool ok = false;
+
+	if (!pattern || !*pattern || !text)
+		return false;
+	if (regcomp(&rx, pattern, REG_EXTENDED | REG_NOSUB) != 0)
+		return false;
+	ok = (regexec(&rx, text, 0, NULL, 0) == 0);
+	regfree(&rx);
+	return ok;
+}
+
 static void syntax_select(void)
 {
 	syntax_reset_compiled_rules();
@@ -1218,16 +1232,20 @@ static void syntax_select(void)
 	if (!ec.file_name)
 		return;
 	for (size_t j = 0; syntax_rules[j].file_regex; j++) {
-		regex_t file_rx = NULL;
-		if (regcomp(&file_rx, syntax_rules[j].file_regex,
-			    REG_EXTENDED | REG_NOSUB) != 0)
-			continue;
-		if (regexec(&file_rx, ec.file_name, 0, NULL, 0) == 0) {
+		if (syntax_match_regex(syntax_rules[j].file_regex, ec.file_name)) {
 			ec.syntax = &syntax_rules[j];
-			regfree(&file_rx);
 			break;
 		}
-		regfree(&file_rx);
+	}
+	if (!ec.syntax && NR > 0) {
+		const char *first_line = ROW(0)->chars;
+		for (size_t j = 0; syntax_rules[j].file_regex; j++) {
+			if (syntax_match_regex(syntax_rules[j].file_magic,
+					       first_line)) {
+				ec.syntax = &syntax_rules[j];
+				break;
+			}
+		}
 	}
 	if (!ec.syntax)
 		return;
@@ -2416,6 +2434,7 @@ static void file_open(const char *file_name)
 	}
 	free(line);
 	fclose(file);
+	syntax_select();
 	ec.modified = false;
 }
 
