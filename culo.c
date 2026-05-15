@@ -28,6 +28,8 @@
 #include <unistd.h>
 #include "nregex.h"
 #include "syntax.h"
+#define LZ_DECOMPRESSOR
+#include "lzcomp.h"
 
 #ifndef PATH_MAX
 #define PATH_MAX 4096
@@ -507,6 +509,10 @@ struct {
 	time_t status_msg_time;
 	char *copied_char_buffer;
 	const struct syntax_desc *syntax;
+	struct syntax_rule *active_syntax_rules;
+	size_t active_syntax_rule_count;
+	unsigned char *active_syntax_blob;
+	size_t file_size_bytes;
 	compiled_rule_t *syntax_compiled;
 	size_t syntax_compiled_count;
 	compiled_span_rule_t *syntax_span_compiled;
@@ -543,7 +549,8 @@ struct {
 	.cursor_x = 0,.cursor_y = 0,.render_x = 0,.row_offset = 0,.col_offset =
 	    0,.rows = NULL,.modified = false,.file_name = NULL,.status_msg =
 	    "",.status_msg_time = 0,.copied_char_buffer = NULL,.syntax =
-	    NULL,.mode = MODE_NORMAL,.prev_mode = MODE_NORMAL,.mode_state = { {
+	    NULL,.active_syntax_rules = NULL,.active_syntax_rule_count =
+	    0,.active_syntax_blob = NULL,.file_size_bytes = 0,.mode = MODE_NORMAL,.prev_mode = MODE_NORMAL,.mode_state = { {
 	0}},.selection = {
 	.start_x = 0,.start_y = 0,.end_x = 0,.end_y = 0,.active =
 		    false,},.show_line_numbers = false,.show_whitespace = true,.last_was_cut =
@@ -650,7 +657,7 @@ typedef enum {
 const struct syntax_desc syntax_rules[] = {
 #include "nanorc.h"
 	/* terminating sentinel */
-	{.file_regex = NULL, .rule_count = 0, .rules = NULL}
+	{.file_regex = NULL, .rule_count = 0, .compressed_data = NULL}
 };
 
 static char *ui_prompt(const char *prefix, const char *hint, const char *init, void (*callback) (char *, int));
@@ -1036,6 +1043,95 @@ static void syntax_reset_compiled_rules(void)
 	ec.syntax_palette_count = HIGHLIGHT_DYNAMIC_BASE;
 }
 
+static void syntax_free_active_rules(void)
+{
+	free(ec.active_syntax_rules);
+	ec.active_syntax_rules = NULL;
+	ec.active_syntax_rule_count = 0;
+	free(ec.active_syntax_blob);
+	ec.active_syntax_blob = NULL;
+}
+
+static void syntax_invalidate_all_rows(void)
+{
+	for (int file_row = 0; file_row < NR; file_row++)
+		ROW(file_row)->hl_valid = false;
+}
+
+static uint32_t syntax_read_u32le(const unsigned char *p)
+{
+	return (uint32_t) p[0] | ((uint32_t) p[1] << 8) |
+	    ((uint32_t) p[2] << 16) | ((uint32_t) p[3] << 24);
+}
+
+static bool syntax_load_active_rules(const struct syntax_desc *desc)
+{
+	const unsigned char *p;
+	const unsigned char *end;
+	uint32_t count;
+
+	if (!desc || !desc->compressed_data || desc->compressed_size == 0
+	    || desc->uncompressed_size == 0)
+		return false;
+	ec.active_syntax_blob = malloc(desc->uncompressed_size);
+	if (!ec.active_syntax_blob)
+		return false;
+	lz_uncompress(desc->compressed_data, ec.active_syntax_blob,
+		      desc->compressed_size);
+	p = ec.active_syntax_blob;
+	end = ec.active_syntax_blob + desc->uncompressed_size;
+	if ((size_t) (end - p) < 4)
+		goto fail;
+	count = syntax_read_u32le(p);
+	p += 4;
+	if (desc->rule_count != (size_t) count)
+		goto fail;
+	if (count == 0) {
+		ec.active_syntax_rule_count = 0;
+		ec.active_syntax_rules = NULL;
+		return true;
+	}
+	ec.active_syntax_rules = calloc(count, sizeof(*ec.active_syntax_rules));
+	if (!ec.active_syntax_rules)
+		goto fail;
+	ec.active_syntax_rule_count = count;
+	for (uint32_t i = 0; i < count; i++) {
+		uint32_t fg_u, bg_u, regex_len, end_len;
+		if ((size_t) (end - p) < 16)
+			goto fail;
+		fg_u = syntax_read_u32le(p);
+		bg_u = syntax_read_u32le(p + 4);
+		regex_len = syntax_read_u32le(p + 8);
+		end_len = syntax_read_u32le(p + 12);
+		p += 16;
+		if ((size_t) (end - p) < (size_t)regex_len + (size_t)end_len)
+			goto fail;
+		ec.active_syntax_rules[i].fg = (color_id_t) ((int32_t) fg_u);
+		ec.active_syntax_rules[i].bg = (color_id_t) ((int32_t) bg_u);
+		ec.active_syntax_rules[i].regex = (const char *) p;
+		p += regex_len;
+		ec.active_syntax_rules[i].end_regex =
+		    end_len ? (const char *) p : NULL;
+		p += end_len;
+	}
+	if (p != end)
+		goto fail;
+	return true;
+ fail:
+	syntax_free_active_rules();
+	return false;
+}
+
+static void syntax_disable(bool announce)
+{
+	syntax_reset_compiled_rules();
+	syntax_free_active_rules();
+	ec.syntax = NULL;
+	syntax_invalidate_all_rows();
+	if (announce)
+		ui_set_message("Syntax highlighting disabled");
+}
+
 static void syntax_apply_rules(editor_row_t *row)
 {
 	for (size_t r = 0; r < ec.syntax_compiled_count; r++) {
@@ -1228,38 +1324,43 @@ static bool syntax_match_regex(const char *pattern, const char *text)
 
 static void syntax_select(void)
 {
+	const struct syntax_desc *selected = NULL;
+
 	syntax_reset_compiled_rules();
+	syntax_free_active_rules();
 	ec.syntax = NULL;
-	for (int file_row = 0; file_row < NR; file_row++)
-		ROW(file_row)->hl_valid = false;
+	syntax_invalidate_all_rows();
 	if (!ec.file_name)
 		return;
 	for (size_t j = 0; syntax_rules[j].file_regex; j++) {
 		if (syntax_match_regex(syntax_rules[j].file_regex, ec.file_name)) {
-			ec.syntax = &syntax_rules[j];
+			selected = &syntax_rules[j];
 			break;
 		}
 	}
-	if (!ec.syntax && NR > 0) {
+	if (!selected && NR > 0) {
 		const char *first_line = ROW(0)->chars;
 		for (size_t j = 0; syntax_rules[j].file_regex; j++) {
 			if (syntax_match_regex(syntax_rules[j].file_magic,
 					       first_line)) {
-				ec.syntax = &syntax_rules[j];
+				selected = &syntax_rules[j];
 				break;
 			}
 		}
 	}
-	if (!ec.syntax)
+	if (!selected)
 		return;
+	if (!syntax_load_active_rules(selected))
+		return;
+	ec.syntax = selected;
 	{
 		size_t single_count = 0;
 		size_t span_count = 0;
 		size_t single_idx = 0;
 		size_t span_idx = 0;
 
-		for (size_t i = 0; i < ec.syntax->rule_count; i++) {
-			const struct syntax_rule *rule = &ec.syntax->rules[i];
+		for (size_t i = 0; i < ec.active_syntax_rule_count; i++) {
+			const struct syntax_rule *rule = &ec.active_syntax_rules[i];
 			if (!rule->regex || (rule->fg == COLOR_NONE &&
 					     rule->bg == COLOR_NONE))
 				continue;
@@ -1285,8 +1386,8 @@ static void syntax_select(void)
 			}
 		}
 
-		for (size_t i = 0; i < ec.syntax->rule_count; i++) {
-			const struct syntax_rule *rule = &ec.syntax->rules[i];
+		for (size_t i = 0; i < ec.active_syntax_rule_count; i++) {
+			const struct syntax_rule *rule = &ec.active_syntax_rules[i];
 			unsigned char hl_code;
 
 			if (!rule->regex || (rule->fg == COLOR_NONE &&
@@ -4063,6 +4164,8 @@ static void editor_cleanup(void)
 	ec.mode_state.search.saved_highlight = NULL;
 	free(ec.mode_state.prompt.buffer);
 	ec.mode_state.prompt.buffer = NULL;
+	syntax_reset_compiled_rules();
+	syntax_free_active_rules();
 	browser_free_entries();
 }
 

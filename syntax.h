@@ -35,7 +35,9 @@ struct syntax_desc {
 	const char *file_regex;
 	const char *file_magic;
 	size_t rule_count;
-	const struct syntax_rule *rules;
+	unsigned int compressed_size;
+	unsigned int uncompressed_size;
+	const unsigned char *compressed_data;
 };
 
 #endif
