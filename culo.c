@@ -46,7 +46,6 @@ typedef enum {
 
 #define CTRL_(k) ((k) & (0x1f))
 #define META_(k) (0x800 | (unsigned char)(k))
-#define BRACKET_PAIRS "{}()[]"
 #define TAB_STOP 4
 #define TAB_HEAD_STYLE "\x1b[90m"
 #define UNDO_STACK_CAP 64
@@ -3660,19 +3659,15 @@ static void editor_move_cursor(int key)
 
 static void editor_goto_matching_bracket(void)
 {
-	static const char brackets[] = BRACKET_PAIRS;
+	static const char brackets[] = "{}()[]";
 	int row = ec.cursor_y;
 	int col = ec.cursor_x;
 	int idx = -1;
 	int dir;
-	char open_ch, close_ch;
 	int depth = 0;
 
-	if (row < 0 || row >= NR)
-		goto not_found;
-	if (col < 0 || col >= ROW(row)->size)
-		goto not_found;
-
+	/* could do this in one line with strchr but we don't use it elsewhere
+	   so pulling it in for this one case would make the binary bigger. */
 	for (int i = 0; i < (int)sizeof(brackets) - 1; i++) {
 		if (ROW(row)->chars[col] == brackets[i]) {
 			idx = i;
@@ -3682,50 +3677,22 @@ static void editor_goto_matching_bracket(void)
 	if (idx < 0)
 		goto not_found;
 
-	if ((idx & 1) == 0) {
-		open_ch = brackets[idx];
-		close_ch = brackets[idx + 1];
-		dir = 1;
-	} else {
-		open_ch = brackets[idx - 1];
-		close_ch = brackets[idx];
-		dir = -1;
-	}
+	dir = (idx & 1) ? -1 : 1;
 
-	if (dir > 0) {
-		for (int y = row; y < NR; y++) {
-			editor_row_t *r = ROW(y);
-			int x0 = (y == row) ? col + 1 : 0;
-			for (int x = x0; x < r->size; x++) {
-				char c = r->chars[x];
-				if (c == open_ch) {
-					depth++;
-				} else if (c == close_ch) {
-					if (depth == 0) {
-						ec.cursor_y = y;
-						ec.cursor_x = x;
-						return;
-					}
-					depth--;
+	for (int y = row; y < NR && y >= 0; y += dir) {
+		editor_row_t *r = ROW(y);
+		int x0 = (y == row) ? col + dir : (y > 0 ? 0 : r->size - 1);
+		for (int x = x0; x < r->size && x >= 0; x += dir) {
+			char c = r->chars[x];
+			if (c == brackets[idx]) {
+				depth++;
+			} else if (c == brackets[idx+dir]) {
+				if (depth == 0) {
+					ec.cursor_y = y;
+					ec.cursor_x = x;
+					return;
 				}
-			}
-		}
-	} else {
-		for (int y = row; y >= 0; y--) {
-			editor_row_t *r = ROW(y);
-			int x0 = (y == row) ? col - 1 : r->size - 1;
-			for (int x = x0; x >= 0; x--) {
-				char c = r->chars[x];
-				if (c == close_ch) {
-					depth++;
-				} else if (c == open_ch) {
-					if (depth == 0) {
-						ec.cursor_y = y;
-						ec.cursor_x = x;
-						return;
-					}
-					depth--;
-				}
+				depth--;
 			}
 		}
 	}
