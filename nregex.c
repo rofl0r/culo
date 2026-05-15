@@ -357,8 +357,9 @@ static int brk_match(char *brk, int c, int flg)
 	int not = brk[0] == '^';
 	char *p = not ? brk + 1 : brk;
 	char *p0 = p;
-	if (flg & REG_ICASE && c < 128 && isupper(c))
-		c = tolower(c);
+	if (flg & REG_ICASE && c >= 0 && c < 128 &&
+	    isupper((unsigned char) c))
+		c = tolower((unsigned char) c);
 	while (*p && (p == p0 || *p != ']')) {
 		if (p[0] == '[' && p[1] == ':') {
 			for (i = 0; i < LEN(brk_classes); i++) {
@@ -379,10 +380,12 @@ static int brk_match(char *brk, int c, int flg)
 			end = uc_dec(p);
 			p += uc_len(p);
 		}
-		if (flg & REG_ICASE && beg < 128 && isupper(beg))
-			beg = tolower(beg);
-		if (flg & REG_ICASE && end < 128 && isupper(end))
-			end = tolower(end);
+		if (flg & REG_ICASE && beg >= 0 && beg < 128 &&
+		    isupper((unsigned char) beg))
+			beg = tolower((unsigned char) beg);
+		if (flg & REG_ICASE && end >= 0 && end < 128 &&
+		    isupper((unsigned char) end))
+			end = tolower((unsigned char) end);
 		if (c >= beg && c <= end)
 			return not;
 	}
@@ -406,10 +409,12 @@ static int ratom_match(struct ratom *ra, struct rstate *rs)
 		while (ra->s[pos]) {
 			int c1 = uc_dec(ra->s + pos);
 			int c2 = uc_dec(rs->s + pos);
-			if (rs->flg & REG_ICASE && c1 < 128 && isupper(c1))
-				c1 = tolower(c1);
-			if (rs->flg & REG_ICASE && c2 < 128 && isupper(c2))
-				c2 = tolower(c2);
+			if (rs->flg & REG_ICASE && c1 >= 0 && c1 < 128 &&
+			    isupper((unsigned char) c1))
+				c1 = tolower((unsigned char) c1);
+			if (rs->flg & REG_ICASE && c2 >= 0 && c2 < 128 &&
+			    isupper((unsigned char) c2))
+				c2 = tolower((unsigned char) c2);
 			if (c1 != c2)
 				return 1;
 			pos += uc_len(ra->s + pos);
@@ -687,7 +692,7 @@ int regcomp(regex_t * restrict preg, const char *restrict pat, int flg)
 	rnode_emit(rnode, re);
 	mark = re_insert(re, RI_MARK);
 	re->p[mark].mark = 1;
-	mark = re_insert(re, RI_MATCH);
+	re_insert(re, RI_MATCH);
 	rnode_free(rnode);
 	re->flg = flg;
 	*preg = re;
