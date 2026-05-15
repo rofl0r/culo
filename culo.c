@@ -2552,7 +2552,8 @@ static void file_save(void)
 static void search_highlight_match(int row_idx, int match_offset, int match_len)
 {
 	editor_row_t *r = ROW(row_idx);
-	if (r && !r->hl_valid)
+	if (!r) return;
+	if (!r->hl_valid)
 		syntax_ensure_row_highlighted(row_idx);
 	if (!r->highlight || r->render_size <= 0)
 		return;
