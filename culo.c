@@ -1887,6 +1887,7 @@ static void editor_cut(bool append)
 		char *new_buf =
 		    realloc(ec.copied_char_buffer, old_len + new_len + 1);
 		if (!new_buf) {
+			free(deleted);
 			ui_set_message("Memory allocation failed");
 			return;
 		}
@@ -1899,6 +1900,7 @@ static void editor_cut(bool append)
 		/* Replace clipboard with this line */
 		char *new_buf = realloc(ec.copied_char_buffer, new_len + 1);
 		if (!new_buf) {
+			free(deleted);
 			ui_set_message("Memory allocation failed");
 			return;
 		}
@@ -1916,6 +1918,7 @@ static void editor_cut(bool append)
 		editor_row_t *row = ROW(ec.cursor_y);
 		char *nc = realloc(row->chars, 1);
 		if (!nc) {
+			free(deleted);
 			ui_set_message("Memory allocation failed");
 			return;
 		}
@@ -3954,10 +3957,12 @@ static void list_screen_render(const char *title, int total_lines, int offset,
 				buf_append(&eb, line, llen);
 			} else {
 				/* Help mode: plain text */
-				int hlen = (int)strlen(lines[idx]);
+				const char *line =
+				    (lines && lines[idx]) ? lines[idx] : "";
+				int hlen = (int)strlen(line);
 				if (hlen > ec.screen_cols)
 					hlen = ec.screen_cols;
-				buf_append(&eb, lines[idx], hlen);
+				buf_append(&eb, line, hlen);
 			}
 		} else {
 			buf_append(&eb, "~", 1);
