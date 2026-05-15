@@ -382,6 +382,19 @@ static int tlist_insert(struct tlist *t, size_t idx, void *value)
 	return 1;
 }
 
+static int tlist_insert_sorted(struct tlist *t, void *value,
+			       int (*cmp)(const void *, const void *))
+{
+	size_t n = tlist_getsize(t);
+	size_t i;
+	for (i = 0; i < n; i++) {
+		void *cur = tlist_get(t, i);
+		if (cmp(value, cur) < 0)
+			break;
+	}
+	return tlist_insert(t, i, value);
+}
+
 TLIST_INTERNAL int tlist_delete_impl(struct tlist *t, size_t idx)
 {
 	if (idx >= tlist_cnt(t->root))
@@ -459,6 +472,11 @@ typedef struct {
 	bool active;		/* Is selection active? */
 } selection_state_t;
 
+typedef struct {
+	char name[NAME_MAX + 1];
+	bool is_dir;
+} browser_entry_t;
+
 /* Mode-specific state data */
 typedef union {
 	struct {
@@ -470,11 +488,10 @@ typedef union {
 		char *buffer;
 	} prompt;
 	struct {
-		char **entries;	/* Array of file/dir names */
-		int num_entries;	/* Number of entries */
+		tlist *entries;	/* Browser entries */
 		int selected;	/* Currently selected entry */
 		int offset;	/* Scroll offset */
-		char *current_dir;	/* Current directory path */
+		char current_dir[PATH_MAX];	/* Current directory path */
 		bool show_hidden;	/* Show hidden files (toggle with H) */
 	} browser;
 	struct {
@@ -541,6 +558,7 @@ struct {
 		bool has_wrapped;	/* true once any search_do_from call in this session returned wrapped=true */
 	} search;
 	char notfound_msg[200];	/* transient "not found" overlay; cleared on next keypress */
+	char browser_base_dir[PATH_MAX];
 } ec;
 
 static void init_ec(void)
@@ -549,6 +567,7 @@ static void init_ec(void)
 	ec.mode = MODE_NORMAL;
 	ec.prev_mode = MODE_NORMAL;
 	ec.show_whitespace = true;
+	snprintf(ec.browser_base_dir, sizeof(ec.browser_base_dir), ".");
 	/* orig_row=-1 means "no active replace cycle"; orig_char is only
 	 * meaningful when orig_row >= 0, so 0 is a fine default. */
 	ec.search.orig_row = -1;
@@ -2413,6 +2432,31 @@ static char *file_rows_to_string(int *buf_len)
 	return buf;
 }
 
+static void browser_set_base_dir_from_path(const char *path)
+{
+	if (!path || !*path) {
+		snprintf(ec.browser_base_dir, sizeof(ec.browser_base_dir), ".");
+		return;
+	}
+	char tmp[PATH_MAX];
+	snprintf(tmp, sizeof(tmp), "%s", path);
+	size_t len = strlen(tmp);
+	while (len > 1 && tmp[len - 1] == '/') {
+		tmp[len - 1] = '\0';
+		len--;
+	}
+	char *slash = strrchr(tmp, '/');
+	if (!slash) {
+		snprintf(ec.browser_base_dir, sizeof(ec.browser_base_dir), ".");
+	} else if (slash == tmp) {
+		snprintf(ec.browser_base_dir, sizeof(ec.browser_base_dir), "/");
+	} else {
+		*slash = '\0';
+		snprintf(ec.browser_base_dir, sizeof(ec.browser_base_dir), "%s",
+			 tmp);
+	}
+}
+
 static void file_open(const char *file_name)
 {
 	undo_history_clear();
@@ -2430,6 +2474,7 @@ static void file_open(const char *file_name)
 
 	free(ec.file_name);
 	ec.file_name = strdup(file_name);
+	browser_set_base_dir_from_path(file_name);
 	syntax_select();
 	FILE *file = fopen(file_name, "r+");
 	if (!file) {
@@ -2478,6 +2523,7 @@ static void file_save(void)
 	bool name_changed = !ec.file_name || strcmp(ec.file_name, name) != 0;
 	free(ec.file_name);
 	ec.file_name = name;
+	browser_set_base_dir_from_path(ec.file_name);
 	if (name_changed)
 		syntax_select();
 	int len;
@@ -3739,7 +3785,7 @@ static const char *get_file_extension(const char *filename)
 }
 
 /* Get file type indicator and color */
-static const char *get_file_type_info(const char *filename, int *color)
+static const char *get_file_type_info(const char *filename, bool is_dir, int *color)
 {
 	static const char source_exts[][5] = {
 		"c", "h", "cpp", "cxx", "hpp", "cc", "sh", "py", "rb",
@@ -3747,7 +3793,7 @@ static const char *get_file_type_info(const char *filename, int *color)
 		"s"
 	};
 
-	if (filename[0] == '/') {
+	if (is_dir) {
 		*color = 34;	/* Blue for directories */
 		return "[DIR]  ";
 	}
@@ -3769,40 +3815,42 @@ static const char *get_file_type_info(const char *filename, int *color)
 static void browser_free_entries(void)
 {
 	if (ec.mode_state.browser.entries) {
-		for (int i = 0; i < ec.mode_state.browser.num_entries; i++)
-			free(ec.mode_state.browser.entries[i]);
-		free(ec.mode_state.browser.entries);
+		tlist_free(ec.mode_state.browser.entries);
 		ec.mode_state.browser.entries = NULL;
-		ec.mode_state.browser.num_entries = 0;
 	}
-	free(ec.mode_state.browser.current_dir);
-	ec.mode_state.browser.current_dir = NULL;
+	ec.mode_state.browser.current_dir[0] = '\0';
 }
 
-static int browser_compare_entries(const void *a, const void *b)
+static int browser_entry_cmp(const void *ap, const void *bp)
 {
-	const char *name_a = *(const char **)a, *name_b = *(const char **)b;
-
-	/* Directories first (start with '/'), then files */
-	bool is_dir_a = (name_a[0] == '/');
-	bool is_dir_b = (name_b[0] == '/');
-
-	if (is_dir_a && !is_dir_b)
+	const browser_entry_t *a = (const browser_entry_t *)ap;
+	const browser_entry_t *b = (const browser_entry_t *)bp;
+	if (a->is_dir && !b->is_dir)
 		return -1;
-	if (!is_dir_a && is_dir_b)
+	if (!a->is_dir && b->is_dir)
 		return 1;
+	return strcasecmp(a->name, b->name);
+}
 
-	/* Compare names, ignoring the '/' prefix for directories */
-	const char *cmp_a = is_dir_a ? name_a + 1 : name_a;
-	const char *cmp_b = is_dir_b ? name_b + 1 : name_b;
-
-	return strcasecmp(cmp_a, cmp_b);
+static bool path_join(char *dst, size_t dstsz, const char *base, const char *name)
+{
+	size_t blen = strlen(base), nlen = strlen(name);
+	bool need_slash = (blen == 0 || base[blen - 1] != '/');
+	size_t need = blen + (need_slash ? 1 : 0) + nlen + 1;
+	if (need > dstsz)
+		return false;
+	memcpy(dst, base, blen);
+	size_t off = blen;
+	if (need_slash)
+		dst[off++] = '/';
+	memcpy(dst + off, name, nlen);
+	dst[off + nlen] = '\0';
+	return true;
 }
 
 static void browser_load_directory(const char *path)
 {
 	const char *dir_path = path ? path : ".";
-	char resolved_dir[PATH_MAX];
 	browser_free_entries();
 
 	DIR *dir = opendir(dir_path);
@@ -3812,75 +3860,44 @@ static void browser_load_directory(const char *path)
 		return;
 	}
 
-	/* Store current directory */
-	if (realpath(dir_path, resolved_dir))
-		ec.mode_state.browser.current_dir = strdup(resolved_dir);
-	else
-		ec.mode_state.browser.current_dir = strdup(dir_path);
-
-	/* Count entries first */
-	int capacity = 32;
-	ec.mode_state.browser.entries = malloc(sizeof(char *) * capacity);
-	ec.mode_state.browser.num_entries = 0;
-
-	/* Add parent directory if not root */
-	if (strcmp(ec.mode_state.browser.current_dir, "/")) {
-		ec.mode_state.browser.entries[ec.mode_state.browser.
-					      num_entries++] = strdup("/..");
+	snprintf(ec.mode_state.browser.current_dir,
+		 sizeof(ec.mode_state.browser.current_dir), "%s", dir_path);
+	ec.mode_state.browser.entries = tlist_new(sizeof(browser_entry_t));
+	if (!ec.mode_state.browser.entries) {
+		closedir(dir);
+		mode_set(MODE_NORMAL);
+		ui_set_message("Out of memory");
+		return;
 	}
 
 	struct dirent *de;
 	while ((de = readdir(dir)) != NULL) {
-		/* Skip current and parent directory entries */
-		if (!strcmp(de->d_name, ".") || !strcmp(de->d_name, ".."))
+		if (!strcmp(de->d_name, "."))
 			continue;
 
-		/* Skip hidden files if show_hidden is false */
-		if (!ec.mode_state.browser.show_hidden && de->d_name[0] == '.')
+		if (!ec.mode_state.browser.show_hidden && de->d_name[0] == '.'
+		    && strcmp(de->d_name, ".."))
 			continue;
 
-		/* Check if we need to resize array */
-		if (ec.mode_state.browser.num_entries >= capacity - 1) {
-			capacity *= 2;
-			ec.mode_state.browser.entries =
-			    realloc(ec.mode_state.browser.entries,
-				    sizeof(char *) * capacity);
-		}
-
-		/* Get file info to determine if it's a directory */
 		char full_path[PATH_MAX];
-		snprintf(full_path, sizeof(full_path), "%s/%s",
-			 ec.mode_state.browser.current_dir, de->d_name);
+		if (!path_join(full_path, sizeof(full_path),
+			       ec.mode_state.browser.current_dir, de->d_name))
+			continue;
 
 		struct stat st;
 		if (stat(full_path, &st) == 0) {
-			if (S_ISDIR(st.st_mode)) {
-				/* Directory - prefix with '/' */
-				char *entry = malloc(strlen(de->d_name) + 2);
-				sprintf(entry, "/%s", de->d_name);
-				ec.mode_state.browser.entries[ec.mode_state.
-							      browser.
-							      num_entries++] =
-				    entry;
-			} else if (S_ISREG(st.st_mode)) {
-				/* Regular file */
-				ec.mode_state.browser.entries[ec.mode_state.
-							      browser.
-							      num_entries++] =
-				    strdup(de->d_name);
-			}
+			if (!S_ISDIR(st.st_mode) && !S_ISREG(st.st_mode))
+				continue;
+			browser_entry_t e;
+			snprintf(e.name, sizeof(e.name), "%s", de->d_name);
+			e.is_dir = S_ISDIR(st.st_mode);
+			if (!tlist_insert_sorted(ec.mode_state.browser.entries, &e,
+						 browser_entry_cmp))
+				break;
 		}
 	}
 
 	closedir(dir);
-
-	/* Sort entries: directories first, then files, both alphabetically */
-	if (ec.mode_state.browser.num_entries > 0) {
-		qsort(ec.mode_state.browser.entries,
-		      ec.mode_state.browser.num_entries, sizeof(char *),
-		      browser_compare_entries);
-	}
-
 	ec.mode_state.browser.selected = 0;
 	ec.mode_state.browser.offset = 0;
 }
@@ -3888,7 +3905,7 @@ static void browser_load_directory(const char *path)
 /* Shared rendering for help and browser screens */
 static void list_screen_render(const char *title, int total_lines, int offset,
 			       int selected, const char *const *lines,
-			       char **entries, const char *status_left,
+			       tlist *entries, const char *status_left,
 			       const char *status_right)
 {
 	editor_buf_t eb = { NULL, 0 };
@@ -3915,19 +3932,20 @@ static void list_screen_render(const char *title, int total_lines, int offset,
 		if (idx < total_lines) {
 			if (entries) {
 				/* Browser mode: format entry with icon and color */
-				char *entry = entries[idx];
+				browser_entry_t *entry =
+				    (browser_entry_t *) tlist_get(entries, (size_t) idx);
+				if (!entry)
+					continue;
 				int color;
 				const char *type_str =
-				    get_file_type_info(entry, &color);
+				    get_file_type_info(entry->name, entry->is_dir, &color);
 				if (idx == selected)
 					buf_append(&eb, "\x1b[7m", 4);
 				char line[512];
 				int llen =
 				    snprintf(line, sizeof(line),
 					     "\x1b[%dm  %s%s\x1b[0m",
-					     color, type_str,
-					     entry[0] ==
-					     '/' ? entry + 1 : entry);
+					     color, type_str, entry->name);
 				if (llen >= (int)sizeof(line))
 					llen = sizeof(line) - 1;
 				if (llen > ec.screen_cols)
@@ -3977,36 +3995,32 @@ static void list_screen_render(const char *title, int total_lines, int offset,
 
 static void browser_open_selected(void)
 {
-	if (ec.mode_state.browser.selected >= ec.mode_state.browser.num_entries)
+	int count = (int)tlist_getsize(ec.mode_state.browser.entries);
+	if (ec.mode_state.browser.selected >= count)
 		return;
-	char *entry =
-	    ec.mode_state.browser.entries[ec.mode_state.browser.selected];
+	browser_entry_t *entry =
+	    (browser_entry_t *) tlist_get(ec.mode_state.browser.entries,
+					  (size_t) ec.mode_state.browser.selected);
 	if (!entry)
 		return;
 
-	if (entry[0] == '/') {
+	if (entry->is_dir) {
 		/* Directory */
 		char new_path[PATH_MAX];
-		if (!strcmp(entry, "/..")) {
-			const char *cur = ec.mode_state.browser.current_dir;
-			char *last_slash = strrchr(cur, '/');
-			if (last_slash && last_slash != cur) {
-				snprintf(new_path, sizeof(new_path), "%.*s",
-					 (int)(last_slash - cur), cur);
-				browser_load_directory(new_path);
-			} else {
-				browser_load_directory("/");
-			}
-		} else {
-			snprintf(new_path, sizeof(new_path), "%s%s",
-				 ec.mode_state.browser.current_dir, entry);
-			browser_load_directory(new_path);
+		if (!path_join(new_path, sizeof(new_path),
+			       ec.mode_state.browser.current_dir, entry->name)) {
+			ui_set_message("Path too long");
+			return;
 		}
+		browser_load_directory(new_path);
 	} else {
 		/* File - open it */
 		char full_path[PATH_MAX];
-		snprintf(full_path, sizeof(full_path), "%s/%s",
-			 ec.mode_state.browser.current_dir, entry);
+		if (!path_join(full_path, sizeof(full_path),
+			       ec.mode_state.browser.current_dir, entry->name)) {
+			ui_set_message("Path too long");
+			return;
+		}
 		if (ec.modified) {
 			int r =
 			    ui_confirm
@@ -4042,6 +4056,7 @@ static void help_render(void)
 static void browser_render(void)
 {
 	/* Adjust offset to keep selected item visible */
+	int count = (int)tlist_getsize(ec.mode_state.browser.entries);
 	int visible = ec.screen_rows - 1;
 	if (ec.mode_state.browser.selected < ec.mode_state.browser.offset)
 		ec.mode_state.browser.offset = ec.mode_state.browser.selected;
@@ -4051,16 +4066,15 @@ static void browser_render(void)
 		    ec.mode_state.browser.selected - visible + 1;
 
 	char title[256], status_right[80];
-	snprintf(title, sizeof(title), " [BROWSER] %s",
+	snprintf(title, sizeof(title), " [BROWSER] %.240s",
 		 ec.mode_state.browser.current_dir);
-	if (ec.mode_state.browser.num_entries > 0) {
+	if (count > 0) {
 		snprintf(status_right, sizeof(status_right), "%d/%d files",
-			 ec.mode_state.browser.selected + 1,
-			 ec.mode_state.browser.num_entries);
+			 ec.mode_state.browser.selected + 1, count);
 	} else {
 		snprintf(status_right, sizeof(status_right), "0/0 files");
 	}
-	list_screen_render(title, ec.mode_state.browser.num_entries,
+	list_screen_render(title, count,
 			   ec.mode_state.browser.offset,
 			   ec.mode_state.browser.selected, NULL,
 			   ec.mode_state.browser.entries, title, status_right);
@@ -4135,12 +4149,15 @@ static void editor_process_key(void)
 			browser_render();
 			return;
 		case ARROW_DOWN:
+		{
+			int count = (int)tlist_getsize(ec.mode_state.browser.entries);
 			if (ec.mode_state.browser.selected <
-			    ec.mode_state.browser.num_entries - 1) {
+			    count - 1) {
 				ec.mode_state.browser.selected++;
 			}
 			browser_render();
 			return;
+		}
 		case PAGE_UP:
 			ec.mode_state.browser.selected -= ec.screen_rows - 3;
 			if (ec.mode_state.browser.selected < 0)
@@ -4148,22 +4165,27 @@ static void editor_process_key(void)
 			browser_render();
 			return;
 		case PAGE_DOWN:
+		{
+			int count = (int)tlist_getsize(ec.mode_state.browser.entries);
 			ec.mode_state.browser.selected += ec.screen_rows - 3;
-			if (ec.mode_state.browser.selected >=
-			    ec.mode_state.browser.num_entries)
-				ec.mode_state.browser.selected =
-				    ec.mode_state.browser.num_entries - 1;
+			if (ec.mode_state.browser.selected >= count)
+				ec.mode_state.browser.selected = count - 1;
+			if (ec.mode_state.browser.selected < 0)
+				ec.mode_state.browser.selected = 0;
 			browser_render();
 			return;
+		}
 		case HOME_KEY:
 			ec.mode_state.browser.selected = 0;
 			browser_render();
 			return;
 		case END_KEY:
-			ec.mode_state.browser.selected =
-			    ec.mode_state.browser.num_entries - 1;
+		{
+			int count = (int)tlist_getsize(ec.mode_state.browser.entries);
+			ec.mode_state.browser.selected = count > 0 ? count - 1 : 0;
 			browser_render();
 			return;
+		}
 		case 'h':
 		case 'H':
 			/* Toggle hidden files */
@@ -4598,7 +4620,7 @@ static void editor_process_key(void)
 	case META_('b'):
 	case META_('B'):	/* Open file browser (M-B) */
 		mode_set(MODE_BROWSER);
-		browser_load_directory(".");
+		browser_load_directory(ec.browser_base_dir);
 		ui_set_message("File Browser: Enter to open, ^C to cancel");
 		browser_render();
 		return;		/* Don't continue to normal refresh */
