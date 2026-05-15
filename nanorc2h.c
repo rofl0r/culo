@@ -2,10 +2,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
-#include <stdint.h>
 
-#define LZ_COMPRESSOR
-#include "lzcomp.h"
 #include "syntax.h"
 
 #define LINE_BUF_SIZE 8192
@@ -36,12 +33,6 @@ typedef struct {
 	size_t span_rule_count;
 	size_t span_rule_cap;
 } parse_result_t;
-
-typedef struct {
-	unsigned char *data;
-	size_t len;
-	size_t cap;
-} byte_buf_t;
 
 static char *xstrdup(const char *s)
 {
@@ -262,43 +253,6 @@ static int merge_regex(char **dst, const char *regex)
 	return 1;
 }
 
-static int byte_buf_reserve(byte_buf_t *b, size_t need)
-{
-	size_t new_cap;
-	unsigned char *new_data;
-
-	if (need <= b->cap)
-		return 1;
-	new_cap = b->cap ? b->cap * 2 : 256;
-	while (new_cap < need)
-		new_cap *= 2;
-	new_data = realloc(b->data, new_cap);
-	if (!new_data)
-		return 0;
-	b->data = new_data;
-	b->cap = new_cap;
-	return 1;
-}
-
-static int byte_buf_append(byte_buf_t *b, const void *src, size_t n)
-{
-	if (!byte_buf_reserve(b, b->len + n))
-		return 0;
-	memcpy(b->data + b->len, src, n);
-	b->len += n;
-	return 1;
-}
-
-static int byte_buf_append_u32(byte_buf_t *b, uint32_t v)
-{
-	unsigned char le[4];
-	le[0] = (unsigned char)(v & 0xff);
-	le[1] = (unsigned char)((v >> 8) & 0xff);
-	le[2] = (unsigned char)((v >> 16) & 0xff);
-	le[3] = (unsigned char)((v >> 24) & 0xff);
-	return byte_buf_append(b, le, sizeof(le));
-}
-
 static int add_or_merge_rule(parse_result_t *pr, color_id_t fg, color_id_t bg,
 			     const char *regex)
 {
@@ -491,6 +445,48 @@ static void parse_color_line(parse_result_t *pr, char *line)
 	free(end_regex);
 }
 
+static const char *color_id_c_name(color_id_t id)
+{
+	switch (id) {
+	case COLOR_NONE:
+		return "COLOR_NONE";
+	case COLOR_BLACK:
+		return "COLOR_BLACK";
+	case COLOR_RED:
+		return "COLOR_RED";
+	case COLOR_GREEN:
+		return "COLOR_GREEN";
+	case COLOR_YELLOW:
+		return "COLOR_YELLOW";
+	case COLOR_BLUE:
+		return "COLOR_BLUE";
+	case COLOR_MAGENTA:
+		return "COLOR_MAGENTA";
+	case COLOR_CYAN:
+		return "COLOR_CYAN";
+	case COLOR_WHITE:
+		return "COLOR_WHITE";
+	case COLOR_BRIGHTBLACK:
+		return "COLOR_BRIGHTBLACK";
+	case COLOR_BRIGHTRED:
+		return "COLOR_BRIGHTRED";
+	case COLOR_BRIGHTGREEN:
+		return "COLOR_BRIGHTGREEN";
+	case COLOR_BRIGHTYELLOW:
+		return "COLOR_BRIGHTYELLOW";
+	case COLOR_BRIGHTBLUE:
+		return "COLOR_BRIGHTBLUE";
+	case COLOR_BRIGHTMAGENTA:
+		return "COLOR_BRIGHTMAGENTA";
+	case COLOR_BRIGHTCYAN:
+		return "COLOR_BRIGHTCYAN";
+	case COLOR_BRIGHTWHITE:
+		return "COLOR_BRIGHTWHITE";
+	default:
+		return "COLOR_NONE";
+	}
+}
+
 static void emit_c_string(const char *s)
 {
 	const unsigned char *p = (const unsigned char *) s;
@@ -524,80 +520,10 @@ static void emit_c_string(const char *s)
 	putchar('"');
 }
 
-static int build_uncompressed_blob(const parse_result_t *pr, byte_buf_t *blob)
+static void emit_output(const parse_result_t *pr)
 {
 	size_t i;
 	size_t total = pr->rule_count + pr->span_rule_count;
-
-	if (!byte_buf_append_u32(blob, (uint32_t) total))
-		return 0;
-	for (i = 0; i < pr->rule_count; ++i) {
-		uint32_t regex_len = (uint32_t)strlen(pr->rules[i].regex);
-		if (!byte_buf_append_u32(blob, (uint32_t) pr->rules[i].fg) ||
-		    !byte_buf_append_u32(blob, (uint32_t) pr->rules[i].bg) ||
-		    !byte_buf_append_u32(blob, regex_len) ||
-		    !byte_buf_append_u32(blob, 0) ||
-		    !byte_buf_append(blob, pr->rules[i].regex, regex_len))
-			return 0;
-	}
-	for (i = 0; i < pr->span_rule_count; ++i) {
-		uint32_t start_len = (uint32_t)strlen(pr->span_rules[i].start_regex);
-		uint32_t end_len = (uint32_t)strlen(pr->span_rules[i].end_regex);
-		if (!byte_buf_append_u32(blob, (uint32_t) pr->span_rules[i].fg) ||
-		    !byte_buf_append_u32(blob, (uint32_t) pr->span_rules[i].bg) ||
-		    !byte_buf_append_u32(blob, start_len) ||
-		    !byte_buf_append_u32(blob, end_len) ||
-		    !byte_buf_append(blob, pr->span_rules[i].start_regex, start_len) ||
-		    !byte_buf_append(blob, pr->span_rules[i].end_regex, end_len))
-			return 0;
-	}
-	return 1;
-}
-
-static void emit_hex_bytes(const unsigned char *data, size_t len)
-{
-	for (size_t i = 0; i < len; i++) {
-		if (i % 12 == 0)
-			printf("\n\t\t");
-		printf("0x%02x", (unsigned)data[i]);
-		if (i + 1 < len)
-			printf(", ");
-	}
-	if (len == 0)
-		printf("\n\t\t0x00");
-	printf("\n\t");
-}
-
-static void emit_output(const parse_result_t *pr)
-{
-	byte_buf_t uncompressed = {0};
-	unsigned char *compressed = NULL;
-	unsigned int compressed_cap;
-	int compressed_len;
-	size_t total = pr->rule_count + pr->span_rule_count;
-
-	if (!build_uncompressed_blob(pr, &uncompressed)) {
-		fprintf(stderr, "nanorc2h: failed to build syntax blob\n");
-		free(uncompressed.data);
-		exit(1);
-	}
-	compressed_cap = (unsigned int) (uncompressed.len + (uncompressed.len / 25) + 64);
-	if (compressed_cap < 64)
-		compressed_cap = 64;
-	compressed = malloc(compressed_cap);
-	if (!compressed) {
-		fprintf(stderr, "nanorc2h: out of memory\n");
-		free(uncompressed.data);
-		exit(1);
-	}
-	compressed_len =
-	    lz_compress(uncompressed.data, compressed, (unsigned int) uncompressed.len);
-	if (compressed_len <= 0) {
-		fprintf(stderr, "nanorc2h: compression failed\n");
-		free(compressed);
-		free(uncompressed.data);
-		exit(1);
-	}
 	printf("{\n");
 	printf("\t.file_regex = ");
 	emit_c_string(pr->file_regex ? pr->file_regex : "");
@@ -606,14 +532,25 @@ static void emit_output(const parse_result_t *pr)
 	emit_c_string(pr->file_magic ? pr->file_magic : "");
 	printf(",\n");
 	printf("\t.rule_count = %zu,\n", total);
-	printf("\t.compressed_size = %u,\n", (unsigned) compressed_len);
-	printf("\t.uncompressed_size = %u,\n", (unsigned) uncompressed.len);
-	printf("\t.compressed_data = (const unsigned char[]) {");
-	emit_hex_bytes(compressed, (size_t) compressed_len);
+	printf("\t.rules = (const struct syntax_rule[]) {\n");
+	for (i = 0; i < pr->rule_count; ++i) {
+		printf("\t\t{ %s, %s, ",
+		       color_id_c_name(pr->rules[i].fg),
+		       color_id_c_name(pr->rules[i].bg));
+		emit_c_string(pr->rules[i].regex);
+		printf(", NULL },\n");
+	}
+	for (i = 0; i < pr->span_rule_count; ++i) {
+		printf("\t\t{ %s, %s, ",
+		       color_id_c_name(pr->span_rules[i].fg),
+		       color_id_c_name(pr->span_rules[i].bg));
+		emit_c_string(pr->span_rules[i].start_regex);
+		printf(", ");
+		emit_c_string(pr->span_rules[i].end_regex);
+		printf(" },\n");
+	}
+	printf("\t},\n");
 	printf("},\n");
-	printf("},\n");
-	free(compressed);
-	free(uncompressed.data);
 }
 
 static void free_parse_result(parse_result_t *pr)
