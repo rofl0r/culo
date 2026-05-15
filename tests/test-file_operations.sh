@@ -95,6 +95,7 @@ test_save_without_changes() {
         spawn $EDITOR_BIN $test_file
         expect -re {.*}
         send \"\x0F\"      ;# Ctrl-O (Save)
+        send \"\r\"        ;# enter to confirm
         send \"\x18\"      ;# Ctrl-X (Quit)
         expect eof
     " > /dev/null 2>&1
@@ -126,6 +127,7 @@ test_insert_character() {
         after 100
         send -- \"hello\"
         send \"\x0F\"      ;# Ctrl-O (Save)
+        send \"\r\"        ;# enter to confirm
         send \"\x18\"      ;# Ctrl-X (Quit)
         expect eof
     " > /dev/null 2>&1
@@ -159,6 +161,7 @@ test_delete_character() {
         send \"\033\[C\"
         send \"\x7f\"      ;# Backspace (DEL)
         send \"\x0F\"      ;# Ctrl-O (Save)
+        send \"\r\"        ;# enter to confirm
         send \"\x18\"      ;# Ctrl-X (Quit)
         expect eof
     " > /dev/null 2>&1
@@ -204,6 +207,7 @@ test_interleaved_nav_ins() {
         send \"\033\[C\"	
         send -- \"!!\"	
         send \"\x0F\"      ;# Ctrl-O (Save)
+        send \"\r\"        ;# enter to confirm
         send \"\x18\"      ;# Ctrl-X (Quit)
         expect eof
     " > /dev/null 2>&1
