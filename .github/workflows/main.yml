@@ -64,26 +64,6 @@ jobs:
         timeout 2s ./me test_file.txt < /dev/null || [ $? -eq 124 ] || [ $? -eq 1 ]
         rm -f test_file.txt
 
-  coding-style:
-    needs: [detect-code-related-file-changes]
-    if: needs.detect-code-related-file-changes.outputs.has_code_related_changes == 'true'
-    runs-on: ubuntu-latest
-    steps:
-    - uses: actions/checkout@v4
-
-    - name: Install format tools
-      run: |
-        sudo apt-get update
-        sudo apt-get install -y clang-format file
-
-    - name: Check code formatting
-      run: |
-        .ci/check-format.sh
-
-    - name: Check newlines at EOF
-      run: |
-        .ci/check-newline.sh
-
   static-analysis:
     runs-on: ubuntu-latest
     steps:

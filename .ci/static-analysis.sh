@@ -9,7 +9,7 @@ OUTPUT=$(cppcheck --enable=warning,performance,portability \
     --suppress=normalCheckLevelMaxBranches \
     --suppress=objectIndex \
     --quiet \
-    me.c 2>&1)
+    culo.c 2>&1)
 
 # Display any output for debugging
 if [ -n "$OUTPUT" ]; then
