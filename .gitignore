@@ -62,6 +62,8 @@ coverage/
 # Profiling files
 gmon.out
 *.prof
+perf.data
+perf.data.old
 
 # Package files
 *.snap
@@ -73,3 +75,8 @@ gmon.out
 # CI/build artifacts
 expected-format
 valgrind-*.txt
+
+# misc
+*.patch
+*.diff
+config.mak
