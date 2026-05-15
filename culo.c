@@ -818,6 +818,7 @@ static const char *const help_lines[] = {
 	"View:",
 	"  M-#     Toggle line numbers",
 	"  M-P     Toggle whitespace display",
+	"  M-Y     Toggle syntax highlighting",
 	"  ^G      Show this help screen",
 	"",
 };
@@ -4649,6 +4650,24 @@ static void editor_process_key(void)
 		ec.show_whitespace = !ec.show_whitespace;
 		ui_set_message("Whitespace display %s",
 			       ec.show_whitespace ? "enabled" : "disabled");
+		break;
+	case META_('y'):
+	case META_('Y'):	/* Toggle syntax highlighting display */
+		if (ec.syntax) {
+			syntax_disable(true);
+		} else {
+			syntax_select();
+			if (ec.syntax && ec.file_size_bytes > SYNTAX_AUTO_DISABLE_THRESHOLD) {
+				syntax_disable(false);
+				ui_set_message
+				    ("Syntax highlighting auto-disabled above %u MiB",
+				     (unsigned) (SYNTAX_AUTO_DISABLE_THRESHOLD >> 20));
+			} else {
+				ui_set_message("Syntax highlighting %s",
+					       ec.syntax ? "enabled" :
+					       "not available");
+			}
+		}
 		break;
 	case META_('b'):
 	case META_('B'):	/* Open file browser (M-B) */

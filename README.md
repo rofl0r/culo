@@ -47,6 +47,7 @@ Supported keys:
 * M-/: Go to last line of file
 * M-#: Toggle line numbers display
 * M-P: Toggle whitespace/tab marker display
+* M-Y: Toggle syntax highlighting
 * PageUp, PageDown: Scroll up/down
 * Up/Down/Left/Right: Move cursor
 * Home/End: move cursor to the beginning/end of editing line
