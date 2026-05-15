@@ -51,6 +51,7 @@ typedef enum {
 #define TAB_STOP 4
 #define TAB_HEAD_STYLE "\x1b[90m"
 #define UNDO_STACK_CAP 64
+#define SYNTAX_AUTO_DISABLE_THRESHOLD (16u * 1024u * 1024u)
 
 /* UTF-8 handling functions */
 
@@ -2516,6 +2517,7 @@ static void file_open(const char *file_name)
 	ec.row_offset = 0;
 	ec.col_offset = 0;
 	ec.render_x = 0;
+	ec.file_size_bytes = 0;
 
 	free(ec.file_name);
 	ec.file_name = strdup(file_name);
@@ -2532,14 +2534,27 @@ static void file_open(const char *file_name)
 	size_t line_cap = 0;
 	ssize_t line_len;
 	while ((line_len = getline(&line, &line_cap, file)) != -1) {
+		ec.file_size_bytes += (size_t) line_len;
 		if (line_len > 0 &&
 		    (line[line_len - 1] == '\n' || line[line_len - 1] == '\r'))
 			line_len--;
 		row_insert(NR, line, line_len);
+		if (ec.syntax
+		    && ec.file_size_bytes > SYNTAX_AUTO_DISABLE_THRESHOLD) {
+			syntax_disable(false);
+			ui_set_message
+			    ("Syntax highlighting auto-disabled above %u MiB",
+			     (unsigned) (SYNTAX_AUTO_DISABLE_THRESHOLD >> 20));
+		}
 	}
 	free(line);
 	fclose(file);
 	syntax_select();
+	if (ec.syntax && ec.file_size_bytes > SYNTAX_AUTO_DISABLE_THRESHOLD) {
+		syntax_disable(false);
+		ui_set_message("Syntax highlighting auto-disabled above %u MiB",
+			       (unsigned) (SYNTAX_AUTO_DISABLE_THRESHOLD >> 20));
+	}
 	ec.modified = false;
 }
 

@@ -52,6 +52,8 @@ Supported keys:
 * Up/Down/Left/Right: Move cursor
 * Home/End: move cursor to the beginning/end of editing line
 
+Syntax highlighting is auto-disabled for recognized files larger than 16 MiB.
+
 CULO Editor does not depend on external library (not even curses).
 It uses fairly standard VT100 (and similar terminals) escape sequences.
 
