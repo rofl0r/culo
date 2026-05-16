@@ -3035,7 +3035,7 @@ static int str_visible_scan(const char *s, int max_visible, int *vis_out)
 	const char *p = s;
 	int vis = 0;
 	while (*p) {
-		if ((unsigned char)*p == '\x1b' && *(p + 1) == '[') {
+		if ((unsigned char)p[0] == '\x1b' && p[1] != '\0' && p[1] == '[') {
 			p = skip_csi(p + 1);
 		} else {
 			if (max_visible >= 0 && vis >= max_visible)
@@ -3052,9 +3052,11 @@ static int str_visible_scan(const char *s, int max_visible, int *vis_out)
 static int num_digits(int n)
 {
 	int d = 1;
-	unsigned int u = (unsigned int)n;
+	unsigned int u;
 	if (n < 0)
-		u = (unsigned int)(-(n + 1)) + 1u;
+		u = (n == INT_MIN) ? (unsigned int)INT_MAX + 1u : (unsigned int)(-n);
+	else
+		u = (unsigned int)n;
 	while (u >= 10u) {
 		d++;
 		u /= 10u;
@@ -3487,7 +3489,7 @@ static int ui_dialog_ask(const char *msg, char *const options[])
 			    snprintf(status_msg + off,
 				     sizeof(status_msg) - (size_t) off,
 				     (i ==
-				      choice) ? "\x1b[7m[ %s ]\x1b[27m" :
+				      choice) ? "\x1b[7m[ %s ]\x1b[27m" :	/* reverse off only; keep statusbar colors */
 				     "[ %s ]", options[i]);
 			if (i + 1 < n) {
 				if (off < 0 || off >= (int)sizeof(status_msg))
