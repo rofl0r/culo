@@ -439,7 +439,7 @@ typedef struct {
 
 /* X-macro for editor modes */
 #define EDITOR_MODES                                  \
-    _(NORMAL, "NORMAL", "Default editing mode")       \
+    _(NORMAL, "EDIT", "Default editing mode")         \
     _(SEARCH, "SEARCH", "Search mode (Ctrl-W)")       \
     _(PROMPT, "PROMPT", "Generic prompt mode")        \
     _(SELECT, "SELECT", "Text selection mode")        \
@@ -3009,61 +3009,6 @@ static void buf_append_overlay(editor_buf_t * eb)
 	buf_append(eb, "\x1b[m", 3);
 }
 
-/*
- * Advance p past a CSI escape sequence (already past the opening ESC).
- * On entry p must point at the '[' of "ESC [".  Skips parameter bytes
- * (0x30–0x3F), intermediate bytes (0x20–0x2F) and the final byte (0x40–0x7E).
- */
-static const char *skip_csi(const char *p)
-{
-	p++;			/* skip '[' */
-	while (*p && (unsigned char)*p < 0x40)
-		p++;
-	if (*p && (unsigned char)*p <= 0x7e)
-		p++;
-	return p;
-}
-
-/*
- * Scan string s counting visible (non-escape-sequence) characters.
- * Stops after max_visible visible characters; if max_visible < 0, scans to
- * the end of the string.  Returns the byte offset reached.  If vis_out is
- * non-NULL it receives the visible character count seen.
- */
-static int str_visible_scan(const char *s, int max_visible, int *vis_out)
-{
-	const char *p = s;
-	int vis = 0;
-	while (*p) {
-		if ((unsigned char)p[0] == '\x1b' && p[1] != '\0' && p[1] == '[') {
-			p = skip_csi(p + 1);
-		} else {
-			if (max_visible >= 0 && vis >= max_visible)
-				break;
-			vis++;
-			p++;
-		}
-	}
-	if (vis_out)
-		*vis_out = vis;
-	return (int)(p - s);
-}
-
-static int num_digits(int n)
-{
-	int d = 1;
-	unsigned int u;
-	if (n < 0)
-		u = (n == INT_MIN) ? (unsigned int)INT_MAX + 1u : (unsigned int)(-n);
-	else
-		u = (unsigned int)n;
-	while (u >= 10u) {
-		d++;
-		u /= 10u;
-	}
-	return d;
-}
-
 /* Calculate line number display width */
 static int get_line_number_width(void)
 {
@@ -3104,19 +3049,14 @@ static void editor_scroll(void)
 static void ui_draw_statusbar(editor_buf_t * eb)
 {
 	buf_append(eb, "\x1b[93;44m", 8);	/* Yellow on blue */
-	char status[80], r_status[80];
+	char status[80], r_status[128];
+	r_status[0] = '\0';
 
-	int len = 0, r_vis = 0, r_bytes = 0;
+	int len = 0, r_len = 0;
 	if (ec.status_msg[0]) {
-		/* Active prompt or dialog: show it instead of normal statusbar */
-		int visible = 0;
-		int bytes = str_visible_scan(ec.status_msg, ec.screen_cols, &visible);
-		buf_append(eb, ec.status_msg, bytes);
-		len = visible;
-		while (len < ec.screen_cols) {
-			buf_append(eb, " ", 1);
-			len++;
-		}
+		/* Active prompt or dialog: write raw then clear to EOL with bg color */
+		buf_append(eb, ec.status_msg, strlen(ec.status_msg));
+		buf_append(eb, "\x1b[K", 3);
 		buf_append(eb, "\x1b[m", 3);
 		return;
 	} else if (ec.mode == MODE_SEARCH) {
@@ -3154,40 +3094,42 @@ static void ui_draw_statusbar(editor_buf_t * eb)
 			    snprintf(status, sizeof(status), " [%s]%s %s",
 				     mode_label, flags, q);
 		}
-		r_vis = 0;
-		r_bytes = 0;
-		r_status[0] = '\0';
+		r_len = 0;
 		if (len > ec.screen_cols)
 			len = ec.screen_cols;
 		buf_append(eb, status, len);
 	} else {
 		/* Build " [MODE] " left prefix */
-		const char *mode_name =
-		    (ec.mode == MODE_NORMAL) ? "EDIT" : mode_get_name(ec.mode);
+		const char *mode_name = mode_get_name(ec.mode);
 		char left[32];
 		int left_vis =
 		    snprintf(left, sizeof(left), " [%s] ", mode_name);
 		if (left_vis > ec.screen_cols)
 			left_vis = ec.screen_cols;
 
-		/* Build right side: col/row info */
+		/* Build right side: col/row info with zero-padded fixed-width numbers */
 		int col_size =
 		    (ec.cursor_y <= NR - 1) ? ROW(ec.cursor_y)->size : 0;
 		int row_cur = (ec.cursor_y + 1 > NR) ? NR : ec.cursor_y + 1;
 		int row_total = NR;
-		int row_width = num_digits(row_total > 0 ? row_total : 1);
+		int row_width = 1;
+		{ int tmp = row_total > 0 ? row_total : 1; while (tmp >= 10) { row_width++; tmp /= 10; } }
 		int col_max = ec.longest_line;
-		if (col_size > col_max)
-			col_max = col_size;
-		if (ec.cursor_x + 1 > col_max)
-			col_max = ec.cursor_x + 1;
-		int col_width = num_digits(col_max > 0 ? col_max : 1);
-		snprintf(r_status, sizeof(r_status),
-			 "\x1b[97mL\x1b[93m%0*d/%0*d \x1b[97mC\x1b[93m%0*d/%0*d",
-			 row_width, row_cur, row_width, row_total,
-			 col_width, ec.cursor_x + 1, col_width, col_size);
-		r_bytes = (int)strlen(r_status);
-		r_vis = str_visible_scan(r_status, -1, NULL);
+		if (col_size > col_max) col_max = col_size;
+		if (ec.cursor_x + 1 > col_max) col_max = ec.cursor_x + 1;
+		int col_width = 1;
+		{ int tmp = col_max > 0 ? col_max : 1; while (tmp >= 10) { col_width++; tmp /= 10; } }
+		/* Build numeric parts (plain text, used for visible length) */
+		char row_part[32], col_part[32], fmt[32];
+		/* Use a runtime-generated format string to avoid -Wformat-truncation
+		 * from dynamic-width '%0*d'; the actual widths are tiny (1-10 digits). */
+		snprintf(fmt, sizeof(fmt), "%%0%dd/%%0%dd", row_width, row_width);
+		snprintf(row_part, sizeof(row_part), fmt, row_cur, row_total);
+		snprintf(fmt, sizeof(fmt), "%%0%dd/%%0%dd", col_width, col_width);
+		snprintf(col_part, sizeof(col_part), fmt, ec.cursor_x + 1, col_size);
+		/* Colored version for emission; "L"+row_part+" C"+col_part = 3+lens */
+		snprintf(r_status, sizeof(r_status), "\x1b[97mL\x1b[93m%s \x1b[97mC\x1b[93m%s", row_part, col_part);
+		r_len = 3 + (int)strlen(row_part) + (int)strlen(col_part);
 
 		const char *fname =
 		    ec.file_name ? ec.file_name : "< New >";
@@ -3198,7 +3140,7 @@ static void ui_draw_statusbar(editor_buf_t * eb)
 		 * marker and at least 1 space before the col/row display */
 		int max_fname_vis =
 		    ec.screen_cols - left_vis - mod_vis -
-		    (r_vis > 0 ? 1 + r_vis : 0);
+		    (r_len > 0 ? 1 + r_len : 0);
 		if (max_fname_vis < 0)
 			max_fname_vis = 0;
 
@@ -3229,8 +3171,8 @@ static void ui_draw_statusbar(editor_buf_t * eb)
 	}
 
 	while (len < ec.screen_cols) {
-		if (r_vis > 0 && ec.screen_cols - len == r_vis) {
-			buf_append(eb, r_status, r_bytes);
+		if (r_len > 0 && ec.screen_cols - len == r_len) {
+			buf_append(eb, r_status, strlen(r_status));
 			break;
 		}
 		buf_append(eb, " ", 1);
@@ -3489,7 +3431,7 @@ static int ui_dialog_ask(const char *msg, char *const options[])
 			    snprintf(status_msg + off,
 				     sizeof(status_msg) - (size_t) off,
 				     (i ==
-				      choice) ? "\x1b[7m[ %s ]\x1b[27m" :	/* reverse off only; keep statusbar colors */
+				      choice) ? "\x1b[7m[ %s ]\x1b[27;93;44m" :
 				     "[ %s ]", options[i]);
 			if (i + 1 < n) {
 				if (off < 0 || off >= (int)sizeof(status_msg))
