@@ -521,8 +521,7 @@ struct {
 	tlist *rows;
 	bool modified;
 	char *file_name;
-	char status_msg[512];
-	time_t status_msg_time;
+	char status_msg[512];	/* active prompt/dialog text shown in statusbar */
 	char *copied_char_buffer;
 	size_t file_size_bytes;
 	const struct syntax_desc *syntax;
@@ -970,7 +969,7 @@ static void term_update_size(void)
 		/* Fallback to reasonable defaults for testing */
 		ec.screen_rows = 24, ec.screen_cols = 80;
 	}
-	ec.screen_rows -= 2;
+	ec.screen_rows -= 1;
 }
 
 static void term_close_buffer(void)
@@ -2975,9 +2974,21 @@ static void buf_destroy(editor_buf_t * eb)
 /* Append the overlay message to an editor_buf_t (called at end of refresh). */
 static void buf_append_overlay(editor_buf_t * eb)
 {
-	if (!ec.notfound_msg[0])
-		return;
-	int msglen = (int)strlen(ec.notfound_msg);
+	const char *msg = ec.notfound_msg;
+	if (!msg[0]) {
+		if (ec.mode != MODE_SEARCH || ec.status_msg[0])
+			return;
+		if (ec.search.replace_phase == 2)
+			msg =
+			    "Replace this instance?  [ Yes ]  [ No ]  [ All ]  ^C:Cancel";
+		else if (ec.search.replace_phase == 1)
+			msg =
+			    "Enter replacement text, then press Enter  ^C:Cancel";
+		else
+			msg =
+			    "M-C:Case Sens  M-B:Backwards  M-R:Regexp  ^R:Replace";
+	}
+	int msglen = (int)strlen(msg);
 	int col = (ec.screen_cols - msglen) / 2;
 	if (col < 0)
 		col = 0;
@@ -2985,7 +2996,7 @@ static void buf_append_overlay(editor_buf_t * eb)
 	snprintf(posbuf, sizeof(posbuf), "\x1b[%d;%dH\x1b[7m", ec.screen_rows,
 		 col + 1);
 	buf_append(eb, posbuf, strlen(posbuf));
-	buf_append(eb, ec.notfound_msg, msglen);
+	buf_append(eb, msg, msglen);
 	buf_append(eb, "\x1b[m", 3);
 }
 
@@ -3032,7 +3043,20 @@ static void ui_draw_statusbar(editor_buf_t * eb)
 	char status[80], r_status[80];
 
 	int len = 0, r_len = 0;
-	if (ec.mode == MODE_SEARCH) {
+	if (ec.status_msg[0]) {
+		/* Active prompt or dialog: show it instead of normal statusbar */
+		len = (int)strlen(ec.status_msg);
+		if (len > ec.screen_cols)
+			len = ec.screen_cols;
+		buf_append(eb, ec.status_msg, len);
+		while (len < ec.screen_cols) {
+			buf_append(eb, " ", 1);
+			len++;
+		}
+		buf_append(eb, "\x1b[m", 3);
+		buf_append(eb, "\r\n", 2);
+		return;
+	} else if (ec.mode == MODE_SEARCH) {
 		if (ec.search.replace_phase == 1) {
 			/* Phase 1: entering replacement text */
 			const char *rq =
@@ -3141,106 +3165,12 @@ static void ui_draw_statusbar(editor_buf_t * eb)
 	buf_append(eb, "\r\n", 2);
 }
 
-/*
- * Advance p past a CSI escape sequence (already past the opening ESC).
- * On entry p must point at the '[' of "ESC [".  Skips parameter bytes
- * (0x30–0x3F), intermediate bytes (0x20–0x2F) and the final byte (0x40–0x7E).
- */
-static const char *skip_csi(const char *p)
-{
-	p++;			/* skip '[' */
-	/* Skip parameter and intermediate bytes (all bytes before the final) */
-	while (*p && (unsigned char)*p < 0x40)
-		p++;
-	/* Skip the final byte (0x40–0x7E) */
-	if (*p && (unsigned char)*p <= 0x7e)
-		p++;
-	return p;
-}
-
-/*
- * Scan string s counting visible (non-escape-sequence) characters.
- * Stops after max_visible visible characters; if max_visible < 0, scans to
- * the end of the string.  Returns the byte offset reached.  If vis_out is
- * non-NULL it receives the visible character count seen.
- */
-static int str_visible_scan(const char *s, int max_visible, int *vis_out)
-{
-	const char *p = s;
-	int vis = 0;
-	while (*p) {
-		if ((unsigned char)*p == '\x1b' && *(p + 1) == '[') {
-			p = skip_csi(p + 1);
-		} else {
-			if (max_visible >= 0 && vis >= max_visible)
-				break;
-			vis++;
-			p++;
-		}
-	}
-	if (vis_out)
-		*vis_out = vis;
-	return (int)(p - s);
-}
-
-static void ui_draw_messagebar(editor_buf_t * eb)
-{
-	buf_append(eb, "\x1b[93m\x1b[44m\x1b[K", 13);
-	int displayed_len = 0;
-
-	if (ec.mode == MODE_SEARCH) {
-		const char *hint;
-		if (ec.search.replace_phase == 2) {
-			/* Confirm-each phase draws via ui_dialog_ask() status text. */
-			hint = ec.status_msg[0] ? ec.status_msg
-			    :
-			    "Replace this instance?  [ Yes ]  [ No ]  [ All ]  ^C:Cancel";
-		} else if (ec.search.replace_phase == 1) {
-			/* Entering replacement text */
-			hint =
-			    "Enter replacement text, then press Enter  ^C:Cancel";
-		} else {
-			/* Phase 0: show search keybinding hints */
-			hint =
-			    "M-C:Case Sens  M-B:Backwards  M-R:Regexp  ^R:Replace";
-		}
-		int vlen;
-		int blen = str_visible_scan(hint, ec.screen_cols, &vlen);
-		buf_append(eb, hint, blen);
-		displayed_len = vlen;
-	} else if (strstr(ec.status_msg, "File Browser:")) {
-		int vlen;
-		int blen =
-		    str_visible_scan(ec.status_msg, ec.screen_cols, &vlen);
-		buf_append(eb, ec.status_msg, blen);
-		displayed_len = vlen;
-	} else {
-		/* Regular messages: truncate to screen width and show for 5 seconds */
-		int vlen;
-		int blen =
-		    str_visible_scan(ec.status_msg, ec.screen_cols, &vlen);
-		if (blen && time(NULL) - ec.status_msg_time < 5) {
-			buf_append(eb, ec.status_msg, blen);
-			displayed_len = vlen;
-		}
-	}
-
-	/* Pad the rest of the line with spaces */
-	while (displayed_len < ec.screen_cols) {
-		buf_append(eb, " ", 1);
-		displayed_len++;
-	}
-
-	buf_append(eb, "\x1b[0m", 4);
-}
-
 static void ui_set_message(const char *msg, ...)
 {
 	va_list args;
 	va_start(args, msg);
-	vsnprintf(ec.status_msg, sizeof(ec.status_msg), msg, args);
+	vsnprintf(ec.notfound_msg, sizeof(ec.notfound_msg), msg, args);
 	va_end(args);
-	ec.status_msg_time = time(NULL);
 }
 
 static void ui_draw_rows(editor_buf_t * eb)
@@ -3406,7 +3336,6 @@ static void editor_refresh(void)
 	buf_append(&eb, "\x1b[H", 3);
 	ui_draw_rows(&eb);
 	ui_draw_statusbar(&eb);
-	ui_draw_messagebar(&eb);
 	buf_append_overlay(&eb);	/* transient notfound/replaced overlay */
 
 	/* Adjust cursor position for line numbers */
@@ -3431,7 +3360,6 @@ static void editor_refresh_full(void)
 	buf_append(&eb, "\x1b[H", 3);
 	ui_draw_rows(&eb);
 	ui_draw_statusbar(&eb);
-	ui_draw_messagebar(&eb);
 	buf_append_overlay(&eb);	/* transient notfound/replaced overlay */
 
 	/* Adjust cursor position for line numbers */
@@ -3503,18 +3431,18 @@ static int ui_dialog_ask(const char *msg, char *const options[])
 				 sizeof(status_msg) - (size_t) off,
 				 "  ^C:Cancel");
 
-		ui_set_message("%s", status_msg);
+		snprintf(ec.status_msg, sizeof(ec.status_msg), "%s", status_msg);
 		editor_refresh();
 
 		int c = term_read_key();
 		switch (c) {
 		case '\r':	/* Enter key */
-			ui_set_message("");
+			ec.status_msg[0] = '\0';
 			return choice;
 		case CTRL_('c'):	/* ^C - cancel */
 		case CTRL_('x'):
 		case '\x1b':
-			ui_set_message("");
+			ec.status_msg[0] = '\0';
 			return -1;	/* Cancel */
 		case ARROW_LEFT:
 		case ARROW_UP:
@@ -3535,7 +3463,7 @@ static int ui_dialog_ask(const char *msg, char *const options[])
 			for (int i = 0; i < n; i++) {
 				int ch = tolower((unsigned char)options[i][0]);
 				if (c == ch) {
-					ui_set_message("");
+					ec.status_msg[0] = '\0';
 					return i;
 				}
 			}
@@ -3630,13 +3558,12 @@ static char *ui_prompt(const char *prefix, const char *hint,
 			}
 			ec.status_msg[slen] = '\0';
 		}
-		ec.status_msg_time = time(NULL);
 		editor_refresh();
-		/* Move terminal cursor to end of displayed input in message bar */
+		/* Move terminal cursor to end of displayed input in status bar */
 		char posbuf[32];
 		int n =
 		    snprintf(posbuf, sizeof(posbuf), "\x1b[%d;%dH",
-			     ec.screen_rows + 2, pfx_len + vis_blen + 1);
+			     ec.screen_rows + 1, pfx_len + vis_blen + 1);
 		write(STDOUT_FILENO, posbuf, n);
 
 		int c = term_read_key();
@@ -3652,14 +3579,14 @@ static char *ui_prompt(const char *prefix, const char *hint,
 				}
 			}
 		} else if (c == CTRL_('c') || c == CTRL_('x') || c == '\x1b') {
-			ui_set_message("");
+			ec.status_msg[0] = '\0';
 			if (callback)
 				callback(buf, c);
 			free(buf);
 			return NULL;
 		} else if (c == '\r') {
 			if (buf_len != 0) {
-				ui_set_message("");
+				ec.status_msg[0] = '\0';
 				if (callback)
 					callback(buf, c);
 				return buf;
@@ -3994,7 +3921,7 @@ static void list_screen_render(const char *title, int total_lines, int offset,
 		}
 	}
 	buf_append(&eb, "\x1b[m\r\n", 5);
-	ui_draw_messagebar(&eb);
+	buf_append_overlay(&eb);
 	write(STDOUT_FILENO, eb.buf, eb.len);
 	buf_destroy(&eb);
 }
