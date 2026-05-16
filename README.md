@@ -33,6 +33,7 @@ Supported keys:
 * Ctrl-G: Show help screen
 * M-A: Set/toggle mark (text selection)
     - Move cursor to select text while marking
+    - Shift+Arrow/Home/End/PgUp/PgDn: transient marking while held; first non-shift-cursor key clears selection
     - M-6: Copy marked region
     - Ctrl-K: Cut marked text
     - Ctrl-C: Cancel selection

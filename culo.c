@@ -497,6 +497,9 @@ typedef union {
 	struct {
 		int offset;	/* Scroll offset (lines from top) */
 	} help;
+	struct {
+		bool shift_only;	/* Selection was initiated by Shift+cursor keys */
+	} select;
 } mode_data_t;
 
 typedef struct {
@@ -654,6 +657,9 @@ enum editor_key {
 	ARROW_LEFT = 0x3e8, ARROW_RIGHT, ARROW_UP, ARROW_DOWN,
 	PAGE_UP, PAGE_DOWN,
 	HOME_KEY, END_KEY, DEL_KEY,
+	SHIFT_ARROW_LEFT, SHIFT_ARROW_RIGHT, SHIFT_ARROW_UP, SHIFT_ARROW_DOWN,
+	SHIFT_PAGE_UP, SHIFT_PAGE_DOWN,
+	SHIFT_HOME_KEY, SHIFT_END_KEY,
 };
 
 typedef enum {
@@ -674,6 +680,7 @@ static void editor_refresh(void);
 static int get_line_number_width(void);
 static void editor_newline(void);
 static void editor_insert_char(int c, bool manual_typing);
+static void editor_move_cursor(int key);
 static void undo_record_insert(int row, int col, const char *text, size_t len,
 			       int before_y, int before_x, int after_y,
 			       int after_x);
@@ -804,6 +811,7 @@ static const char *const help_lines[] = {
 	"  M-E     Redo last undo",
 	"  ^Z/^Y   Undo/redo aliases",
 	"  M-A     Set/toggle mark",
+	"  Shift+Cursor transient mark (clears on first non-shift-cursor key)",
 	"  M-6     Copy marked region",
 	"",
 	"Search:",
@@ -923,6 +931,42 @@ static int term_read_key(void)
 						return PAGE_UP;
 					case '6':
 						return PAGE_DOWN;
+					}
+				} else if (seq[2] == ';') {
+					char mod, fin;
+					if (read(STDIN_FILENO, &mod, 1) != 1 ||
+					    read(STDIN_FILENO, &fin, 1) != 1)
+						return '\x1b';
+					if (mod == '2') {
+						if (fin == '~') {
+							switch (seq[1]) {
+							case '1':
+							case '7':
+								return SHIFT_HOME_KEY;
+							case '4':
+							case '8':
+								return SHIFT_END_KEY;
+							case '5':
+								return SHIFT_PAGE_UP;
+							case '6':
+								return SHIFT_PAGE_DOWN;
+							}
+						} else {
+							switch (fin) {
+							case 'A':
+								return SHIFT_ARROW_UP;
+							case 'B':
+								return SHIFT_ARROW_DOWN;
+							case 'C':
+								return SHIFT_ARROW_RIGHT;
+							case 'D':
+								return SHIFT_ARROW_LEFT;
+							case 'H':
+								return SHIFT_HOME_KEY;
+							case 'F':
+								return SHIFT_END_KEY;
+							}
+						}
 					}
 				}
 			} else {
@@ -3035,6 +3079,102 @@ static int get_line_number_width(void)
 	return width + 2;	/* Add space for padding and separator */
 }
 
+static bool key_is_shift_select_nav(int c)
+{
+	switch (c) {
+	case SHIFT_ARROW_UP:
+	case SHIFT_ARROW_DOWN:
+	case SHIFT_ARROW_LEFT:
+	case SHIFT_ARROW_RIGHT:
+	case SHIFT_HOME_KEY:
+	case SHIFT_END_KEY:
+	case SHIFT_PAGE_UP:
+	case SHIFT_PAGE_DOWN:
+		return true;
+	default:
+		return false;
+	}
+}
+
+static int key_to_select_nav(int c)
+{
+	switch (c) {
+	case ARROW_UP:
+	case ARROW_DOWN:
+	case ARROW_LEFT:
+	case ARROW_RIGHT:
+	case HOME_KEY:
+	case END_KEY:
+	case PAGE_UP:
+	case PAGE_DOWN:
+		return c;
+	case SHIFT_ARROW_UP:
+		return ARROW_UP;
+	case SHIFT_ARROW_DOWN:
+		return ARROW_DOWN;
+	case SHIFT_ARROW_LEFT:
+		return ARROW_LEFT;
+	case SHIFT_ARROW_RIGHT:
+		return ARROW_RIGHT;
+	case SHIFT_HOME_KEY:
+		return HOME_KEY;
+	case SHIFT_END_KEY:
+		return END_KEY;
+	case SHIFT_PAGE_UP:
+		return PAGE_UP;
+	case SHIFT_PAGE_DOWN:
+		return PAGE_DOWN;
+	default:
+		return -1;
+	}
+}
+
+static void selection_move_cursor(int key)
+{
+	int nav = key_to_select_nav(key);
+	if (nav < 0)
+		return;
+
+	switch (nav) {
+	case ARROW_UP:
+	case ARROW_DOWN:
+	case ARROW_LEFT:
+	case ARROW_RIGHT:
+		editor_move_cursor(nav);
+		/* Ensure selection doesn't go past last row */
+		if (ec.cursor_y >= NR && NR > 0) {
+			ec.cursor_y = NR - 1;
+			ec.cursor_x = ROW(ec.cursor_y)->size;
+		}
+		break;
+	case HOME_KEY:
+		ec.cursor_x = 0;
+		break;
+	case END_KEY:
+		if (ec.cursor_y < NR)
+			ec.cursor_x = ROW(ec.cursor_y)->size;
+		break;
+	case PAGE_UP:
+	case PAGE_DOWN:{
+			if (nav == PAGE_UP)
+				ec.cursor_y = ec.row_offset;
+			else
+				ec.cursor_y = ec.row_offset + ec.screen_rows - 1;
+			int times = ec.screen_rows;
+			while (times--)
+				editor_move_cursor((nav ==
+						    PAGE_UP) ? ARROW_UP :
+						   ARROW_DOWN);
+			break;
+		}
+	default:
+		break;
+	}
+
+	ec.selection.end_x = ec.cursor_x;
+	ec.selection.end_y = ec.cursor_y;
+}
+
 static void editor_scroll(void)
 {
 	ec.render_x = 0;
@@ -4165,53 +4305,21 @@ static void editor_process_key(void)
 		break;
 
 	case MODE_SELECT:
+		if (ec.mode_state.select.shift_only && !key_is_shift_select_nav(c)) {
+			/* Shift-only selection is transient: any non-Shift+cursor key ends it. */
+			mode_set(MODE_NORMAL);
+			break;
+		}
+		if (key_to_select_nav(c) >= 0) {
+			selection_move_cursor(c);
+			return;
+		}
 		switch (c) {
 		case CTRL_('c'):	/* ^C - abort selection */
 			ec.selection.active = false;
 			mode_set(MODE_NORMAL);
 			ui_set_message("Mark cancelled");
 			return;
-		case ARROW_UP:
-		case ARROW_DOWN:
-		case ARROW_LEFT:
-		case ARROW_RIGHT:
-			/* Update selection while moving */
-			editor_move_cursor(c);
-			/* Ensure selection doesn't go past last row */
-			if (ec.cursor_y >= NR && NR > 0) {
-				ec.cursor_y = NR - 1;
-				ec.cursor_x = ROW(ec.cursor_y)->size;
-			}
-			ec.selection.end_x = ec.cursor_x;
-			ec.selection.end_y = ec.cursor_y;
-			return;
-		case HOME_KEY:
-			ec.cursor_x = 0;
-			ec.selection.end_x = ec.cursor_x;
-			ec.selection.end_y = ec.cursor_y;
-			return;
-		case END_KEY:
-			if (ec.cursor_y < NR)
-				ec.cursor_x = ROW(ec.cursor_y)->size;
-			ec.selection.end_x = ec.cursor_x;
-			ec.selection.end_y = ec.cursor_y;
-			return;
-		case PAGE_UP:
-		case PAGE_DOWN:{
-				if (c == PAGE_UP)
-					ec.cursor_y = ec.row_offset;
-				else
-					ec.cursor_y =
-					    ec.row_offset + ec.screen_rows - 1;
-				int times = ec.screen_rows;
-				while (times--)
-					editor_move_cursor((c ==
-							    PAGE_UP) ? ARROW_UP
-							   : ARROW_DOWN);
-				ec.selection.end_x = ec.cursor_x;
-				ec.selection.end_y = ec.cursor_y;
-				return;
-			}
 		case META_('6'):	/* Copy marked text and exit marking */
 			selection_copy();
 			mode_set(MODE_NORMAL);
@@ -4505,10 +4613,23 @@ static void editor_process_key(void)
 	case META_('A'):	/* Start text marking (GNU nano: M-A Set Mark) */
 		if (ec.mode != MODE_SELECT) {
 			mode_set(MODE_SELECT);
+			ec.mode_state.select.shift_only = false;
 			ui_set_message
 			    ("Mark set - Move cursor to select, M-6=Copy, ^K=Cut, "
 			     "^C=Cancel");
 		}
+		break;
+	case SHIFT_ARROW_UP:
+	case SHIFT_ARROW_DOWN:
+	case SHIFT_ARROW_LEFT:
+	case SHIFT_ARROW_RIGHT:
+	case SHIFT_HOME_KEY:
+	case SHIFT_END_KEY:
+	case SHIFT_PAGE_UP:
+	case SHIFT_PAGE_DOWN:
+		mode_set(MODE_SELECT);
+		ec.mode_state.select.shift_only = true;
+		selection_move_cursor(c);
 		break;
 	case META_('6'):	/* Copy current line (GNU nano: M-6 Copy) */
 		if (ec.cursor_y < NR)

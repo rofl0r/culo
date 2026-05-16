@@ -139,9 +139,40 @@ test_delete_selection() {
     return
 }
 
+# Test 6: Shift+cursor transient selection
+test_shift_cursor_transient_selection() {
+    if ! command -v expect &> /dev/null; then
+        report_test "Shift+cursor transient selection (skipped - expect not installed)" "PASS"
+        return
+    fi
+
+    local test_file="shift_select_test.txt"
+    create_test_file "$test_file" "Shift select this"
+
+    expect -c "
+        set timeout 2
+        spawn $EDITOR_BIN $test_file
+        expect -re {.*}
+        send \"\033\[1;2C\" ;# Shift+Right arrow starts transient selection
+        send \"\033\[1;2C\" ;# Continue extending with Shift+Right
+        send \"\033\[C\"    ;# First non-shift cursor key clears selection
+        send \"\x18\"       ;# Ctrl-X to quit
+        expect eof
+    " > /dev/null 2>&1
+
+    if [ $? -eq 0 ]; then
+        report_test "Shift+cursor transient selection" "PASS"
+    else
+        report_test "Shift+cursor transient selection" "FAIL"
+    fi
+
+    rm -f "$test_file"
+}
+
 # Run tests
 test_selection_mode_toggle
 test_selection_arrow_keys
 test_selection_home_end
 test_cancel_selection
 test_delete_selection
+test_shift_cursor_transient_selection
