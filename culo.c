@@ -2864,6 +2864,7 @@ static bool replace_past_origin(bool backwards)
 static bool replace_and_advance(const char *rq, size_t rqlen)
 {
 	bool backwards = (ec.search.mode & SM_BACKWARDS) != 0;
+	bool already_wrapped = ec.search.has_wrapped;
 	int prev_off = g_last_match.char_off;
 	int prev_len = g_last_match.char_len;
 	do_replace_one(rq, rqlen);
@@ -2889,6 +2890,11 @@ static bool replace_and_advance(const char *rq, size_t rqlen)
 		ec.search.has_wrapped = true;
 	if (!found)
 		return false;
+	/* A second wrap means we've completed one full cycle and would start
+	 * revisiting matches (notably with case-insensitive replacements like
+	 * "bool" -> "BOOL"), so stop here. */
+	if (already_wrapped && wrapped)
+		return false;
 	return !replace_past_origin(backwards);
 }
 
@@ -2896,6 +2902,7 @@ static bool replace_and_advance(const char *rq, size_t rqlen)
 static bool replace_skip(void)
 {
 	bool backwards = (ec.search.mode & SM_BACKWARDS) != 0;
+	bool already_wrapped = ec.search.has_wrapped;
 	int skip_off = backwards ? g_last_match.char_off - 1
 	    : g_last_match.char_off + 1;
 	bool wrapped = false;
@@ -2905,6 +2912,9 @@ static bool replace_skip(void)
 	if (wrapped)
 		ec.search.has_wrapped = true;
 	if (!found)
+		return false;
+	/* Same full-cycle guard as replace_and_advance(). */
+	if (already_wrapped && wrapped)
 		return false;
 	return !replace_past_origin(backwards);
 }
