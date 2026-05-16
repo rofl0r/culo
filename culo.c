@@ -2980,10 +2980,6 @@ static void buf_append_overlay(editor_buf_t * eb)
 {
 	const char *msg = ec.overlay_msg;
 	char framed_msg[sizeof(ec.overlay_msg) + 8];
-	if (msg[0]) {
-		snprintf(framed_msg, sizeof(framed_msg), "[ %s ]", msg);
-		msg = framed_msg;
-	}
 	if (!msg[0]) {
 		if (ec.mode != MODE_SEARCH || ec.status_msg[0])
 			return;
@@ -2996,6 +2992,10 @@ static void buf_append_overlay(editor_buf_t * eb)
 		else
 			msg =
 			    "M-C:Case Sens  M-B:Backwards  M-R:Regexp  ^R:Replace";
+	}
+	if (msg[0]) {
+		snprintf(framed_msg, sizeof(framed_msg), "[ %s ]", msg);
+		msg = framed_msg;
 	}
 	int msglen = (int)strlen(msg);
 	int col = (ec.screen_cols - msglen) / 2;
@@ -3054,7 +3054,8 @@ static void ui_draw_statusbar(editor_buf_t * eb)
 
 	int len = 0, r_len = 0;
 	if (ec.status_msg[0]) {
-		/* Active prompt or dialog: write raw then clear to EOL with bg color */
+		/* Active prompt or dialog line uses gray background for readability. */
+		buf_append(eb, "\x1b[97;100m", 9);	/* White on gray */
 		buf_append(eb, ec.status_msg, strlen(ec.status_msg));
 		buf_append(eb, "\x1b[K", 3);
 		buf_append(eb, "\x1b[m", 3);
@@ -3144,8 +3145,9 @@ static void ui_draw_statusbar(editor_buf_t * eb)
 		if (max_fname_vis < 0)
 			max_fname_vis = 0;
 
-		buf_append(eb, left, left_vis);
+		buf_append(eb, left, left_vis);	/* Left mode tag stays blue */
 		len = left_vis;
+		buf_append(eb, "\x1b[97;100m", 9);	/* Middle segment: white on gray */
 
 		/* Append filename, tail-truncated with '<' if too long */
 		if (fname_len <= max_fname_vis) {
@@ -3161,17 +3163,16 @@ static void ui_draw_statusbar(editor_buf_t * eb)
 			}
 		}
 
-		/* Append white asterisk if modified, then restore fg+bg */
+		/* Append white asterisk if modified (middle gray segment). */
 		if (ec.modified) {
-			buf_append(eb, "\x1b[97m", 5);
 			buf_append(eb, "*", 1);
 			len++;
-			buf_append(eb, "\x1b[93;44m", 8);
 		}
 	}
 
 	while (len < ec.screen_cols) {
 		if (r_len > 0 && ec.screen_cols - len == r_len) {
+			buf_append(eb, "\x1b[93;44m", 8);	/* Right position block blue */
 			buf_append(eb, r_status, strlen(r_status));
 			break;
 		}
@@ -3431,7 +3432,7 @@ static int ui_dialog_ask(const char *msg, char *const options[])
 			    snprintf(status_msg + off,
 				     sizeof(status_msg) - (size_t) off,
 				     (i ==
-				      choice) ? "\x1b[7m[ %s ]\x1b[27;93;44m" :
+				      choice) ? "\x1b[7m[ %s ]\x1b[27;97;100m" :
 				     "[ %s ]", options[i]);
 			if (i + 1 < n) {
 				if (off < 0 || off >= (int)sizeof(status_msg))
