@@ -3052,11 +3052,12 @@ static int str_visible_scan(const char *s, int max_visible, int *vis_out)
 static int num_digits(int n)
 {
 	int d = 1;
+	unsigned int u = (unsigned int)n;
 	if (n < 0)
-		n = -n;
-	while (n >= 10) {
+		u = (unsigned int)(-(n + 1)) + 1u;
+	while (u >= 10u) {
 		d++;
-		n /= 10;
+		u /= 10u;
 	}
 	return d;
 }
@@ -3173,7 +3174,12 @@ static void ui_draw_statusbar(editor_buf_t * eb)
 		int row_cur = (ec.cursor_y + 1 > NR) ? NR : ec.cursor_y + 1;
 		int row_total = NR;
 		int row_width = num_digits(row_total > 0 ? row_total : 1);
-		int col_width = num_digits(ec.longest_line > 0 ? ec.longest_line : 1);
+		int col_max = ec.longest_line;
+		if (col_size > col_max)
+			col_max = col_size;
+		if (ec.cursor_x + 1 > col_max)
+			col_max = ec.cursor_x + 1;
+		int col_width = num_digits(col_max > 0 ? col_max : 1);
 		snprintf(r_status, sizeof(r_status),
 			 "\x1b[97mL\x1b[93m%0*d/%0*d \x1b[97mC\x1b[93m%0*d/%0*d",
 			 row_width, row_cur, row_width, row_total,
