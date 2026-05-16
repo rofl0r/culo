@@ -521,7 +521,7 @@ struct {
 	tlist *rows;
 	bool modified;
 	char *file_name;
-	char status_msg[512];	/* active prompt/dialog text shown in statusbar (not timed; use notfound_msg/overlays for transient messages) */
+	char status_msg[512];	/* active prompt/dialog text shown in statusbar (not timed; use overlay_msg for transient messages) */
 	char *copied_char_buffer;
 	size_t file_size_bytes;
 	const struct syntax_desc *syntax;
@@ -556,7 +556,7 @@ struct {
 		int orig_row, orig_char;	/* cursor pos when replace phase 2 began; used to stop after one cycle */
 		bool has_wrapped;	/* true once any search_do_from call in this session returned wrapped=true */
 	} search;
-	char notfound_msg[200];	/* transient "not found" overlay; cleared on next keypress */
+	char overlay_msg[200];	/* transient overlay; cleared on next keypress */
 	char browser_base_dir[PATH_MAX];
 } ec;
 
@@ -2836,7 +2836,7 @@ static void set_overlay_msg(const char *fmt, ...)
 {
 	va_list ap;
 	va_start(ap, fmt);
-	vsnprintf(ec.notfound_msg, sizeof(ec.notfound_msg), fmt, ap);
+	vsnprintf(ec.overlay_msg, sizeof(ec.overlay_msg), fmt, ap);
 	va_end(ap);
 }
 
@@ -2974,7 +2974,7 @@ static void buf_destroy(editor_buf_t * eb)
 /* Append the overlay message to an editor_buf_t (called at end of refresh). */
 static void buf_append_overlay(editor_buf_t * eb)
 {
-	const char *msg = ec.notfound_msg;
+	const char *msg = ec.overlay_msg;
 	if (!msg[0]) {
 		if (ec.mode != MODE_SEARCH || ec.status_msg[0])
 			return;
@@ -3054,7 +3054,6 @@ static void ui_draw_statusbar(editor_buf_t * eb)
 			len++;
 		}
 		buf_append(eb, "\x1b[m", 3);
-		buf_append(eb, "\r\n", 2);
 		return;
 	} else if (ec.mode == MODE_SEARCH) {
 		if (ec.search.replace_phase == 1) {
@@ -3162,14 +3161,13 @@ static void ui_draw_statusbar(editor_buf_t * eb)
 		len++;
 	}
 	buf_append(eb, "\x1b[m", 3);
-	buf_append(eb, "\r\n", 2);
 }
 
 static void ui_set_message(const char *msg, ...)
 {
 	va_list args;
 	va_start(args, msg);
-	vsnprintf(ec.notfound_msg, sizeof(ec.notfound_msg), msg, args);
+	vsnprintf(ec.overlay_msg, sizeof(ec.overlay_msg), msg, args);
 	va_end(args);
 }
 
@@ -3920,7 +3918,7 @@ static void list_screen_render(const char *title, int total_lines, int offset,
 			len++;
 		}
 	}
-	buf_append(&eb, "\x1b[m\r\n", 5);
+	buf_append(&eb, "\x1b[m", 3);
 	buf_append_overlay(&eb);
 	write(STDOUT_FILENO, eb.buf, eb.len);
 	buf_destroy(&eb);
@@ -4047,7 +4045,7 @@ static void editor_process_key(void)
 {
 	static int indent_level = 0;
 	/* Clear the transient overlay message from the previous keypress */
-	ec.notfound_msg[0] = '\0';
+	ec.overlay_msg[0] = '\0';
 	if (ec.mode == MODE_SEARCH && ec.search.replace_phase == 2) {
 		replace_confirm_step();
 		editor_refresh();
@@ -4271,7 +4269,7 @@ static void editor_process_key(void)
 						set_overlay_msg
 						    ("[ \"%.*s\" not found ]",
 						     (int)(sizeof
-							   (ec.notfound_msg) -
+							   (ec.overlay_msg) -
 							   20), q);
 					} else {
 						ec.search.replace_phase = 2;
@@ -4368,7 +4366,7 @@ static void editor_process_key(void)
 							    ("[ \"%.*s\" not found ]",
 							     (int)(sizeof
 								   (ec.
-								    notfound_msg)
+								    overlay_msg)
 								   - 20), q);
 						} else {
 							mode_set(MODE_NORMAL);
