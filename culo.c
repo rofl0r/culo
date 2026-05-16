@@ -46,6 +46,10 @@ typedef enum {
 
 #define CTRL_(k) ((k) & (0x1f))
 #define META_(k) (0x800 | (unsigned char)(k))
+#define KEY_FLAG_NAV 0x1000
+#define KEY_FLAG_SHIFT 0x2000
+#define KEY_NAV_(id) (KEY_FLAG_NAV | (id))
+#define KEY_SHIFT_NAV_(id) (KEY_FLAG_SHIFT | KEY_NAV_(id))
 #define TAB_STOP 4
 #define TAB_HEAD_STYLE "\x1b[90m"
 #define UNDO_STACK_CAP 64
@@ -654,12 +658,16 @@ typedef struct {
 /* clang-format off */
 enum editor_key {
 	BACKSPACE = 0x7f,
-	ARROW_LEFT = 0x3e8, ARROW_RIGHT, ARROW_UP, ARROW_DOWN,
-	PAGE_UP, PAGE_DOWN,
-	HOME_KEY, END_KEY, DEL_KEY,
-	SHIFT_ARROW_LEFT, SHIFT_ARROW_RIGHT, SHIFT_ARROW_UP, SHIFT_ARROW_DOWN,
-	SHIFT_PAGE_UP, SHIFT_PAGE_DOWN,
-	SHIFT_HOME_KEY, SHIFT_END_KEY,
+	ARROW_LEFT = KEY_NAV_(1), ARROW_RIGHT = KEY_NAV_(2),
+	ARROW_UP = KEY_NAV_(3), ARROW_DOWN = KEY_NAV_(4),
+	PAGE_UP = KEY_NAV_(5), PAGE_DOWN = KEY_NAV_(6),
+	HOME_KEY = KEY_NAV_(7), END_KEY = KEY_NAV_(8), DEL_KEY = KEY_NAV_(9),
+	SHIFT_ARROW_LEFT = KEY_SHIFT_NAV_(1), SHIFT_ARROW_RIGHT =
+	    KEY_SHIFT_NAV_(2),
+	SHIFT_ARROW_UP = KEY_SHIFT_NAV_(3), SHIFT_ARROW_DOWN = KEY_SHIFT_NAV_(4),
+	SHIFT_PAGE_UP = KEY_SHIFT_NAV_(5), SHIFT_PAGE_DOWN = KEY_SHIFT_NAV_(6),
+	SHIFT_HOME_KEY = KEY_SHIFT_NAV_(7), SHIFT_END_KEY =
+	    KEY_SHIFT_NAV_(8),
 };
 
 typedef enum {
@@ -936,6 +944,8 @@ static int term_read_key(void)
 					char mod, fin;
 					if (read(STDIN_FILENO, &mod, 1) != 1 ||
 					    read(STDIN_FILENO, &fin, 1) != 1)
+						/* Incomplete CSI modifier sequence: treat as literal ESC
+						 * so we don't invent a partial key event from truncated bytes. */
 						return '\x1b';
 					if (mod == '2') {
 						if (fin == '~') {
@@ -3079,54 +3089,22 @@ static int get_line_number_width(void)
 	return width + 2;	/* Add space for padding and separator */
 }
 
+static bool key_is_select_nav(int c)
+{
+	return (c & KEY_FLAG_NAV) != 0;
+}
+
 static bool key_is_shift_select_nav(int c)
 {
-	switch (c) {
-	case SHIFT_ARROW_UP:
-	case SHIFT_ARROW_DOWN:
-	case SHIFT_ARROW_LEFT:
-	case SHIFT_ARROW_RIGHT:
-	case SHIFT_HOME_KEY:
-	case SHIFT_END_KEY:
-	case SHIFT_PAGE_UP:
-	case SHIFT_PAGE_DOWN:
-		return true;
-	default:
-		return false;
-	}
+	return (c & (KEY_FLAG_NAV | KEY_FLAG_SHIFT)) ==
+	    (KEY_FLAG_NAV | KEY_FLAG_SHIFT);
 }
 
 static int key_to_select_nav(int c)
 {
-	switch (c) {
-	case ARROW_UP:
-	case ARROW_DOWN:
-	case ARROW_LEFT:
-	case ARROW_RIGHT:
-	case HOME_KEY:
-	case END_KEY:
-	case PAGE_UP:
-	case PAGE_DOWN:
-		return c;
-	case SHIFT_ARROW_UP:
-		return ARROW_UP;
-	case SHIFT_ARROW_DOWN:
-		return ARROW_DOWN;
-	case SHIFT_ARROW_LEFT:
-		return ARROW_LEFT;
-	case SHIFT_ARROW_RIGHT:
-		return ARROW_RIGHT;
-	case SHIFT_HOME_KEY:
-		return HOME_KEY;
-	case SHIFT_END_KEY:
-		return END_KEY;
-	case SHIFT_PAGE_UP:
-		return PAGE_UP;
-	case SHIFT_PAGE_DOWN:
-		return PAGE_DOWN;
-	default:
+	if (!key_is_select_nav(c))
 		return -1;
-	}
+	return c & ~KEY_FLAG_SHIFT;
 }
 
 static void selection_move_cursor(int key)
@@ -4305,12 +4283,12 @@ static void editor_process_key(void)
 		break;
 
 	case MODE_SELECT:
-		if (ec.mode_state.select.shift_only && !key_is_shift_select_nav(c)) {
-			/* Shift-only selection is transient: any non-Shift+cursor key ends it. */
-			mode_set(MODE_NORMAL);
-			break;
-		}
-		if (key_to_select_nav(c) >= 0) {
+		if (ec.mode_state.select.shift_only) {
+			if (key_is_shift_select_nav(c)) {
+				selection_move_cursor(c);
+				return;
+			}
+		} else if (key_is_select_nav(c)) {
 			selection_move_cursor(c);
 			return;
 		}
@@ -4341,8 +4319,13 @@ static void editor_process_key(void)
 			return;
 		default:
 			/* Exit selection mode for other keys */
+		{
+			bool shift_only = ec.mode_state.select.shift_only;
 			mode_set(MODE_NORMAL);
+			if (shift_only)
+				return;	/* transient Shift-select consumes first non-navigation key */
 			break;
+		}
 		}
 		break;
 

@@ -139,34 +139,96 @@ test_delete_selection() {
     return
 }
 
-# Test 6: Shift+cursor transient selection
-test_shift_cursor_transient_selection() {
+# Test 6: Shift+cursor selection with delete
+test_shift_cursor_delete_selection() {
     if ! command -v expect &> /dev/null; then
-        report_test "Shift+cursor transient selection (skipped - expect not installed)" "PASS"
+        report_test "Shift+cursor delete selection (skipped - expect not installed)" "PASS"
         return
     fi
 
-    local test_file="shift_select_test.txt"
-    create_test_file "$test_file" "Shift select this"
+    local test_file="shift_select_delete_test.txt"
+    local expected_file="shift_select_delete_expected.txt"
+    create_test_file "$test_file" "abcdef"
+    create_test_file "$expected_file" "cdef"
 
     expect -c "
         set timeout 2
         spawn $EDITOR_BIN $test_file
         expect -re {.*}
-        send \"\033\[1;2C\" ;# Shift+Right arrow starts transient selection
-        send \"\033\[1;2C\" ;# Continue extending with Shift+Right
-        send \"\033\[C\"    ;# First non-shift cursor key clears selection
-        send \"\x18\"       ;# Ctrl-X to quit
+        send \"\033\[1;2C\" ;# Shift+Right: select 'a'
+        send \"\033\[1;2C\" ;# Shift+Right: select 'ab'
+        send \"\177\"       ;# Backspace: delete selection
+        send \"\x0F\"       ;# Ctrl-O save
+        send \"\x18\"       ;# Ctrl-X quit
         expect eof
     " > /dev/null 2>&1
 
-    if [ $? -eq 0 ]; then
-        report_test "Shift+cursor transient selection" "PASS"
+    if [ $? -eq 0 ] && [ -f "$test_file" ]; then
+        if command -v md5sum &> /dev/null; then
+            local got_md5 expected_md5
+            got_md5=$(md5sum "$test_file" | awk '{print $1}')
+            expected_md5=$(md5sum "$expected_file" | awk '{print $1}')
+            if [ "$got_md5" = "$expected_md5" ]; then
+                report_test "Shift+cursor delete selection" "PASS"
+            else
+                report_test "Shift+cursor delete selection" "FAIL"
+            fi
+        elif compare_files "$test_file" "$expected_file"; then
+            report_test "Shift+cursor delete selection" "PASS"
+        else
+            report_test "Shift+cursor delete selection" "FAIL"
+        fi
     else
-        report_test "Shift+cursor transient selection" "FAIL"
+        report_test "Shift+cursor delete selection" "FAIL"
     fi
 
-    rm -f "$test_file"
+    rm -f "$test_file" "$expected_file"
+}
+
+# Test 7: Shift+cursor selection with cut
+test_shift_cursor_cut_selection() {
+    if ! command -v expect &> /dev/null; then
+        report_test "Shift+cursor cut selection (skipped - expect not installed)" "PASS"
+        return
+    fi
+
+    local test_file="shift_select_cut_test.txt"
+    local expected_file="shift_select_cut_expected.txt"
+    create_test_file "$test_file" "abcdef"
+    create_test_file "$expected_file" "cdef"
+
+    expect -c "
+        set timeout 2
+        spawn $EDITOR_BIN $test_file
+        expect -re {.*}
+        send \"\033\[1;2C\" ;# Shift+Right: select 'a'
+        send \"\033\[1;2C\" ;# Shift+Right: select 'ab'
+        send \"\x0B\"       ;# Ctrl-K: cut selection
+        send \"\x0F\"       ;# Ctrl-O save
+        send \"\x18\"       ;# Ctrl-X quit
+        expect eof
+    " > /dev/null 2>&1
+
+    if [ $? -eq 0 ] && [ -f "$test_file" ]; then
+        if command -v md5sum &> /dev/null; then
+            local got_md5 expected_md5
+            got_md5=$(md5sum "$test_file" | awk '{print $1}')
+            expected_md5=$(md5sum "$expected_file" | awk '{print $1}')
+            if [ "$got_md5" = "$expected_md5" ]; then
+                report_test "Shift+cursor cut selection" "PASS"
+            else
+                report_test "Shift+cursor cut selection" "FAIL"
+            fi
+        elif compare_files "$test_file" "$expected_file"; then
+            report_test "Shift+cursor cut selection" "PASS"
+        else
+            report_test "Shift+cursor cut selection" "FAIL"
+        fi
+    else
+        report_test "Shift+cursor cut selection" "FAIL"
+    fi
+
+    rm -f "$test_file" "$expected_file"
 }
 
 # Run tests
@@ -175,4 +237,5 @@ test_selection_arrow_keys
 test_selection_home_end
 test_cancel_selection
 test_delete_selection
-test_shift_cursor_transient_selection
+test_shift_cursor_delete_selection
+test_shift_cursor_cut_selection
