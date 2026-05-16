@@ -521,7 +521,7 @@ struct {
 	tlist *rows;
 	bool modified;
 	char *file_name;
-	char status_msg[512];	/* active prompt/dialog text shown in statusbar */
+	char status_msg[512];	/* active prompt/dialog text shown in statusbar (not timed; use notfound_msg/overlays for transient messages) */
 	char *copied_char_buffer;
 	size_t file_size_bytes;
 	const struct syntax_desc *syntax;
