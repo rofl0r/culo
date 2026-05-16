@@ -4475,7 +4475,7 @@ static void editor_process_key(void)
 		if (ec.modified) {
 			int r =
 			    ui_confirm
-			    ("Save modified buffer? (Answering \"No\" will DISCARD changes)");
+			    ("Save modified buffer? (\"No\" will DISCARD changes)");
 			if (r == -1)
 				return;	/* Cancel: stay in editor */
 			if (r == 1)
