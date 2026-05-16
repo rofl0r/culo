@@ -524,6 +524,7 @@ struct {
 	char status_msg[512];	/* active prompt/dialog text shown in statusbar (not timed; use overlay_msg for transient messages) */
 	char *copied_char_buffer;
 	size_t file_size_bytes;
+	int longest_line;	/* longest line length (bytes) seen in current buffer */
 	const struct syntax_desc *syntax;
 	compiled_rule_t *syntax_compiled;
 	size_t syntax_compiled_count;
@@ -1494,6 +1495,8 @@ static void row_update(editor_row_t * row, int row_idx)
 	}
 	row->render[idx] = '\0';
 	row->render_size = idx;
+	if (row->size > ec.longest_line)
+		ec.longest_line = row->size;
 	if (ec.syntax_span_compiled_count > 0) {
 		for (int i = row_idx; i < NR; i++)
 			ROW(i)->hl_valid = false;
@@ -2473,6 +2476,7 @@ static void file_open(const char *file_name)
 	ec.col_offset = 0;
 	ec.render_x = 0;
 	ec.file_size_bytes = 0;
+	ec.longest_line = 0;
 
 	free(ec.file_name);
 	ec.file_name = strdup(file_name);
@@ -2787,7 +2791,7 @@ static bool search_do(const char *query)
 		    search_do_from(query, ec.cursor_y, ec.cursor_x + 1, false,
 				   &wrapped);
 	if (found && wrapped)
-		set_overlay_msg("[ search wrapped ]");
+		set_overlay_msg("search wrapped");
 	return found;
 }
 
@@ -2939,7 +2943,7 @@ static void replace_finish(bool always_show_msg)
 	ec.search.mode &= ~SM_REPLACE;
 	mode_set(MODE_NORMAL);
 	if (always_show_msg || cnt > 0)
-		set_overlay_msg("[ Replaced %d occurrence%s ]", cnt,
+		set_overlay_msg("Replaced %d occurrence%s", cnt,
 				cnt == 1 ? "" : "s");
 }
 
@@ -2975,6 +2979,11 @@ static void buf_destroy(editor_buf_t * eb)
 static void buf_append_overlay(editor_buf_t * eb)
 {
 	const char *msg = ec.overlay_msg;
+	char framed_msg[sizeof(ec.overlay_msg) + 8];
+	if (msg[0]) {
+		snprintf(framed_msg, sizeof(framed_msg), "[ %s ]", msg);
+		msg = framed_msg;
+	}
 	if (!msg[0]) {
 		if (ec.mode != MODE_SEARCH || ec.status_msg[0])
 			return;
@@ -2998,6 +3007,58 @@ static void buf_append_overlay(editor_buf_t * eb)
 	buf_append(eb, posbuf, strlen(posbuf));
 	buf_append(eb, msg, msglen);
 	buf_append(eb, "\x1b[m", 3);
+}
+
+/*
+ * Advance p past a CSI escape sequence (already past the opening ESC).
+ * On entry p must point at the '[' of "ESC [".  Skips parameter bytes
+ * (0x30–0x3F), intermediate bytes (0x20–0x2F) and the final byte (0x40–0x7E).
+ */
+static const char *skip_csi(const char *p)
+{
+	p++;			/* skip '[' */
+	while (*p && (unsigned char)*p < 0x40)
+		p++;
+	if (*p && (unsigned char)*p <= 0x7e)
+		p++;
+	return p;
+}
+
+/*
+ * Scan string s counting visible (non-escape-sequence) characters.
+ * Stops after max_visible visible characters; if max_visible < 0, scans to
+ * the end of the string.  Returns the byte offset reached.  If vis_out is
+ * non-NULL it receives the visible character count seen.
+ */
+static int str_visible_scan(const char *s, int max_visible, int *vis_out)
+{
+	const char *p = s;
+	int vis = 0;
+	while (*p) {
+		if ((unsigned char)*p == '\x1b' && *(p + 1) == '[') {
+			p = skip_csi(p + 1);
+		} else {
+			if (max_visible >= 0 && vis >= max_visible)
+				break;
+			vis++;
+			p++;
+		}
+	}
+	if (vis_out)
+		*vis_out = vis;
+	return (int)(p - s);
+}
+
+static int num_digits(int n)
+{
+	int d = 1;
+	if (n < 0)
+		n = -n;
+	while (n >= 10) {
+		d++;
+		n /= 10;
+	}
+	return d;
 }
 
 /* Calculate line number display width */
@@ -3039,16 +3100,16 @@ static void editor_scroll(void)
 
 static void ui_draw_statusbar(editor_buf_t * eb)
 {
-	buf_append(eb, "\x1b[100m", 6);	/* Dark gray */
+	buf_append(eb, "\x1b[93;44m", 8);	/* Yellow on blue */
 	char status[80], r_status[80];
 
-	int len = 0, r_len = 0;
+	int len = 0, r_vis = 0, r_bytes = 0;
 	if (ec.status_msg[0]) {
 		/* Active prompt or dialog: show it instead of normal statusbar */
-		len = (int)strlen(ec.status_msg);
-		if (len > ec.screen_cols)
-			len = ec.screen_cols;
-		buf_append(eb, ec.status_msg, len);
+		int visible = 0;
+		int bytes = str_visible_scan(ec.status_msg, ec.screen_cols, &visible);
+		buf_append(eb, ec.status_msg, bytes);
+		len = visible;
 		while (len < ec.screen_cols) {
 			buf_append(eb, " ", 1);
 			len++;
@@ -3090,14 +3151,16 @@ static void ui_draw_statusbar(editor_buf_t * eb)
 			    snprintf(status, sizeof(status), " [%s]%s %s",
 				     mode_label, flags, q);
 		}
-		r_len = 0;
+		r_vis = 0;
+		r_bytes = 0;
 		r_status[0] = '\0';
 		if (len > ec.screen_cols)
 			len = ec.screen_cols;
 		buf_append(eb, status, len);
 	} else {
 		/* Build " [MODE] " left prefix */
-		const char *mode_name = mode_get_name(ec.mode);
+		const char *mode_name =
+		    (ec.mode == MODE_NORMAL) ? "EDIT" : mode_get_name(ec.mode);
 		char left[32];
 		int left_vis =
 		    snprintf(left, sizeof(left), " [%s] ", mode_name);
@@ -3107,11 +3170,16 @@ static void ui_draw_statusbar(editor_buf_t * eb)
 		/* Build right side: col/row info */
 		int col_size =
 		    (ec.cursor_y <= NR - 1) ? ROW(ec.cursor_y)->size : 0;
-		r_len =
-		    snprintf(r_status, sizeof(r_status),
-			     "L %d/%d C %d/%d",
-			     (ec.cursor_y + 1 > NR) ? NR : ec.cursor_y + 1,
-			     NR, ec.cursor_x + 1, col_size);
+		int row_cur = (ec.cursor_y + 1 > NR) ? NR : ec.cursor_y + 1;
+		int row_total = NR;
+		int row_width = num_digits(row_total > 0 ? row_total : 1);
+		int col_width = num_digits(ec.longest_line > 0 ? ec.longest_line : 1);
+		snprintf(r_status, sizeof(r_status),
+			 "\x1b[97mL\x1b[93m%0*d/%0*d \x1b[97mC\x1b[93m%0*d/%0*d",
+			 row_width, row_cur, row_width, row_total,
+			 col_width, ec.cursor_x + 1, col_width, col_size);
+		r_bytes = (int)strlen(r_status);
+		r_vis = str_visible_scan(r_status, -1, NULL);
 
 		const char *fname =
 		    ec.file_name ? ec.file_name : "< New >";
@@ -3122,7 +3190,7 @@ static void ui_draw_statusbar(editor_buf_t * eb)
 		 * marker and at least 1 space before the col/row display */
 		int max_fname_vis =
 		    ec.screen_cols - left_vis - mod_vis -
-		    (r_len > 0 ? 1 + r_len : 0);
+		    (r_vis > 0 ? 1 + r_vis : 0);
 		if (max_fname_vis < 0)
 			max_fname_vis = 0;
 
@@ -3143,18 +3211,18 @@ static void ui_draw_statusbar(editor_buf_t * eb)
 			}
 		}
 
-		/* Append red asterisk if modified, then restore both fg+bg */
+		/* Append white asterisk if modified, then restore fg+bg */
 		if (ec.modified) {
-			buf_append(eb, "\x1b[31m", 5);
+			buf_append(eb, "\x1b[97m", 5);
 			buf_append(eb, "*", 1);
 			len++;
-			buf_append(eb, "\x1b[0;100m", 8);
+			buf_append(eb, "\x1b[93;44m", 8);
 		}
 	}
 
 	while (len < ec.screen_cols) {
-		if (r_len > 0 && ec.screen_cols - len == r_len) {
-			buf_append(eb, r_status, r_len);
+		if (r_vis > 0 && ec.screen_cols - len == r_vis) {
+			buf_append(eb, r_status, r_bytes);
 			break;
 		}
 		buf_append(eb, " ", 1);
@@ -3413,7 +3481,7 @@ static int ui_dialog_ask(const char *msg, char *const options[])
 			    snprintf(status_msg + off,
 				     sizeof(status_msg) - (size_t) off,
 				     (i ==
-				      choice) ? "\x1b[7m[ %s ]\x1b[m" :
+				      choice) ? "\x1b[7m[ %s ]\x1b[27m" :
 				     "[ %s ]", options[i]);
 			if (i + 1 < n) {
 				if (off < 0 || off >= (int)sizeof(status_msg))
@@ -3699,7 +3767,7 @@ static void editor_goto_matching_bracket(void)
 	}
 
  not_found:
-	set_overlay_msg("[ No matching bracket ]");
+	set_overlay_msg("No matching bracket");
 }
 
 /* File browser implementation */
@@ -3897,7 +3965,7 @@ static void list_screen_render(const char *title, int total_lines, int offset,
 	}
 
 	/* Status bar */
-	buf_append(&eb, "\r\n\x1b[100m", 8);
+	buf_append(&eb, "\r\n\x1b[93;44m", 10);
 	int len = (int)strlen(status_left);
 	if (len > ec.screen_cols)
 		len = ec.screen_cols;
@@ -4267,7 +4335,7 @@ static void editor_process_key(void)
 						    query : "";
 						mode_set(MODE_NORMAL);
 						set_overlay_msg
-						    ("[ \"%.*s\" not found ]",
+						    ("\"%.*s\" not found",
 						     (int)(sizeof
 							   (ec.overlay_msg) -
 							   20), q);
@@ -4363,7 +4431,7 @@ static void editor_process_key(void)
 							    ec.search.query;
 							mode_set(MODE_NORMAL);
 							set_overlay_msg
-							    ("[ \"%.*s\" not found ]",
+							    ("\"%.*s\" not found",
 							     (int)(sizeof
 								   (ec.
 								    overlay_msg)
