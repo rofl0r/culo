@@ -3065,9 +3065,11 @@ static void ui_draw_statusbar(editor_buf_t * eb)
 	int len = 0, r_len = 0;
 	if (ec.status_msg[0]) {
 		/* Active prompt or dialog line uses gray background for readability. */
+		int mlen = strlen(ec.status_msg);
 		buf_append(eb, "\x1b[97;100m", 9);	/* White on gray */
-		buf_append(eb, ec.status_msg, strlen(ec.status_msg));
-		buf_append(eb, "\x1b[K", 3);
+		buf_append(eb, ec.status_msg, mlen);
+		if (mlen < ec.screen_cols)
+			buf_append(eb, "\x1b[K", 3);
 		buf_append(eb, "\x1b[m", 3);
 		return;
 	} else if (ec.mode == MODE_SEARCH) {
