@@ -4317,6 +4317,9 @@ static void editor_process_key(void)
 			return;
 		case DEL_KEY:
 		case BACKSPACE:
+		/* CTRL-h is not only the nano kb for BACKSPACE, it also evaluates to
+		   \b (8) which is the actual char sent when using backspace */
+		case CTRL_('h'):
 			selection_delete();
 			return;
 		default:
