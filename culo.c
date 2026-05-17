@@ -875,6 +875,7 @@ static const char *const help_lines[] = {
 static void term_clear(void)
 {
 	write(STDOUT_FILENO, "\x1b[2J", 4);
+	write(STDOUT_FILENO, "\x1b[1;1H", 6);
 }
 
 static void panic(const char *s)
