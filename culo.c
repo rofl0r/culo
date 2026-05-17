@@ -3195,12 +3195,22 @@ static void editor_scroll(void)
 
 static int clamp_statusbar_col(int col)
 {
+	/* Keep statusbar cursor addressable even during transient size edge cases. */
 	int max_col = ec.screen_cols > 0 ? ec.screen_cols : 1;
 	if (col < 1)
 		return 1;
 	if (col > max_col)
 		return max_col;
 	return col;
+}
+
+static int normalize_prefix_len(int n, size_t cap)
+{
+	if (n < 0)
+		return 0;
+	if (n >= (int)cap)
+		return (int)cap - 1;
+	return n;
 }
 
 static void ui_draw_statusbar(editor_buf_t * eb)
@@ -3230,10 +3240,7 @@ static void ui_draw_statusbar(editor_buf_t * eb)
 			int prefix_len =
 			    snprintf(status, sizeof(status),
 				     " Replace with: ");
-			if (prefix_len < 0)
-				prefix_len = 0;
-			if (prefix_len >= (int)sizeof(status))
-				prefix_len = (int)sizeof(status) - 1;
+			prefix_len = normalize_prefix_len(prefix_len, sizeof(status));
 			if (prefix_len < (int)sizeof(status))
 				len =
 				    prefix_len +
@@ -3269,10 +3276,7 @@ static void ui_draw_statusbar(editor_buf_t * eb)
 			int prefix_len =
 			    snprintf(status, sizeof(status), " [%s]%s ",
 				     mode_label, flags);
-			if (prefix_len < 0)
-				prefix_len = 0;
-			if (prefix_len >= (int)sizeof(status))
-				prefix_len = (int)sizeof(status) - 1;
+			prefix_len = normalize_prefix_len(prefix_len, sizeof(status));
 			if (prefix_len < (int)sizeof(status))
 				len =
 				    prefix_len +
@@ -3288,6 +3292,8 @@ static void ui_draw_statusbar(editor_buf_t * eb)
 		{
 			int avail =
 			    ec.screen_cols - (ec.search.prompt_query_start_col - 1);
+			if (avail < 0)
+				avail = 0;
 			int qlen = 0;
 			if (ec.search.replace_phase == 1)
 				qlen =
