@@ -556,8 +556,7 @@ struct {
 		size_t query_len;
 		size_t query_cap;
 		bool prefill_from_start;	/* true: next printable key replaces prefilled query unless End was pressed */
-		int prompt_query_start_col;	/* 1-based visible statusbar column where query text begins */
-		int prompt_query_end_col;	/* 1-based visible statusbar column for appending at query end */
+		int prompt_query_start_col;	/* 1-based statusbar query start column (0 means inactive) */
 		int mode;	/* search_mode_t bitmask */
 		char *replace_query;	/* replacement text */
 		size_t replace_len;
@@ -581,8 +580,6 @@ static void init_ec(void)
 	/* orig_row=-1 means "no active replace cycle"; orig_char is only
 	 * meaningful when orig_row >= 0, so 0 is a fine default. */
 	ec.search.orig_row = -1;
-	ec.search.prompt_query_start_col = -1;
-	ec.search.prompt_query_end_col = -1;
 }
 
 typedef enum {
@@ -774,8 +771,6 @@ static void mode_set(editor_mode_t new_mode)
 			ec.search.replace_phase = 0;
 			ec.search.replace_count = 0;
 			ec.search.prefill_from_start = (ec.search.query_len > 0);
-			ec.search.prompt_query_start_col = -1;
-			ec.search.prompt_query_end_col = -1;
 			ec.mode_state.search.highlight_line = -1;
 			ec.mode_state.search.saved_highlight = NULL;
 			break;
@@ -3193,24 +3188,17 @@ static void editor_scroll(void)
 		ec.col_offset = ec.render_x - available_cols + 1;
 }
 
-static int clamp_statusbar_col(int col)
+static int statusbar_build_query(char *dst, size_t cap, const char *prefix,
+				 const char *query, int *query_start_col)
 {
-	/* Keep statusbar cursor addressable even during transient size edge cases. */
-	int max_col = ec.screen_cols > 0 ? ec.screen_cols : 1;
-	if (col < 1)
-		return 1;
-	if (col > max_col)
-		return max_col;
-	return col;
-}
-
-static int normalize_prefix_len(int n, size_t cap)
-{
-	if (n < 0)
-		return 0;
-	if (n >= (int)cap)
-		return (int)cap - 1;
-	return n;
+	int off = snprintf(dst, cap, "%s", prefix ? prefix : "");
+	if (off < 0)
+		off = 0;
+	if (off >= (int)cap)
+		off = (int)cap - 1;
+	*query_start_col = off + 1;
+	off += snprintf(dst + off, cap - (size_t)off, "%s", query ? query : "");
+	return off;
 }
 
 static void ui_draw_statusbar(editor_buf_t * eb)
@@ -3220,8 +3208,7 @@ static void ui_draw_statusbar(editor_buf_t * eb)
 	r_status[0] = '\0';
 
 	int len = 0, r_len = 0;
-	ec.search.prompt_query_start_col = -1;
-	ec.search.prompt_query_end_col = -1;
+	ec.search.prompt_query_start_col = 0;
 	if (ec.status_msg[0]) {
 		/* Active prompt or dialog line uses gray background for readability. */
 		int mlen = strlen(ec.status_msg);
@@ -3232,28 +3219,14 @@ static void ui_draw_statusbar(editor_buf_t * eb)
 		buf_append(eb, "\x1b[m", 3);
 		return;
 	} else if (ec.mode == MODE_SEARCH) {
+		char prefix[80];
+		const char *qtxt = "";
 		if (ec.search.replace_phase == 1) {
 			/* Phase 1: entering replacement text */
-			const char *rq =
-			    ec.search.replace_query ? ec.search.
-			    replace_query : "";
-			int prefix_len =
-			    snprintf(status, sizeof(status),
-				     " Replace with: ");
-			prefix_len = normalize_prefix_len(prefix_len, sizeof(status));
-			if (prefix_len < (int)sizeof(status))
-				len =
-				    prefix_len +
-				    snprintf(status + prefix_len,
-					     sizeof(status) - (size_t) prefix_len,
-					     "%s", rq);
-			else
-				len = prefix_len;
-			ec.search.prompt_query_start_col =
-			    clamp_statusbar_col(prefix_len + 1);
+			snprintf(prefix, sizeof(prefix), " Replace with: ");
+			qtxt = ec.search.replace_query ? ec.search.replace_query : "";
 		} else {
 			/* Phase 0 and 2: show [SEARCH] / [REPLACE] with active flags and query */
-			const char *q = ec.search.query ? ec.search.query : "";
 			char flags[60];
 			int flen = 0;
 			const char *mode_label =
@@ -3273,42 +3246,15 @@ static void ui_draw_statusbar(editor_buf_t * eb)
 					     " [Regex]");
 			if (flen == 0)
 				flags[0] = '\0';
-			int prefix_len =
-			    snprintf(status, sizeof(status), " [%s]%s ",
-				     mode_label, flags);
-			prefix_len = normalize_prefix_len(prefix_len, sizeof(status));
-			if (prefix_len < (int)sizeof(status))
-				len =
-				    prefix_len +
-				    snprintf(status + prefix_len,
-					     sizeof(status) - (size_t) prefix_len,
-					     "%s", q);
-			else
-				len = prefix_len;
-			ec.search.prompt_query_start_col =
-			    clamp_statusbar_col(prefix_len + 1);
+			snprintf(prefix, sizeof(prefix), " [%s]%s ", mode_label,
+				 flags);
+			qtxt = ec.search.query ? ec.search.query : "";
 		}
+		len = statusbar_build_query(status, sizeof(status), prefix, qtxt,
+					    &ec.search.prompt_query_start_col);
 		r_len = 0;
-		{
-			int avail =
-			    ec.screen_cols - (ec.search.prompt_query_start_col - 1);
-			if (avail < 0)
-				avail = 0;
-			int qlen = 0;
-			if (ec.search.replace_phase == 1)
-				qlen =
-				    ec.search.replace_query ? (int)ec.search.replace_len : 0;
-			else
-				qlen = ec.search.query ? (int)ec.search.query_len : 0;
-			if (qlen > avail)
-				qlen = avail;
-			ec.search.prompt_query_end_col =
-			    ec.search.prompt_query_start_col + qlen;
-			ec.search.prompt_query_start_col =
-			    clamp_statusbar_col(ec.search.prompt_query_start_col);
-			ec.search.prompt_query_end_col =
-			    clamp_statusbar_col(ec.search.prompt_query_end_col);
-		}
+		if (ec.search.prompt_query_start_col > ec.screen_cols)
+			ec.search.prompt_query_start_col = ec.screen_cols;
 		if (len > ec.screen_cols)
 			len = ec.screen_cols;
 		buf_append(eb, status, len);
@@ -3559,22 +3505,6 @@ static void ui_draw_rows(editor_buf_t * eb)
 	}
 }
 
-static void editor_get_terminal_cursor_pos(int *row, int *col)
-{
-	if (ec.mode == MODE_SEARCH && ec.search.replace_phase != 2 &&
-	    ec.search.prompt_query_start_col > 0) {
-		*row = ec.screen_rows + 1;
-		*col =
-		    ec.search.prefill_from_start ? ec.search.
-		    prompt_query_start_col : ec.search.prompt_query_end_col;
-		*col = clamp_statusbar_col(*col);
-		return;
-	}
-
-	*row = (ec.cursor_y - ec.row_offset) + 1;
-	*col = (ec.render_x - ec.col_offset) + 1 + get_line_number_width();
-}
-
 static void editor_refresh(void)
 {
 	editor_scroll();
@@ -3585,9 +3515,22 @@ static void editor_refresh(void)
 	ui_draw_statusbar(&eb);
 	buf_append_overlay(&eb);	/* transient notfound/replaced overlay */
 
-	/* Position terminal cursor either in text area or search status prompt. */
-	int row, col;
-	editor_get_terminal_cursor_pos(&row, &col);
+	/* Position terminal cursor in text area, or in search prompt while editing query. */
+	int row = (ec.cursor_y - ec.row_offset) + 1;
+	int col = (ec.render_x - ec.col_offset) + 1 + get_line_number_width();
+	if (ec.mode == MODE_SEARCH && ec.search.replace_phase != 2 &&
+	    ec.search.prompt_query_start_col > 0) {
+		size_t qlen = ec.search.replace_phase == 1 ?
+		    ec.search.replace_len : ec.search.query_len;
+		int end_col = ec.search.prompt_query_start_col + (int)qlen;
+		if (end_col > ec.screen_cols)
+			end_col = ec.screen_cols;
+		col = ec.search.prefill_from_start ? ec.search.
+		    prompt_query_start_col : end_col;
+		if (col < 1)
+			col = 1;
+		row = ec.screen_rows + 1;
+	}
 	char buf[32];
 	snprintf(buf, sizeof(buf), "\x1b[%d;%dH", row, col);
 	buf_append(&eb, buf, strlen(buf));
@@ -3608,9 +3551,22 @@ static void editor_refresh_full(void)
 	ui_draw_statusbar(&eb);
 	buf_append_overlay(&eb);	/* transient notfound/replaced overlay */
 
-	/* Position terminal cursor either in text area or search status prompt. */
-	int row, col;
-	editor_get_terminal_cursor_pos(&row, &col);
+	/* Position terminal cursor in text area, or in search prompt while editing query. */
+	int row = (ec.cursor_y - ec.row_offset) + 1;
+	int col = (ec.render_x - ec.col_offset) + 1 + get_line_number_width();
+	if (ec.mode == MODE_SEARCH && ec.search.replace_phase != 2 &&
+	    ec.search.prompt_query_start_col > 0) {
+		size_t qlen = ec.search.replace_phase == 1 ?
+		    ec.search.replace_len : ec.search.query_len;
+		int end_col = ec.search.prompt_query_start_col + (int)qlen;
+		if (end_col > ec.screen_cols)
+			end_col = ec.screen_cols;
+		col = ec.search.prefill_from_start ? ec.search.
+		    prompt_query_start_col : end_col;
+		if (col < 1)
+			col = 1;
+		row = ec.screen_rows + 1;
+	}
 	char buf[32];
 	snprintf(buf, sizeof(buf), "\x1b[%d;%dH", row, col);
 	buf_append(&eb, buf, strlen(buf));
