@@ -3512,6 +3512,26 @@ static void ui_draw_rows(editor_buf_t * eb)
 	}
 }
 
+static void editor_calc_cursor_pos(int *row, int *col)
+{
+	*row = (ec.cursor_y - ec.row_offset) + 1;
+	*col = (ec.render_x - ec.col_offset) + 1 + get_line_number_width();
+
+	if (ec.mode == MODE_SEARCH && ec.search.replace_phase != 2 &&
+	    ec.search.prompt_query_start_col > 0) {
+		size_t qlen = ec.search.replace_phase == 1 ?
+		    ec.search.replace_len : ec.search.query_len;
+		int qadd = qlen > (size_t)INT_MAX ? INT_MAX : (int)qlen;
+		int end_col = ec.search.prompt_query_start_col > INT_MAX - qadd ?
+		    INT_MAX : ec.search.prompt_query_start_col + qadd;
+		end_col = clamp(end_col, 1, ec.screen_cols);
+		*col = ec.search.prefill_from_start ?
+		    ec.search.prompt_query_start_col : end_col;
+		*col = clamp(*col, 1, ec.screen_cols);
+		*row = ec.screen_rows + 1;
+	}
+}
+
 static void editor_refresh(void)
 {
 	editor_scroll();
@@ -3522,20 +3542,9 @@ static void editor_refresh(void)
 	ui_draw_statusbar(&eb);
 	buf_append_overlay(&eb);	/* transient notfound/replaced overlay */
 
-	/* Position terminal cursor in text area, or in search prompt while editing query. */
-	int row = (ec.cursor_y - ec.row_offset) + 1;
-	int col = (ec.render_x - ec.col_offset) + 1 + get_line_number_width();
-	if (ec.mode == MODE_SEARCH && ec.search.replace_phase != 2 &&
-	    ec.search.prompt_query_start_col > 0) {
-		size_t qlen = ec.search.replace_phase == 1 ?
-		    ec.search.replace_len : ec.search.query_len;
-		int end_col = clamp(ec.search.prompt_query_start_col + (int)qlen,
-				    1, ec.screen_cols);
-		col = ec.search.prefill_from_start ?
-		    ec.search.prompt_query_start_col : end_col;
-		col = clamp(col, 1, ec.screen_cols);
-		row = ec.screen_rows + 1;
-	}
+	/* Position terminal cursor in text area, or in status prompt while active. */
+	int row, col;
+	editor_calc_cursor_pos(&row, &col);
 	char buf[32];
 	snprintf(buf, sizeof(buf), "\x1b[%d;%dH", row, col);
 	buf_append(&eb, buf, strlen(buf));
@@ -3556,20 +3565,9 @@ static void editor_refresh_full(void)
 	ui_draw_statusbar(&eb);
 	buf_append_overlay(&eb);	/* transient notfound/replaced overlay */
 
-	/* Position terminal cursor in text area, or in search prompt while editing query. */
-	int row = (ec.cursor_y - ec.row_offset) + 1;
-	int col = (ec.render_x - ec.col_offset) + 1 + get_line_number_width();
-	if (ec.mode == MODE_SEARCH && ec.search.replace_phase != 2 &&
-	    ec.search.prompt_query_start_col > 0) {
-		size_t qlen = ec.search.replace_phase == 1 ?
-		    ec.search.replace_len : ec.search.query_len;
-		int end_col = clamp(ec.search.prompt_query_start_col + (int)qlen,
-				    1, ec.screen_cols);
-		col = ec.search.prefill_from_start ?
-		    ec.search.prompt_query_start_col : end_col;
-		col = clamp(col, 1, ec.screen_cols);
-		row = ec.screen_rows + 1;
-	}
+	/* Position terminal cursor in text area, or in status prompt while active. */
+	int row, col;
+	editor_calc_cursor_pos(&row, &col);
 	char buf[32];
 	snprintf(buf, sizeof(buf), "\x1b[%d;%dH", row, col);
 	buf_append(&eb, buf, strlen(buf));
