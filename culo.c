@@ -3195,16 +3195,12 @@ static void editor_scroll(void)
 
 static int clamp_statusbar_col(int col)
 {
+	int max_col = ec.screen_cols > 0 ? ec.screen_cols : 1;
 	if (col < 1)
 		return 1;
-	if (col > ec.screen_cols)
-		return ec.screen_cols;
+	if (col > max_col)
+		return max_col;
 	return col;
-}
-
-static int nonnegative_int(int n)
-{
-	return n < 0 ? 0 : n;
 }
 
 static void ui_draw_statusbar(editor_buf_t * eb)
@@ -3234,7 +3230,6 @@ static void ui_draw_statusbar(editor_buf_t * eb)
 			int prefix_len =
 			    snprintf(status, sizeof(status),
 				     " Replace with: ");
-			prefix_len = nonnegative_int(prefix_len);
 			if (prefix_len < (int)sizeof(status))
 				len =
 				    prefix_len +
@@ -3243,7 +3238,8 @@ static void ui_draw_statusbar(editor_buf_t * eb)
 					     "%s", rq);
 			else
 				len = prefix_len;
-			ec.search.prompt_query_start_col = prefix_len + 1;
+			ec.search.prompt_query_start_col =
+			    clamp_statusbar_col(prefix_len + 1);
 		} else {
 			/* Phase 0 and 2: show [SEARCH] / [REPLACE] with active flags and query */
 			const char *q = ec.search.query ? ec.search.query : "";
@@ -3269,7 +3265,6 @@ static void ui_draw_statusbar(editor_buf_t * eb)
 			int prefix_len =
 			    snprintf(status, sizeof(status), " [%s]%s ",
 				     mode_label, flags);
-			prefix_len = nonnegative_int(prefix_len);
 			if (prefix_len < (int)sizeof(status))
 				len =
 				    prefix_len +
@@ -3278,7 +3273,8 @@ static void ui_draw_statusbar(editor_buf_t * eb)
 					     "%s", q);
 			else
 				len = prefix_len;
-			ec.search.prompt_query_start_col = prefix_len + 1;
+			ec.search.prompt_query_start_col =
+			    clamp_statusbar_col(prefix_len + 1);
 		}
 		r_len = 0;
 		{
@@ -3290,8 +3286,6 @@ static void ui_draw_statusbar(editor_buf_t * eb)
 				    ec.search.replace_query ? (int)ec.search.replace_len : 0;
 			else
 				qlen = ec.search.query ? (int)ec.search.query_len : 0;
-			if (avail < 0)
-				avail = 0;
 			if (qlen > avail)
 				qlen = avail;
 			ec.search.prompt_query_end_col =
