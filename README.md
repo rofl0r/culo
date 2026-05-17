@@ -13,6 +13,10 @@ navigating in and/or editing them.
 The same holds true for huge javascript or json files that are
 compressed into a single line.
 
+## Screenshot
+
+<img width="1299" height="772" alt="culo" src="https://github.com/user-attachments/assets/63311288-258f-431a-b15f-b6e8b7fa88bd" />
+
 ## Usage
 
 Command line: (`filename` is optional)
