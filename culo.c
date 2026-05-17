@@ -2513,6 +2513,12 @@ static const line_ending_info_t line_ending_info[] = {
 	{ "\r\n", 2 },
 };
 
+static bool line_has_trailing_eol_char(const char *line, ssize_t line_len)
+{
+	return line_len > 0 &&
+	    (line[line_len - 1] == '\n' || line[line_len - 1] == '\r');
+}
+
 static line_ending_t line_ending_detect(const char *line, ssize_t line_len)
 {
 	if (line_len <= 0)
@@ -2520,9 +2526,11 @@ static line_ending_t line_ending_detect(const char *line, ssize_t line_len)
 	if (line_len >= 2 && line[line_len - 2] == '\r' &&
 	    line[line_len - 1] == '\n')
 		return LINE_ENDING_CRLF;
-	if (line[line_len - 1] == '\n')
+	if (line_has_trailing_eol_char(line, line_len) &&
+	    line[line_len - 1] == '\n')
 		return LINE_ENDING_LF;
-	if (line[line_len - 1] == '\r')
+	if (line_has_trailing_eol_char(line, line_len) &&
+	    line[line_len - 1] == '\r')
 		return LINE_ENDING_CR;
 	return LINE_ENDING_UNKNOWN;
 }
@@ -2604,8 +2612,7 @@ static void file_open(const char *file_name)
 		if (line_len >= 2 && line[line_len - 2] == '\r' &&
 		    line[line_len - 1] == '\n')
 			line_len -= 2;
-		else if (line_len > 0 &&
-			 (line[line_len - 1] == '\n' || line[line_len - 1] == '\r'))
+		else if (line_has_trailing_eol_char(line, line_len))
 			line_len--;
 		row_insert(NR, line, line_len);
 		if (ec.syntax
@@ -2669,14 +2676,12 @@ static void file_save(void)
 					       (int)total_written);
 			return;
 		}
-		if (write_errno)
-			errno = write_errno;
-		else if (close_rc != 0) {
-			if (!errno)
-				errno = EIO;
-		} else {
-			errno = EIO;
-		}
+		int saved_errno = write_errno;
+		if (!saved_errno && close_rc != 0)
+			saved_errno = errno;
+		if (!saved_errno)
+			saved_errno = EIO;
+		errno = saved_errno;
 	}
 	ui_set_message("Error: %s", strerror(errno));
 }
