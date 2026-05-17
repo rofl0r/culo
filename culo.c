@@ -57,6 +57,7 @@ typedef enum {
 
 static inline int clamp(int value, int min, int max)
 {
+	/* Treat inverted bounds as a degenerate range at `min`. */
 	if (max < min)
 		max = min;
 	if (value < min)
@@ -3530,8 +3531,8 @@ static void editor_refresh(void)
 		    ec.search.replace_len : ec.search.query_len;
 		int end_col = clamp(ec.search.prompt_query_start_col + (int)qlen,
 				    1, ec.screen_cols);
-		col = ec.search.prefill_from_start ? ec.search.
-		    prompt_query_start_col : end_col;
+		col = ec.search.prefill_from_start ?
+		    ec.search.prompt_query_start_col : end_col;
 		col = clamp(col, 1, ec.screen_cols);
 		row = ec.screen_rows + 1;
 	}
@@ -3564,8 +3565,8 @@ static void editor_refresh_full(void)
 		    ec.search.replace_len : ec.search.query_len;
 		int end_col = clamp(ec.search.prompt_query_start_col + (int)qlen,
 				    1, ec.screen_cols);
-		col = ec.search.prefill_from_start ? ec.search.
-		    prompt_query_start_col : end_col;
+		col = ec.search.prefill_from_start ?
+		    ec.search.prompt_query_start_col : end_col;
 		col = clamp(col, 1, ec.screen_cols);
 		row = ec.screen_rows + 1;
 	}
