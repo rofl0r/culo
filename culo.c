@@ -2506,7 +2506,7 @@ static const size_t line_ending_lens[] = { 0, 1, 1, 2 };
 
 static line_ending_t line_ending_detect(const char *line, ssize_t line_len)
 {
-	if (!line || line_len <= 0)
+	if (line_len <= 0)
 		return LINE_ENDING_UNKNOWN;
 	if (line_len >= 2 && line[line_len - 2] == '\r' &&
 	    line[line_len - 1] == '\n')
@@ -2579,6 +2579,7 @@ static void file_open(const char *file_name)
 		ec.file_size_bytes += (size_t) line_len;
 		if (ec.line_ending == LINE_ENDING_UNKNOWN)
 			ec.line_ending = line_ending_detect(line, line_len);
+		/* Strip any trailing CR/LF combination from getline() output. */
 		while (line_len > 0 &&
 		       (line[line_len - 1] == '\n' || line[line_len - 1] == '\r'))
 			line_len--;
@@ -2652,6 +2653,7 @@ static void file_save(void)
 		if (!ok) {
 			int saved_errno = errno;
 			fclose(file);
+			/* fwrite/fclose can fail without a useful errno in rare cases. */
 			errno = saved_errno ? saved_errno : EIO;
 		}
 	}
