@@ -595,7 +595,6 @@ static void init_ec(void)
 	memset(&ec, 0, sizeof(ec));
 	ec.mode = MODE_NORMAL;
 	ec.prev_mode = MODE_NORMAL;
-	ec.show_whitespace = true;
 	snprintf(ec.browser_base_dir, sizeof(ec.browser_base_dir), ".");
 	/* orig_row=-1 means "no active replace cycle"; orig_char is only
 	 * meaningful when orig_row >= 0, so 0 is a fine default. */
