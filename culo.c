@@ -57,7 +57,7 @@ typedef enum {
 
 static inline int clamp(int value, int min, int max)
 {
-	/* Treat inverted bounds as a degenerate range at `min`. */
+	/* Some callers pass runtime-derived maxima that can go negative. */
 	if (max < min)
 		max = min;
 	if (value < min)
@@ -3202,12 +3202,18 @@ static int statusbar_build_query(char *dst, size_t cap, const char *prefix,
 				 const char *query, int *query_start_col)
 {
 	int off = snprintf(dst, cap, "%s", prefix ? prefix : "");
-	off = clamp(off, 0, (int)cap - 1);
+	if (off < 0)
+		off = 0;
+	if (off >= (int)cap)
+		off = (int)cap - 1;
 	*query_start_col = off + 1;
 	{
 		int qlen =
 		    snprintf(dst + off, cap - (size_t)off, "%s", query ? query : "");
-		qlen = clamp(qlen, 0, (int)cap - 1 - off);
+		if (qlen < 0)
+			qlen = 0;
+		if (qlen > (int)cap - 1 - off)
+			qlen = (int)cap - 1 - off;
 		off += qlen;
 	}
 	return off;
@@ -3514,7 +3520,7 @@ static void ui_draw_rows(editor_buf_t * eb)
 	}
 }
 
-static void editor_calc_cursor_pos(int *row, int *col)
+static void editor_get_cursor_pos(int *row, int *col)
 {
 	*row = (ec.cursor_y - ec.row_offset) + 1;
 	*col = (ec.render_x - ec.col_offset) + 1 + get_line_number_width();
@@ -3525,8 +3531,10 @@ static void editor_calc_cursor_pos(int *row, int *col)
 		    ec.search.replace_len : ec.search.query_len;
 		int max_qadd = ec.screen_cols - ec.search.prompt_query_start_col;
 		max_qadd = clamp(max_qadd, 0, ec.screen_cols);
-		int qadd = qlen > (size_t)max_qadd ? max_qadd : (int)qlen;
-		int end_col = ec.search.prompt_query_start_col + qadd;
+		int visible_query_len =
+		    qlen > (size_t)max_qadd ? max_qadd : (int)qlen;
+		int end_col =
+		    ec.search.prompt_query_start_col + visible_query_len;
 		*col = ec.search.prefill_from_start ?
 		    ec.search.prompt_query_start_col : end_col;
 		*col = clamp(*col, 1, ec.screen_cols);
@@ -3546,7 +3554,7 @@ static void editor_refresh(void)
 
 	/* Position terminal cursor in text area, or in status prompt while active. */
 	int row, col;
-	editor_calc_cursor_pos(&row, &col);
+	editor_get_cursor_pos(&row, &col);
 	char buf[32];
 	snprintf(buf, sizeof(buf), "\x1b[%d;%dH", row, col);
 	buf_append(&eb, buf, strlen(buf));
@@ -3569,7 +3577,7 @@ static void editor_refresh_full(void)
 
 	/* Position terminal cursor in text area, or in status prompt while active. */
 	int row, col;
-	editor_calc_cursor_pos(&row, &col);
+	editor_get_cursor_pos(&row, &col);
 	char buf[32];
 	snprintf(buf, sizeof(buf), "\x1b[%d;%dH", row, col);
 	buf_append(&eb, buf, strlen(buf));
