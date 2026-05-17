@@ -3026,6 +3026,14 @@ static void search_find(void)
 	editor_refresh();	/* Show the [SEARCH] statusbar immediately */
 }
 
+static void search_clear_prefilled_query(void)
+{
+	ec.search.query_len = 0;
+	if (ec.search.query)
+		ec.search.query[0] = '\0';
+	ec.search.prefill_from_start = false;
+}
+
 static void buf_append(editor_buf_t * eb, const char *s, int len)
 {
 	char *new = realloc(eb->buf, eb->len + len);
@@ -4528,20 +4536,13 @@ static void editor_process_key(void)
 				   || c == CTRL_('h')) {
 				if (ec.search.prefill_from_start) {
 					/* Treat prefilled query as selected at BOL: first edit clears it. */
-					ec.search.query_len = 0;
-					if (ec.search.query)
-						ec.search.query[0] = '\0';
-					ec.search.prefill_from_start = false;
+					search_clear_prefilled_query();
 				} else if (ec.search.query_len > 0)
 					ec.search.query[--ec.search.query_len] =
 					    '\0';
 			} else if (c < 0x100 && isprint(c)) {
-				if (ec.search.prefill_from_start) {
-					ec.search.query_len = 0;
-					if (ec.search.query)
-						ec.search.query[0] = '\0';
-					ec.search.prefill_from_start = false;
-				}
+				if (ec.search.prefill_from_start)
+					search_clear_prefilled_query();
 				/* Append character to query */
 				if (ec.search.query &&
 				    ec.search.query_len + 2 >
