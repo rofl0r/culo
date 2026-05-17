@@ -3193,6 +3193,20 @@ static void editor_scroll(void)
 		ec.col_offset = ec.render_x - available_cols + 1;
 }
 
+static int clamp_statusbar_col(int col)
+{
+	if (col < 1)
+		return 1;
+	if (col > ec.screen_cols)
+		return ec.screen_cols;
+	return col;
+}
+
+static int nonnegative_int(int n)
+{
+	return n < 0 ? 0 : n;
+}
+
 static void ui_draw_statusbar(editor_buf_t * eb)
 {
 	buf_append(eb, "\x1b[93;44m", 8);	/* Yellow on blue */
@@ -3220,8 +3234,7 @@ static void ui_draw_statusbar(editor_buf_t * eb)
 			int prefix_len =
 			    snprintf(status, sizeof(status),
 				     " Replace with: ");
-			if (prefix_len < 0)
-				prefix_len = 0;
+			prefix_len = nonnegative_int(prefix_len);
 			if (prefix_len < (int)sizeof(status))
 				len =
 				    prefix_len +
@@ -3256,8 +3269,7 @@ static void ui_draw_statusbar(editor_buf_t * eb)
 			int prefix_len =
 			    snprintf(status, sizeof(status), " [%s]%s ",
 				     mode_label, flags);
-			if (prefix_len < 0)
-				prefix_len = 0;
+			prefix_len = nonnegative_int(prefix_len);
 			if (prefix_len < (int)sizeof(status))
 				len =
 				    prefix_len +
@@ -3284,14 +3296,10 @@ static void ui_draw_statusbar(editor_buf_t * eb)
 				qlen = avail;
 			ec.search.prompt_query_end_col =
 			    ec.search.prompt_query_start_col + qlen;
-			if (ec.search.prompt_query_start_col < 1)
-				ec.search.prompt_query_start_col = 1;
-			if (ec.search.prompt_query_start_col > ec.screen_cols)
-				ec.search.prompt_query_start_col = ec.screen_cols;
-			if (ec.search.prompt_query_end_col < 1)
-				ec.search.prompt_query_end_col = 1;
-			if (ec.search.prompt_query_end_col > ec.screen_cols)
-				ec.search.prompt_query_end_col = ec.screen_cols;
+			ec.search.prompt_query_start_col =
+			    clamp_statusbar_col(ec.search.prompt_query_start_col);
+			ec.search.prompt_query_end_col =
+			    clamp_statusbar_col(ec.search.prompt_query_end_col);
 		}
 		if (len > ec.screen_cols)
 			len = ec.screen_cols;
@@ -3551,10 +3559,7 @@ static void editor_get_terminal_cursor_pos(int *row, int *col)
 		*col =
 		    ec.search.prefill_from_start ? ec.search.
 		    prompt_query_start_col : ec.search.prompt_query_end_col;
-		if (*col < 1)
-			*col = 1;
-		if (*col > ec.screen_cols)
-			*col = ec.screen_cols;
+		*col = clamp_statusbar_col(*col);
 		return;
 	}
 
