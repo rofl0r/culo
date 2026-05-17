@@ -3447,8 +3447,10 @@ static void ui_draw_rows(editor_buf_t * eb)
 		}
 
 		if (file_row >= NR) {
-			buf_append(eb, TAB_HEAD_STYLE, sizeof(TAB_HEAD_STYLE)-1);
-			buf_append(eb, "~", 1);
+			if (ec.show_whitespace) {
+				buf_append(eb, TAB_HEAD_STYLE, sizeof(TAB_HEAD_STYLE)-1);
+				buf_append(eb, "~", 1);
+			}
 		} else {
 			editor_row_t *row = ROW(file_row);
 			if (!row->hl_valid)
