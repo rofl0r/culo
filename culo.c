@@ -2501,12 +2501,10 @@ static void editor_delete_char(void)
 	}
 }
 
-typedef struct {
-	const char *bytes;
-	size_t len;
-} line_ending_info_t;
-
-static const line_ending_info_t line_ending_info[] = {
+static const struct {
+	const char bytes[3];
+	unsigned char len;
+} line_ending_info[] = {
 	{ "", 0 },
 	{ "\n", 1 },
 	{ "\r", 1 },
@@ -2521,8 +2519,6 @@ static bool line_has_trailing_eol_char(const char *line, ssize_t line_len)
 
 static line_ending_t line_ending_detect(const char *line, ssize_t line_len)
 {
-	if (line_len <= 0)
-		return LINE_ENDING_UNKNOWN;
 	if (line_len >= 2 && line[line_len - 2] == '\r' &&
 	    line[line_len - 1] == '\n')
 		return LINE_ENDING_CRLF;
@@ -2609,11 +2605,7 @@ static void file_open(const char *file_name)
 		if (ec.line_ending == LINE_ENDING_UNKNOWN)
 			ec.line_ending = line_ending_detect(line, line_len);
 		/* Strip any trailing CR/LF combination from getline() output. */
-		if (line_len >= 2 && line[line_len - 2] == '\r' &&
-		    line[line_len - 1] == '\n')
-			line_len -= 2;
-		else if (line_has_trailing_eol_char(line, line_len))
-			line_len--;
+		while (line_has_trailing_eol_char(line, line_len)) --line_len;
 		row_insert(NR, line, line_len);
 		if (ec.syntax
 		    && ec.file_size_bytes > SYNTAX_AUTO_DISABLE_THRESHOLD) {
