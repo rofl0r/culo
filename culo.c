@@ -3028,9 +3028,13 @@ static void search_find(void)
 
 static void search_clear_prefilled_query(void)
 {
+	if (!ec.search.query) {
+		ec.search.query_len = 0;
+		ec.search.prefill_from_start = false;
+		return;
+	}
 	ec.search.query_len = 0;
-	if (ec.search.query)
-		ec.search.query[0] = '\0';
+	ec.search.query[0] = '\0';
 	ec.search.prefill_from_start = false;
 }
 
