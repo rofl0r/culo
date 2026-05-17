@@ -159,6 +159,7 @@ test_shift_cursor_delete_selection() {
         send \"\033\[1;2C\" ;# Shift+Right: select 'ab'
         send \"\177\"       ;# Backspace: delete selection
         send \"\x0F\"       ;# Ctrl-O save
+        send \"\r\"         ;# Enter to confirm filename
         send \"\x18\"       ;# Ctrl-X quit
         expect eof
     " > /dev/null 2>&1
@@ -205,6 +206,7 @@ test_shift_cursor_cut_selection() {
         send \"\033\[1;2C\" ;# Shift+Right: select 'ab'
         send \"\x0B\"       ;# Ctrl-K: cut selection
         send \"\x0F\"       ;# Ctrl-O save
+        send \"\r\"         ;# Enter to confirm filename
         send \"\x18\"       ;# Ctrl-X quit
         expect eof
     " > /dev/null 2>&1
