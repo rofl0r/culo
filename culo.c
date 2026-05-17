@@ -481,6 +481,13 @@ typedef enum {
 } editor_mode_t;
 /* clang-format on */
 
+typedef enum {
+	LINE_ENDING_UNKNOWN = 0,
+	LINE_ENDING_LF,
+	LINE_ENDING_CR,
+	LINE_ENDING_CRLF,
+} line_ending_t;
+
 /* Text selection state */
 typedef struct {
 	int start_x, start_y;	/* Selection start position */
@@ -563,6 +570,7 @@ struct {
 	bool show_line_numbers;	/* Toggle line numbers display */
 	bool show_whitespace;	/* Toggle tab/whitespace markers */
 	bool last_was_cut;	/* True if previous key was ^K (for appending cuts) */
+	line_ending_t line_ending;
 	struct {
 		char *query;	/* Persists across ^W invocations; NULL until first search */
 		size_t query_len;
@@ -2351,6 +2359,8 @@ static void editor_newline(void)
 	ec.cursor_y++;
 	ec.cursor_x = 0;
 	ec.modified = true;
+	if (ec.line_ending == LINE_ENDING_UNKNOWN)
+		ec.line_ending = LINE_ENDING_LF;
 	if (!g_undo.replaying && !g_undo.batching) {
 		static const char nl[] = "\n";
 		undo_record_insert(before_y, before_x, nl, 1, before_y,
@@ -2491,19 +2501,21 @@ static void editor_delete_char(void)
 	}
 }
 
-static char *file_rows_to_string(int *buf_len)
+static const char line_ending_bytes[][3] = { "", "\n", "\r", "\r\n" };
+static const size_t line_ending_lens[] = { 0, 1, 1, 2 };
+
+static line_ending_t line_ending_detect(const char *line, ssize_t line_len)
 {
-	int total_len = 0;
-	for (int j = 0; j < NR; j++)
-		total_len += ROW(j)->size + 1;
-	*buf_len = total_len;
-	char *buf = malloc(total_len), *p = buf;
-	for (int j = 0; j < NR; j++) {
-		memcpy(p, ROW(j)->chars, ROW(j)->size);
-		p += ROW(j)->size;
-		*p++ = '\n';
-	}
-	return buf;
+	if (!line || line_len <= 0)
+		return LINE_ENDING_UNKNOWN;
+	if (line_len >= 2 && line[line_len - 2] == '\r' &&
+	    line[line_len - 1] == '\n')
+		return LINE_ENDING_CRLF;
+	if (line[line_len - 1] == '\n')
+		return LINE_ENDING_LF;
+	if (line[line_len - 1] == '\r')
+		return LINE_ENDING_CR;
+	return LINE_ENDING_UNKNOWN;
 }
 
 static void browser_set_base_dir_from_path(const char *path)
@@ -2546,6 +2558,7 @@ static void file_open(const char *file_name)
 	ec.render_x = 0;
 	ec.file_size_bytes = 0;
 	ec.longest_line = 0;
+	ec.line_ending = LINE_ENDING_UNKNOWN;
 
 	free(ec.file_name);
 	ec.file_name = strdup(file_name);
@@ -2564,8 +2577,10 @@ static void file_open(const char *file_name)
 	ssize_t line_len;
 	while ((line_len = getline(&line, &line_cap, file)) != -1) {
 		ec.file_size_bytes += (size_t) line_len;
-		if (line_len > 0 &&
-		    (line[line_len - 1] == '\n' || line[line_len - 1] == '\r'))
+		if (ec.line_ending == LINE_ENDING_UNKNOWN)
+			ec.line_ending = line_ending_detect(line, line_len);
+		while (line_len > 0 &&
+		       (line[line_len - 1] == '\n' || line[line_len - 1] == '\r'))
 			line_len--;
 		row_insert(NR, line, line_len);
 		if (ec.syntax
@@ -2601,24 +2616,45 @@ static void file_save(void)
 	browser_set_base_dir_from_path(ec.file_name);
 	if (name_changed)
 		syntax_select();
-	int len;
-	char *buf = file_rows_to_string(&len);
-	int fd = open(ec.file_name, O_RDWR | O_CREAT, 0644);
-	if (fd != -1) {
-		if ((ftruncate(fd, len) != -1) && (write(fd, buf, len) == len)) {
-			close(fd);
-			free(buf);
+	const char *line_ending = line_ending_bytes[ec.line_ending];
+	size_t line_ending_len = line_ending_lens[ec.line_ending];
+	size_t total_written = 0;
+	FILE *file = fopen(ec.file_name, "wb");
+	if (file) {
+		bool ok = true;
+		for (int j = 0; j < NR; j++) {
+			editor_row_t *row = ROW(j);
+			if (row->size > 0 &&
+			    fwrite(row->chars, 1, (size_t)row->size, file) !=
+			    (size_t)row->size) {
+				ok = false;
+				break;
+			}
+			total_written += (size_t)row->size;
+			if (line_ending_len > 0 &&
+			    fwrite(line_ending, 1, line_ending_len, file) !=
+			    line_ending_len) {
+				ok = false;
+				break;
+			}
+			total_written += line_ending_len;
+		}
+		if (ok && fclose(file) == 0) {
 			ec.modified = false;
-			if (len >= 1024)
+			if (total_written >= 1024)
 				ui_set_message("%d KiB written to disk",
-					       len >> 10);
+					       (int)(total_written >> 10));
 			else
-				ui_set_message("%d B written to disk", len);
+				ui_set_message("%d B written to disk",
+					       (int)total_written);
 			return;
 		}
-		close(fd);
+		if (!ok) {
+			int saved_errno = errno;
+			fclose(file);
+			errno = saved_errno ? saved_errno : EIO;
+		}
 	}
-	free(buf);
 	ui_set_message("Error: %s", strerror(errno));
 }
 
