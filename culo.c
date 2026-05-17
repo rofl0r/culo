@@ -3230,6 +3230,10 @@ static void ui_draw_statusbar(editor_buf_t * eb)
 			int prefix_len =
 			    snprintf(status, sizeof(status),
 				     " Replace with: ");
+			if (prefix_len < 0)
+				prefix_len = 0;
+			if (prefix_len >= (int)sizeof(status))
+				prefix_len = (int)sizeof(status) - 1;
 			if (prefix_len < (int)sizeof(status))
 				len =
 				    prefix_len +
@@ -3265,6 +3269,10 @@ static void ui_draw_statusbar(editor_buf_t * eb)
 			int prefix_len =
 			    snprintf(status, sizeof(status), " [%s]%s ",
 				     mode_label, flags);
+			if (prefix_len < 0)
+				prefix_len = 0;
+			if (prefix_len >= (int)sizeof(status))
+				prefix_len = (int)sizeof(status) - 1;
 			if (prefix_len < (int)sizeof(status))
 				len =
 				    prefix_len +
