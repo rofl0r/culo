@@ -4293,6 +4293,8 @@ static void editor_process_key(void)
 			return;
 		}
 		switch (c) {
+		case '\x1b':		/* ignore lone ESC - probably part of a meta seq */
+			break;
 		case CTRL_('c'):	/* ^C - abort selection */
 			ec.selection.active = false;
 			mode_set(MODE_NORMAL);
