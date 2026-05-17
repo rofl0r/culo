@@ -77,6 +77,71 @@ report_test() {
     fi
 }
 
+hexdump_stream() {
+    if command -v hexdump &> /dev/null; then
+        hexdump -C
+    else
+        od -An -tx1 -v
+    fi
+}
+
+print_file_debug_dump() {
+    local label="$1"
+    local file="$2"
+
+    printf "  %s (text):\n" "$label"
+    if [ -f "$file" ]; then
+        sed 's/^/    /' "$file"
+    else
+        printf "    <missing file>\n"
+    fi
+
+    printf "  %s (hexdump):\n" "$label"
+    if [ -f "$file" ]; then
+        hexdump_stream < "$file" | sed 's/^/    /'
+    else
+        printf "    <missing file>\n"
+    fi
+}
+
+print_value_debug_dump() {
+    local label="$1"
+    local value="$2"
+
+    printf "  %s (text):\n" "$label"
+    printf "    %s\n" "$value"
+    printf "  %s (hexdump):\n" "$label"
+    printf "%s" "$value" | hexdump_stream | sed 's/^/    /'
+}
+
+assert_text_equals() {
+    local test_name="$1"
+    local expected="$2"
+    local result="$3"
+
+    if [ "$result" = "$expected" ]; then
+        report_test "$test_name" "PASS"
+    else
+        report_test "$test_name" "FAIL" "content mismatch"
+        print_value_debug_dump "expected" "$expected"
+        print_value_debug_dump "result" "$result"
+    fi
+}
+
+assert_file_equals() {
+    local test_name="$1"
+    local expected_file="$2"
+    local result_file="$3"
+
+    if [ -f "$expected_file" ] && [ -f "$result_file" ] && cmp -s "$expected_file" "$result_file"; then
+        report_test "$test_name" "PASS"
+    else
+        report_test "$test_name" "FAIL" "content mismatch"
+        print_file_debug_dump "expected" "$expected_file"
+        print_file_debug_dump "result" "$result_file"
+    fi
+}
+
 # Print test summary
 print_summary() {
     printf "\n===== Test Summary =====\n"
@@ -153,4 +218,6 @@ export -f report_test
 export -f create_test_file
 export -f send_keys_to_editor
 export -f compare_files
+export -f assert_text_equals
+export -f assert_file_equals
 export -f throw

@@ -555,6 +555,7 @@ struct {
 		char *query;	/* Persists across ^W invocations; NULL until first search */
 		size_t query_len;
 		size_t query_cap;
+		bool prefill_from_start;	/* true: next printable key replaces prefilled query unless End was pressed */
 		int mode;	/* search_mode_t bitmask */
 		char *replace_query;	/* replacement text */
 		size_t replace_len;
@@ -768,6 +769,7 @@ static void mode_set(editor_mode_t new_mode)
 			/* Reset replace phase each time search mode is entered */
 			ec.search.replace_phase = 0;
 			ec.search.replace_count = 0;
+			ec.search.prefill_from_start = (ec.search.query_len > 0);
 			ec.mode_state.search.highlight_line = -1;
 			ec.mode_state.search.saved_highlight = NULL;
 			break;
@@ -4511,6 +4513,9 @@ static void editor_process_key(void)
 				ec.col_offset = ec.mode_state.search.saved_col;
 				ec.row_offset = ec.mode_state.search.saved_row;
 				mode_set(MODE_NORMAL);
+			} else if (c == END_KEY) {
+				/* End switches from replace-on-type to append mode for the prefilled query. */
+				ec.search.prefill_from_start = false;
 			} else if (c == META_('c') || c == META_('C')) {
 				ec.search.mode ^= SM_CASE_SENSITIVE;
 			} else if (c == META_('b') || c == META_('B')) {
@@ -4521,10 +4526,22 @@ static void editor_process_key(void)
 				ec.search.mode ^= SM_REPLACE;
 			} else if (c == BACKSPACE || c == DEL_KEY
 				   || c == CTRL_('h')) {
-				if (ec.search.query_len > 0)
+				if (ec.search.prefill_from_start) {
+					/* Treat prefilled query as selected at BOL: first edit clears it. */
+					ec.search.query_len = 0;
+					if (ec.search.query)
+						ec.search.query[0] = '\0';
+					ec.search.prefill_from_start = false;
+				} else if (ec.search.query_len > 0)
 					ec.search.query[--ec.search.query_len] =
 					    '\0';
 			} else if (c < 0x100 && isprint(c)) {
+				if (ec.search.prefill_from_start) {
+					ec.search.query_len = 0;
+					if (ec.search.query)
+						ec.search.query[0] = '\0';
+					ec.search.prefill_from_start = false;
+				}
 				/* Append character to query */
 				if (ec.search.query &&
 				    ec.search.query_len + 2 >

@@ -45,6 +45,7 @@ Another line"
         send \"\033\[B\"
         send \"\x15\"      ;# Ctrl-U to paste
         send \"\x0F\"      ;# Ctrl-O to save
+        send \"\r\"        ;# Enter to confirm filename
         send \"\x18\"      ;# Ctrl-X to quit
         expect eof
     " > /dev/null 2>&1

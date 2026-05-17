@@ -12,10 +12,10 @@ test_create_new_file() {
     # Create file using echo and editor (simulated)
     echo "$content" > "$test_file"
 
-    if [ -f "$test_file" ] && [ "$(cat "$test_file")" = "$content" ]; then
-        report_test "Create new file" "PASS"
+    if [ -f "$test_file" ]; then
+        assert_text_equals "Create new file" "$content" "$(cat "$test_file")"
     else
-        report_test "Create new file" "FAIL"
+        report_test "Create new file" "FAIL" "result file missing"
     fi
 
     rm -f "$test_file"
@@ -70,11 +70,7 @@ test_save_modifications() {
     " > /dev/null 2>&1
 
     # Check if file remains unchanged when not saved
-    if [ "$(cat "$test_file")" = "$original" ]; then
-        report_test "Save modifications" "PASS"
-    else
-        report_test "Save modifications" "FAIL"
-    fi
+    assert_text_equals "Save modifications" "$original" "$(cat "$test_file")"
 
     rm -f "$test_file"
 }
@@ -101,11 +97,7 @@ test_save_without_changes() {
     " > /dev/null 2>&1
 
     # Check if file successfully saved
-    if [ "$(cat "$test_file")" = "$original" ]; then
-        report_test "Save without changes" "PASS"
-    else
-        report_test "Save without changes" "FAIL"
-    fi
+    assert_text_equals "Save without changes" "$original" "$(cat "$test_file")"
 
     rm -f "$test_file"
 }
@@ -132,11 +124,7 @@ test_insert_character() {
         expect eof
     " > /dev/null 2>&1
 
-    if [ "$(cat "$test_file")" = "$expected" ]; then
-        report_test "Insert character" "PASS"
-    else
-        report_test "Insert character" "FAIL"
-    fi
+    assert_text_equals "Insert character" "$expected" "$(cat "$test_file")"
 
     rm -f "$test_file"
 }
@@ -166,11 +154,7 @@ test_delete_character() {
         expect eof
     " > /dev/null 2>&1
 
-    if [ "$(cat "$test_file")" = "$expected" ]; then
-        report_test "Delete character" "PASS"
-    else
-        report_test "Delete character" "FAIL"
-    fi
+    assert_text_equals "Delete character" "$expected" "$(cat "$test_file")"
 
     rm -f "$test_file"
 }
@@ -213,11 +197,7 @@ test_interleaved_nav_ins() {
     " > /dev/null 2>&1
 
     # Check if segmentation fault happened while insert
-    if [ "$(cat "$test_file")" = "$expected" ]; then
-        report_test "Interleaved navigation and insertion" "PASS"
-    else
-        report_test "Interleaved navigation and insertion" "FAIL"
-    fi
+    assert_text_equals "Interleaved navigation and insertion" "$expected" "$(cat "$test_file")"
 
     rm -f "$test_file"
 }

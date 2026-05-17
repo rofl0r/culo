@@ -24,17 +24,13 @@ test_basic_undo() {
         send \" added\"    ;# Add text
         send \"\x1A\"      ;# Ctrl-Z to undo
         send \"\x0F\"      ;# Ctrl-O to save
+        send \"\r\"        ;# Enter to confirm filename
         send \"\x18\"      ;# Ctrl-X to quit
         expect eof
     " > /dev/null 2>&1
 
     # Check if undo worked
-    local content=$(cat "$test_file")
-    if [ "$content" = "$original" ]; then
-        report_test "Basic undo" "PASS"
-    else
-        report_test "Basic undo" "FAIL"
-    fi
+    assert_text_equals "Basic undo" "$original" "$(cat "$test_file")"
 
     rm -f "$test_file"
 }
@@ -69,17 +65,13 @@ test_multiple_undo() {
         send \"\x1A\"      ;# Undo 2
         send \"\x1A\"      ;# Undo 3
         send \"\x0F\"      ;# Ctrl-O to save
+        send \"\r\"        ;# Enter to confirm filename
         send \"\x18\"      ;# Ctrl-X to quit
         expect eof
     " > /dev/null 2>&1
 
     # Should be back to original
-    local content=$(cat "$test_file")
-    if [ "$content" = "Start" ]; then
-        report_test "Multiple undo" "PASS"
-    else
-        report_test "Multiple undo" "FAIL"
-    fi
+    assert_text_equals "Multiple undo" "Start" "$(cat "$test_file")"
 
     rm -f "$test_file"
 }
@@ -110,17 +102,12 @@ Line 3"
         send \"\x1A\"      ;# Ctrl-Z to undo paste
         send \"\x1A\"      ;# Ctrl-Z to undo cut
         send \"\x0F\"      ;# Ctrl-O to save
+        send \"\r\"        ;# Enter to confirm filename
         send \"\x18\"      ;# Ctrl-X to quit
         expect eof
     " > /dev/null 2>&1
 
-    # Should be back to original
-    local lines=$(wc -l < "$test_file")
-    if [ "$lines" -eq 3 ]; then
-        report_test "Undo cut/paste" "PASS"
-    else
-        report_test "Undo cut/paste" "FAIL"
-    fi
+    assert_text_equals "Undo cut/paste" "$original" "$(cat "$test_file")"
 
     rm -f "$test_file"
 }
