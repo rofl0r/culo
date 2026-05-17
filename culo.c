@@ -2586,6 +2586,7 @@ static void file_open(const char *file_name)
 	ssize_t line_len;
 	while ((line_len = getline(&line, &line_cap, file)) != -1) {
 		ec.file_size_bytes += (size_t) line_len;
+		/* Lock style from first terminated line; later lines are normalized. */
 		if (ec.line_ending == LINE_ENDING_UNKNOWN)
 			ec.line_ending = line_ending_detect(line, line_len);
 		/* Strip any trailing CR/LF combination from getline() output. */
@@ -2662,9 +2663,10 @@ static void file_save(void)
 		if (!ok) {
 			int saved_errno = errno;
 			fclose(file);
-			if (saved_errno)
-				errno = saved_errno;
-			else {
+			if (saved_errno) {
+				ui_set_message("Error: %s", strerror(saved_errno));
+				return;
+			} else {
 				ui_set_message("Error: write failed");
 				return;
 			}
