@@ -11,3 +11,4 @@
 - Split logical changes into separate commits.
 - Every commit must be buildable on its own (`make` must pass after each commit).
 - Write clear commit messages that explain both what changed and why.
+- After each commit, inspect its diff; if you see duplicate code, refactor it.
