@@ -2501,8 +2501,17 @@ static void editor_delete_char(void)
 	}
 }
 
-static const char line_ending_bytes[][3] = { "", "\n", "\r", "\r\n" };
-static const size_t line_ending_lens[] = { 0, 1, 1, 2 };
+typedef struct {
+	const char *bytes;
+	size_t len;
+} line_ending_info_t;
+
+static const line_ending_info_t line_ending_info[] = {
+	{ "", 0 },
+	{ "\n", 1 },
+	{ "\r", 1 },
+	{ "\r\n", 2 },
+};
 
 static line_ending_t line_ending_detect(const char *line, ssize_t line_len)
 {
@@ -2617,8 +2626,8 @@ static void file_save(void)
 	browser_set_base_dir_from_path(ec.file_name);
 	if (name_changed)
 		syntax_select();
-	const char *line_ending = line_ending_bytes[ec.line_ending];
-	size_t line_ending_len = line_ending_lens[ec.line_ending];
+	const char *line_ending = line_ending_info[ec.line_ending].bytes;
+	size_t line_ending_len = line_ending_info[ec.line_ending].len;
 	size_t total_written = 0;
 	FILE *file = fopen(ec.file_name, "wb");
 	if (file) {
@@ -2653,8 +2662,12 @@ static void file_save(void)
 		if (!ok) {
 			int saved_errno = errno;
 			fclose(file);
-			/* fwrite/fclose can fail without a useful errno in rare cases. */
-			errno = saved_errno ? saved_errno : EIO;
+			if (saved_errno)
+				errno = saved_errno;
+			else {
+				ui_set_message("Error: write failed");
+				return;
+			}
 		}
 	}
 	ui_set_message("Error: %s", strerror(errno));
