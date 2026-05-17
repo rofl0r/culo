@@ -55,6 +55,17 @@ typedef enum {
 #define UNDO_STACK_CAP 64
 #define SYNTAX_AUTO_DISABLE_THRESHOLD (16u * 1024u * 1024u)
 
+static inline int clamp(int value, int min, int max)
+{
+	if (max < min)
+		max = min;
+	if (value < min)
+		return min;
+	if (value > max)
+		return max;
+	return value;
+}
+
 /* UTF-8 handling functions */
 
 /* Get the byte length of a UTF-8 character from its first byte */
@@ -3076,9 +3087,7 @@ static void buf_append_overlay(editor_buf_t * eb)
 		msg = framed_msg;
 	}
 	int msglen = (int)strlen(msg);
-	int col = (ec.screen_cols - msglen) / 2;
-	if (col < 0)
-		col = 0;
+	int col = clamp((ec.screen_cols - msglen) / 2, 0, INT_MAX);
 	char posbuf[32];
 	snprintf(posbuf, sizeof(posbuf), "\x1b[%d;%dH\x1b[7m", ec.screen_rows,
 		 col + 1);
@@ -3253,10 +3262,9 @@ static void ui_draw_statusbar(editor_buf_t * eb)
 		len = statusbar_build_query(status, sizeof(status), prefix, qtxt,
 					    &ec.search.prompt_query_start_col);
 		r_len = 0;
-		if (ec.search.prompt_query_start_col > ec.screen_cols)
-			ec.search.prompt_query_start_col = ec.screen_cols;
-		if (len > ec.screen_cols)
-			len = ec.screen_cols;
+		ec.search.prompt_query_start_col =
+		    clamp(ec.search.prompt_query_start_col, 1, ec.screen_cols);
+		len = clamp(len, 0, ec.screen_cols);
 		buf_append(eb, status, len);
 	} else {
 		/* Build " [MODE] " left prefix */
@@ -3264,8 +3272,7 @@ static void ui_draw_statusbar(editor_buf_t * eb)
 		char left[32];
 		int left_vis =
 		    snprintf(left, sizeof(left), " [%s] ", mode_name);
-		if (left_vis > ec.screen_cols)
-			left_vis = ec.screen_cols;
+		left_vis = clamp(left_vis, 0, ec.screen_cols);
 
 		/* Build right side: col/row info with zero-padded fixed-width numbers */
 		int col_size =
@@ -3301,8 +3308,7 @@ static void ui_draw_statusbar(editor_buf_t * eb)
 		int max_fname_vis =
 		    ec.screen_cols - left_vis - mod_vis -
 		    (r_len > 0 ? 1 + r_len : 0);
-		if (max_fname_vis < 0)
-			max_fname_vis = 0;
+		max_fname_vis = clamp(max_fname_vis, 0, INT_MAX);
 
 		buf_append(eb, left, left_vis);	/* Left mode tag stays blue */
 		len = left_vis;
@@ -3522,13 +3528,11 @@ static void editor_refresh(void)
 	    ec.search.prompt_query_start_col > 0) {
 		size_t qlen = ec.search.replace_phase == 1 ?
 		    ec.search.replace_len : ec.search.query_len;
-		int end_col = ec.search.prompt_query_start_col + (int)qlen;
-		if (end_col > ec.screen_cols)
-			end_col = ec.screen_cols;
+		int end_col = clamp(ec.search.prompt_query_start_col + (int)qlen,
+				    1, ec.screen_cols);
 		col = ec.search.prefill_from_start ? ec.search.
 		    prompt_query_start_col : end_col;
-		if (col < 1)
-			col = 1;
+		col = clamp(col, 1, ec.screen_cols);
 		row = ec.screen_rows + 1;
 	}
 	char buf[32];
@@ -3558,13 +3562,11 @@ static void editor_refresh_full(void)
 	    ec.search.prompt_query_start_col > 0) {
 		size_t qlen = ec.search.replace_phase == 1 ?
 		    ec.search.replace_len : ec.search.query_len;
-		int end_col = ec.search.prompt_query_start_col + (int)qlen;
-		if (end_col > ec.screen_cols)
-			end_col = ec.screen_cols;
+		int end_col = clamp(ec.search.prompt_query_start_col + (int)qlen,
+				    1, ec.screen_cols);
 		col = ec.search.prefill_from_start ? ec.search.
 		    prompt_query_start_col : end_col;
-		if (col < 1)
-			col = 1;
+		col = clamp(col, 1, ec.screen_cols);
 		row = ec.screen_rows + 1;
 	}
 	char buf[32];
@@ -3579,10 +3581,8 @@ static void sig_winch_handler(int sig)
 {
 	(void)sig;		/* Unused parameter */
 	term_update_size();
-	if (ec.cursor_y > ec.screen_rows)
-		ec.cursor_y = ec.screen_rows - 1;
-	if (ec.cursor_x > ec.screen_cols)
-		ec.cursor_x = ec.screen_cols - 1;
+	ec.cursor_y = clamp(ec.cursor_y, 0, ec.screen_rows - 1);
+	ec.cursor_x = clamp(ec.cursor_x, 0, ec.screen_cols - 1);
 	editor_refresh();
 }
 
@@ -3748,8 +3748,7 @@ static char *ui_prompt(const char *prefix, const char *hint,
 		}
 		/* Pad then right-align hint (always shown) */
 		int spaces = cols - pfx_len - vis_blen - hlen;
-		if (spaces < 0)
-			spaces = 0;
+		spaces = clamp(spaces, 0, INT_MAX);
 		if (slen + spaces + hlen < (int)sizeof(ec.status_msg)) {
 			memset(ec.status_msg + slen, ' ', spaces);
 			slen += spaces;
@@ -4408,14 +4407,14 @@ static void editor_process_key(void)
 					ec.mode_state.help.offset++;
 				break;
 			case PAGE_UP:
-				ec.mode_state.help.offset -= visible;
-				if (ec.mode_state.help.offset < 0)
-					ec.mode_state.help.offset = 0;
+				ec.mode_state.help.offset =
+				    clamp(ec.mode_state.help.offset - visible, 0,
+					  max_offset);
 				break;
 			case PAGE_DOWN:
-				ec.mode_state.help.offset += visible;
-				if (ec.mode_state.help.offset > max_offset)
-					ec.mode_state.help.offset = max_offset;
+				ec.mode_state.help.offset =
+				    clamp(ec.mode_state.help.offset + visible, 0,
+					  max_offset);
 				break;
 			default:
 				break;	/* ignore other keys */
