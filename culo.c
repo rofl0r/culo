@@ -3088,7 +3088,7 @@ static void buf_append_overlay(editor_buf_t * eb)
 		msg = framed_msg;
 	}
 	int msglen = (int)strlen(msg);
-	int col = clamp((ec.screen_cols - msglen) / 2, 0, INT_MAX);
+	int col = clamp((ec.screen_cols - msglen) / 2, 0, ec.screen_cols);
 	char posbuf[32];
 	snprintf(posbuf, sizeof(posbuf), "\x1b[%d;%dH\x1b[7m", ec.screen_rows,
 		 col + 1);
@@ -3202,18 +3202,12 @@ static int statusbar_build_query(char *dst, size_t cap, const char *prefix,
 				 const char *query, int *query_start_col)
 {
 	int off = snprintf(dst, cap, "%s", prefix ? prefix : "");
-	if (off < 0)
-		off = 0;
-	if (off >= (int)cap)
-		off = (int)cap - 1;
+	off = clamp(off, 0, (int)cap - 1);
 	*query_start_col = off + 1;
 	{
 		int qlen =
 		    snprintf(dst + off, cap - (size_t)off, "%s", query ? query : "");
-		if (qlen < 0)
-			qlen = 0;
-		if (qlen > (int)cap - 1 - off)
-			qlen = (int)cap - 1 - off;
+		qlen = clamp(qlen, 0, (int)cap - 1 - off);
 		off += qlen;
 	}
 	return off;
@@ -3317,7 +3311,7 @@ static void ui_draw_statusbar(editor_buf_t * eb)
 		int max_fname_vis =
 		    ec.screen_cols - left_vis - mod_vis -
 		    (r_len > 0 ? 1 + r_len : 0);
-		max_fname_vis = clamp(max_fname_vis, 0, INT_MAX);
+		max_fname_vis = clamp(max_fname_vis, 0, ec.screen_cols);
 
 		buf_append(eb, left, left_vis);	/* Left mode tag stays blue */
 		len = left_vis;
@@ -3755,7 +3749,7 @@ static char *ui_prompt(const char *prefix, const char *hint,
 		}
 		/* Pad then right-align hint (always shown) */
 		int spaces = cols - pfx_len - vis_blen - hlen;
-		spaces = clamp(spaces, 0, INT_MAX);
+		spaces = clamp(spaces, 0, cols);
 		if (slen + spaces + hlen < (int)sizeof(ec.status_msg)) {
 			memset(ec.status_msg + slen, ' ', spaces);
 			slen += spaces;
