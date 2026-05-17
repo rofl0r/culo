@@ -2527,6 +2527,17 @@ static line_ending_t line_ending_detect(const char *line, ssize_t line_len)
 	return LINE_ENDING_UNKNOWN;
 }
 
+static bool file_write_chunk(FILE *file, const void *data, size_t len,
+			     size_t *total_written)
+{
+	if (len == 0)
+		return true;
+	if (fwrite(data, 1, len, file) != len)
+		return false;
+	*total_written += len;
+	return true;
+}
+
 static void browser_set_base_dir_from_path(const char *path)
 {
 	if (!path || !*path) {
@@ -2590,6 +2601,12 @@ static void file_open(const char *file_name)
 		if (ec.line_ending == LINE_ENDING_UNKNOWN)
 			ec.line_ending = line_ending_detect(line, line_len);
 		/* Strip any trailing CR/LF combination from getline() output. */
+		if (line_len >= 2 && line[line_len - 2] == '\r' &&
+		    line[line_len - 1] == '\n')
+			line_len -= 2;
+		else if (line_len > 0 &&
+			 (line[line_len - 1] == '\n' || line[line_len - 1] == '\r'))
+			line_len--;
 		while (line_len > 0 &&
 		       (line[line_len - 1] == '\n' || line[line_len - 1] == '\r'))
 			line_len--;
@@ -2635,22 +2652,17 @@ static void file_save(void)
 		bool ok = true;
 		for (int j = 0; j < NR; j++) {
 			editor_row_t *row = ROW(j);
-			if (row->size > 0 &&
-			    fwrite(row->chars, 1, (size_t)row->size, file) !=
-			    (size_t)row->size) {
+			if (!file_write_chunk
+			    (file, row->chars, (size_t)row->size, &total_written) ||
+			    !file_write_chunk(file, line_ending, line_ending_len,
+					      &total_written)) {
 				ok = false;
 				break;
 			}
-			total_written += (size_t)row->size;
-			if (line_ending_len > 0 &&
-			    fwrite(line_ending, 1, line_ending_len, file) !=
-			    line_ending_len) {
-				ok = false;
-				break;
-			}
-			total_written += line_ending_len;
 		}
-		if (ok && fclose(file) == 0) {
+		int write_errno = errno;
+		int close_rc = fclose(file);
+		if (ok && close_rc == 0) {
 			ec.modified = false;
 			if (total_written >= 1024)
 				ui_set_message("%d KiB written to disk",
@@ -2660,17 +2672,12 @@ static void file_save(void)
 					       (int)total_written);
 			return;
 		}
-		if (!ok) {
-			int saved_errno = errno;
-			fclose(file);
-			if (saved_errno) {
-				ui_set_message("Error: %s", strerror(saved_errno));
-				return;
-			} else {
-				ui_set_message("Error: write failed");
-				return;
-			}
-		}
+		if (write_errno)
+			errno = write_errno;
+		else if (close_rc != 0)
+			errno = errno ? errno : EIO;
+		else
+			errno = EIO;
 	}
 	ui_set_message("Error: %s", strerror(errno));
 }
