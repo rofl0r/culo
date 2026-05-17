@@ -3207,7 +3207,15 @@ static int statusbar_build_query(char *dst, size_t cap, const char *prefix,
 	if (off >= (int)cap)
 		off = (int)cap - 1;
 	*query_start_col = off + 1;
-	off += snprintf(dst + off, cap - (size_t)off, "%s", query ? query : "");
+	{
+		int qlen =
+		    snprintf(dst + off, cap - (size_t)off, "%s", query ? query : "");
+		if (qlen < 0)
+			qlen = 0;
+		if (qlen > (int)cap - 1 - off)
+			qlen = (int)cap - 1 - off;
+		off += qlen;
+	}
 	return off;
 }
 
@@ -3521,10 +3529,10 @@ static void editor_calc_cursor_pos(int *row, int *col)
 	    ec.search.prompt_query_start_col > 0) {
 		size_t qlen = ec.search.replace_phase == 1 ?
 		    ec.search.replace_len : ec.search.query_len;
-		int qadd = qlen > (size_t)INT_MAX ? INT_MAX : (int)qlen;
-		int end_col = ec.search.prompt_query_start_col > INT_MAX - qadd ?
-		    INT_MAX : ec.search.prompt_query_start_col + qadd;
-		end_col = clamp(end_col, 1, ec.screen_cols);
+		int max_qadd = ec.screen_cols - ec.search.prompt_query_start_col;
+		max_qadd = clamp(max_qadd, 0, ec.screen_cols);
+		int qadd = qlen > (size_t)max_qadd ? max_qadd : (int)qlen;
+		int end_col = ec.search.prompt_query_start_col + qadd;
 		*col = ec.search.prefill_from_start ?
 		    ec.search.prompt_query_start_col : end_col;
 		*col = clamp(*col, 1, ec.screen_cols);
