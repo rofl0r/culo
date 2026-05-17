@@ -4223,8 +4223,7 @@ static void browser_open_selected(void)
 		if (ec.modified) {
 			int r =
 			    ui_confirm
-			    ("Current file has been modified. Save before "
-			     "opening new file?");
+			    ("Current file has been modified. Save it?");
 			if (r == -1)
 				return;
 			if (r == 1)
