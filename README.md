@@ -1,7 +1,8 @@
-# CULO Editor
+# culo editor
 
-CULO Editor is a minimalist text editor with syntax highlight,
-copy/paste, search/replace, utf-8 support.
+culo is a terminal text editor with syntax highlighting,
+copy/paste, search/replace, utf-8 support, undo/redo, line-ending
+detection, file browser, help screen, etc.
 It tries to provide a replacement for GNU nano, providing the
 most useful features using the same keybindings, but in a fraction
 of the binary and code size, and without external dependencies
@@ -37,6 +38,7 @@ Supported keys:
     - M-6: Copy marked region
     - Ctrl-K: Cut marked text
     - Ctrl-C: Cancel selection
+* Shift+Cursors can be used too to select text.
 * M-B: Open file browser
     - Arrow keys to navigate files and directories
     - Enter to open file or enter directory
@@ -55,21 +57,24 @@ Supported keys:
 
 Syntax highlighting is auto-disabled for recognized files larger than 16 MiB.
 
-CULO Editor does not depend on external library (not even curses).
+culo does not depend on external library (not even curses).
 It uses fairly standard VT100 (and similar terminals) escape sequences.
 
 ## Acknowledge
 
-CULO Editor is a fork of Mazu Editor, which in turn was inspired by excellent
+culo is a fork of Mazu Editor, which in turn was inspired by the excellent
 tutorial [Build Your Own Text Editor](https://viewsourcecode.org/snaptoken/kilo/).
 
-The name kilo served as the inspiration for CULO, because kilo is really an
-unfinished PoS full of bugs crashing into your face.
-The original idea was to use COOLO as name, but it's one char too much to type
-so it was shortened to CULO.
+The name kilo served as the inspiration for culo.
+The original idea was to use "coolo" as name, but it's one char too much to
+type so it was shortened, but it is pronounced like coolo.
+
+special thanks goes to @github for letting me use @copilot PRO for free.
+being able to use claude sonnet and GPT codex was a tremendous help for
+turning my idea into a reality.
 
 ## License
 
-CULO Editor is freely redistributable under the BSD 2 clause license. Use of
+culo is freely redistributable under the BSD 2 clause license. Use of
 this source code is governed by a BSD-style license that can be found in the
 LICENSE file.
