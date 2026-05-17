@@ -2607,9 +2607,6 @@ static void file_open(const char *file_name)
 		else if (line_len > 0 &&
 			 (line[line_len - 1] == '\n' || line[line_len - 1] == '\r'))
 			line_len--;
-		while (line_len > 0 &&
-		       (line[line_len - 1] == '\n' || line[line_len - 1] == '\r'))
-			line_len--;
 		row_insert(NR, line, line_len);
 		if (ec.syntax
 		    && ec.file_size_bytes > SYNTAX_AUTO_DISABLE_THRESHOLD) {
@@ -2674,10 +2671,12 @@ static void file_save(void)
 		}
 		if (write_errno)
 			errno = write_errno;
-		else if (close_rc != 0)
-			errno = errno ? errno : EIO;
-		else
+		else if (close_rc != 0) {
+			if (!errno)
+				errno = EIO;
+		} else {
 			errno = EIO;
+		}
 	}
 	ui_set_message("Error: %s", strerror(errno));
 }
