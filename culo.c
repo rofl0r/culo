@@ -3298,7 +3298,7 @@ static void ui_draw_statusbar(editor_buf_t * eb)
 		if (ec.search.replace_phase == 1) {
 			/* Phase 1: entering replacement text */
 			snprintf(prefix, sizeof(prefix), " Replace with: ");
-			qtxt = ec.search.replace_query ? ec.search.replace_query : "";
+			if (ec.search.replace_query) qtxt = ec.search.replace_query;
 		} else {
 			/* Phase 0 and 2: show [SEARCH] / [REPLACE] with active flags and query */
 			char flags[60];
@@ -3322,7 +3322,7 @@ static void ui_draw_statusbar(editor_buf_t * eb)
 				flags[0] = '\0';
 			snprintf(prefix, sizeof(prefix), " [%s]%s ", mode_label,
 				 flags);
-			qtxt = ec.search.query ? ec.search.query : "";
+			if (ec.search.query) qtxt = ec.search.query;
 		}
 		len = statusbar_build_query(status, sizeof(status), prefix, qtxt,
 					    &ec.search.prompt_query_start_col);
