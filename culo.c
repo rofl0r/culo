@@ -233,6 +233,7 @@ static int utf8_validate(const char *s, size_t max_len)
  * https://github.com/rofl0r/libulz/blob/master/include/tlist.h */
 
 #define TLIST_API static
+#define TLIST_IMPL
 #include "tlist.h"
 
 typedef struct {

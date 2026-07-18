@@ -1,14 +1,39 @@
+#ifndef TLIST_H
+#define TLIST_H
+
+#if defined(__cplusplus)
+extern "C" {
+#endif
+
 typedef struct tlist tlist;
 
-#define TLIST_INTERNAL static
-
+/* Public API declarations. When TLIST_API is not defined, these get plain
+ * (extern) linkage so a consumer including this header only sees the prototypes.
+ * Definitions are emitted only when TLIST_IMPL is defined (in exactly one TU). */
 #ifndef TLIST_API
-#define TLIST_API
+#define TLIST_API extern
 #endif
+
+TLIST_API struct tlist *tlist_new(unsigned itemsize);
+TLIST_API size_t tlist_getsize(struct tlist *t);
+TLIST_API void *tlist_get(struct tlist *t, size_t idx);
+TLIST_API int tlist_insert(struct tlist *t, size_t idx, void *value);
+TLIST_API int tlist_insert_sorted(struct tlist *t, void *value,
+				  int (*cmp)(const void *, const void *));
+TLIST_API int tlist_delete(struct tlist *t, size_t idx);
+TLIST_API void tlist_free_items(struct tlist *t);
+TLIST_API void *tlist_free(struct tlist *t);
+
+#ifdef TLIST_IMPL
+
+#define TLIST_INTERNAL static
 
 #ifndef UINT_MAX
 #define UINT_MAX 0xffffffffU
 #endif
+
+#include <stdlib.h>
+#include <string.h>
 
 TLIST_INTERNAL int tlist_mrand(unsigned *seed)
 {
@@ -171,14 +196,16 @@ TLIST_API int tlist_insert(struct tlist *t, size_t idx, void *value)
 TLIST_API int tlist_insert_sorted(struct tlist *t, void *value,
 			       int (*cmp)(const void *, const void *))
 {
-	size_t n = tlist_getsize(t);
-	size_t i;
-	for (i = 0; i < n; i++) {
-		void *cur = tlist_get(t, i);
+	size_t lo = 0, hi = tlist_getsize(t);
+	while (lo < hi) {
+		size_t mid = (lo & hi) + ((lo ^ hi) >> 1);
+		void *cur = tlist_get(t, mid);
 		if (cmp(value, cur) < 0)
-			break;
+			hi = mid;
+		else
+			lo = mid + 1;
 	}
-	return tlist_insert(t, i, value);
+	return tlist_insert(t, lo, value);
 }
 
 TLIST_INTERNAL int tlist_delete_impl(struct tlist *t, size_t idx)
@@ -211,3 +238,10 @@ TLIST_API void *tlist_free(struct tlist *t)
 
 #undef TLIST_INTERNAL
 
+#endif /* TLIST_IMPL */
+
+#if defined(__cplusplus)
+}
+#endif
+
+#endif /* TLIST_H */
