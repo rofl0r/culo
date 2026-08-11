@@ -365,6 +365,7 @@ struct {
 	bool show_line_numbers;	/* Toggle line numbers display */
 	bool show_whitespace;	/* Toggle tab/whitespace markers */
 	bool last_was_cut;	/* True if previous key was ^K (for appending cuts) */
+	bool read_only;		/* whether we can save to the original filename */
 	line_ending_t line_ending;
 	struct {
 		char *query;	/* Persists across ^W invocations; NULL until first search */
@@ -2362,7 +2363,21 @@ static void browser_set_base_dir_from_path(const char *path)
 	}
 }
 
-static void file_open(const char *file_name)
+static FILE* try_open(const char *file_name, bool* m) {
+	static const char mode[][3] = {"r+", "r"};
+	*m = 0;
+	FILE *f;
+	for(;;) {
+		if((f = fopen(file_name, mode[*m==true]))) break;
+		if(errno == ENOENT) break;
+		else if(errno != EACCES) break;
+		if(*m) break;
+		*m = true;
+	}
+	return f;
+}
+
+static bool file_open(const char *file_name)
 {
 	undo_history_clear();
 	for (int i = 0; i < NR; i++)
@@ -2383,12 +2398,12 @@ static void file_open(const char *file_name)
 	ec.file_name = strdup(file_name);
 	browser_set_base_dir_from_path(file_name);
 	syntax_select();
-	FILE *file = fopen(file_name, "r+");
+	FILE *file = try_open(file_name, &ec.read_only);
 	if (!file) {
 		if (errno != ENOENT)
-			panic("Failed to open the file");
+			return false;
 		ec.modified = false;
-		return;
+		return true;
 	}
 
 	char *line = NULL;
@@ -2419,15 +2434,16 @@ static void file_open(const char *file_name)
 			       (unsigned) (SYNTAX_AUTO_DISABLE_THRESHOLD >> 20));
 	}
 	ec.modified = false;
+	return true;
 }
 
-static void file_save(void)
+static bool file_save(void)
 {
 	char *name = ui_prompt("Save as: ", "^C: cancel",
 			       ec.file_name, NULL);
 	if (!name) {
 		ui_set_message("Save aborted");
-		return;
+		return false;
 	}
 	bool name_changed = !ec.file_name || strcmp(ec.file_name, name) != 0;
 	free(ec.file_name);
@@ -2439,38 +2455,40 @@ static void file_save(void)
 	size_t line_ending_len = line_ending_info[ec.line_ending].len;
 	size_t total_written = 0;
 	FILE *file = fopen(ec.file_name, "wb");
-	if (file) {
-		bool ok = true;
-		for (int j = 0; j < NR; j++) {
-			editor_row_t *row = ROW(j);
-			if (!file_write_chunk
-			    (file, row->chars, (size_t)row->size, &total_written) ||
-			    !file_write_chunk(file, line_ending, line_ending_len,
-					      &total_written)) {
-				ok = false;
-				break;
-			}
+	bool ok = file != NULL;
+	if (!ok) goto out;
+	for (int j = 0; j < NR; j++) {
+		editor_row_t *row = ROW(j);
+		if (!file_write_chunk
+		    (file, row->chars, (size_t)row->size, &total_written) ||
+		    !file_write_chunk(file, line_ending, line_ending_len,
+				      &total_written)) {
+			ok = false;
+			break;
 		}
-		int write_errno = errno;
-		int close_rc = fclose(file);
-		if (ok && close_rc == 0) {
-			ec.modified = false;
-			if (total_written >= 1024)
-				ui_set_message("%d KiB written to disk",
-					       (int)(total_written >> 10));
-			else
-				ui_set_message("%d B written to disk",
-					       (int)total_written);
-			return;
-		}
-		int saved_errno = write_errno;
-		if (!saved_errno && close_rc != 0)
-			saved_errno = errno;
-		if (!saved_errno)
-			saved_errno = EIO;
-		errno = saved_errno;
 	}
-	ui_set_message("Error: %s", strerror(errno));
+	int write_errno = errno;
+	int close_rc = fclose(file);
+	if (ok && close_rc == 0) {
+		ec.modified = false;
+		if (total_written >= 1024)
+			ui_set_message("%d KiB written to disk",
+				       (int)(total_written >> 10));
+		else
+			ui_set_message("%d B written to disk",
+				       (int)total_written);
+		return ok;
+	}
+	int saved_errno = write_errno;
+	if (!saved_errno && close_rc != 0)
+		saved_errno = errno;
+	if (!saved_errno)
+		saved_errno = EIO;
+	errno = saved_errno;
+out:
+	if (!ok)
+		ui_set_message("Error: %s", strerror(errno));
+	return ok;
 }
 
 /* Highlight the match at (row_idx, match_offset, match_len), saving the
@@ -4023,12 +4041,20 @@ static void browser_open_selected(void)
 			if (r == -1)
 				return;
 			if (r == 1)
-				file_save();
+				if(!file_save()) {
+					editor_refresh_full();
+					return;
+				}
 		}
-		file_open(full_path);
+		if(!file_open(full_path)) {
+			ui_set_message("Failed to open file: %s", strerror(errno));
+			editor_refresh_full();	/* Fully redraw the editor */
+			return;
+		}
+
 		browser_free_entries();
 		mode_set(MODE_NORMAL);
-		ui_set_message("Opened: %s", full_path);
+		ui_set_message("Opened: %s%s", full_path, ec.read_only? " [r/o]" : "");
 		editor_refresh_full();	/* Fully redraw the editor */
 	}
 }
@@ -4497,7 +4523,7 @@ static void editor_process_key(void)
 			if (r == -1)
 				return;	/* Cancel: stay in editor */
 			if (r == 1)
-				file_save();	/* Yes: save then quit */
+				if(!file_save()) return;	/* Yes: save then quit */
 			/* No (r == 0): discard changes and quit */
 		}
 		term_clear();
@@ -4705,9 +4731,13 @@ int main(int argc, char *argv[])
 {
 	editor_init();
 	if (argc >= 2)
-		file_open(argv[1]);
+		if(!file_open(argv[1])) {
+			printf("Failed to open file: %s", strerror(errno));
+			puts("");
+			return 1;
+		}
 	term_enable_raw();
-	ui_set_message("CULO Editor | ^G Help");
+	ui_set_message("%s | ^G Help", ec.read_only?"no write permission":"CULO Editor");
 	editor_refresh();
 
 	/* Main event loop */
