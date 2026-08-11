@@ -61,7 +61,7 @@ jobs:
         echo "Test content" > test_file.txt
         # Try to run the editor in batch mode with timeout
         # Exit codes: 124 = timeout, 1 = no TTY (expected in CI)
-        timeout 2s ./me test_file.txt < /dev/null || [ $? -eq 124 ] || [ $? -eq 1 ]
+        timeout 2s ./culo test_file.txt < /dev/null || [ $? -eq 124 ] || [ $? -eq 1 ]
         rm -f test_file.txt
 
   static-analysis:
