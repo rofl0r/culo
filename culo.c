@@ -674,30 +674,36 @@ static void term_clear(void)
 	write(STDOUT_FILENO, "\x1b[1;1H", 6);
 }
 
+static void perr(const char *s) {
+	while(*s && *s != '%') write(STDOUT_FILENO, s++, 1);
+	s = strerror(errno);
+	while(*s) write(STDOUT_FILENO, s++, 1);
+	write(STDOUT_FILENO, "\n", 1);
+}
+
 static void panic(const char *s)
 {
 	term_clear();
-	perror(s);
-	puts("\r\n");
+	perr(s);
 	exit(1);
 }
 
 static void term_open_buffer(void)
 {
 	if (write(STDOUT_FILENO, "\x1b[?47h", 6) == -1)
-		panic("Error changing terminal buffer");
+		panic("Error changing terminal buffer: ");
 }
 
 static void term_disable_raw(void)
 {
 	if (tcsetattr(STDIN_FILENO, TCSAFLUSH, &ec.orig_termios) == -1)
-		panic("Failed to disable raw mode");
+		panic("Failed to disable raw mode: ");
 }
 
 static void term_enable_raw(void)
 {
 	if (tcgetattr(STDIN_FILENO, &ec.orig_termios) == -1)
-		panic("Failed to get current terminal state");
+		panic("Failed to get current terminal state: ");
 	atexit(term_disable_raw);
 	struct termios raw = ec.orig_termios;
 	raw.c_iflag &= ~(BRKINT | ICRNL | INPCK | ISTRIP | IXON);
@@ -708,7 +714,7 @@ static void term_enable_raw(void)
 	raw.c_cc[VTIME] = 1;
 	term_open_buffer();
 	if (tcsetattr(STDIN_FILENO, TCSAFLUSH, &raw) == -1)
-		panic("Failed to set raw mode");
+		panic("Failed to set raw mode: ");
 }
 
 static int term_read_key(void)
@@ -718,7 +724,7 @@ static int term_read_key(void)
 	char c;
 	while ((nread = read(STDIN_FILENO, &c, 1)) != 1) {
 		if ((nread == -1) && (errno != EAGAIN))
-			panic("Error reading input");
+			panic("Error reading input: ");
 	}
 	/* If a previous lone ESC was recorded, combine it with this character */
 	if (meta_pending) {
@@ -850,7 +856,7 @@ static void term_close_buffer(void)
 {
 	if (write(STDOUT_FILENO, "\x1b[?9l", 5) == -1 ||
 	    write(STDOUT_FILENO, "\x1b[?47l", 6) == -1)
-		panic("Error restoring buffer state");
+		panic("Error restoring buffer state: ");
 	term_clear();
 }
 
@@ -4732,8 +4738,7 @@ int main(int argc, char *argv[])
 	editor_init();
 	if (argc >= 2)
 		if(!file_open(argv[1])) {
-			printf("Failed to open file: %s", strerror(errno));
-			puts("");
+			perr("Failed to open file: %s");
 			return 1;
 		}
 	term_enable_raw();
