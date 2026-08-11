@@ -4138,7 +4138,6 @@ static void editor_cleanup(void)
 
 static void editor_process_key(void)
 {
-	static int indent_level = 0;
 	/* Clear the transient overlay message from the previous keypress */
 	ec.overlay_msg[0] = '\0';
 	if (ec.mode == MODE_SEARCH && ec.search.replace_phase == 2) {
@@ -4518,8 +4517,6 @@ static void editor_process_key(void)
 	switch (c) {
 	case '\r':
 		editor_newline();
-		for (int i = 0; i < indent_level; i++)
-			editor_insert_char('\t', false);
 		break;
 	case CTRL_('x'):	/* Exit editor (GNU nano: ^X) */
 		if (ec.modified) {
@@ -4695,24 +4692,8 @@ static void editor_process_key(void)
 	case CTRL_('l'):
 	case '\x1b':
 		break;
-	case '{':
-		editor_insert_char(c, true);
-		indent_level++;
-		break;
 	case '\t':
 		editor_insert_char('\t', true);
-		break;
-	case '}':
-		if (ec.cursor_y == NR)
-			goto none;
-		if ((ec.cursor_x == 0) && (ec.cursor_y == 0))
-			goto none;
-		editor_row_t *row = ROW(ec.cursor_y);
-		if ((ec.cursor_x > 0) && (row->chars[ec.cursor_x - 1] == '\t'))
-			editor_delete_char();
- none:
-		editor_insert_char(c, true);
-		indent_level--;
 		break;
 	default:
 		/* Only insert printable ASCII and high bytes (UTF-8);
