@@ -15,7 +15,7 @@ compressed into a single line.
 
 ## Screenshot
 
-<img width="1299" height="772" alt="culo" src="https://github.com/user-attachments/assets/63311288-258f-431a-b15f-b6e8b7fa88bd" />
+<img width="1299" height="772" alt="culo" src="https://github.com/rofl0r/github-images/blob/master/culo.png?raw=true" />
 
 ## Usage
 
