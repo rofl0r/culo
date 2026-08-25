@@ -1613,7 +1613,11 @@ static bool undo_apply_replace_span(int row, int col, size_t from_len,
 	size_t new_size = (size_t) r->size - from_len + to_len;
 	if (new_size > INT_MAX)
 		return false;
-	char *nc = realloc(r->chars, new_size + 1);
+	/* Same ordering constraint as do_replace_one(): the memmove reads
+	 * up to chars[r->size], so shrink the block only after moving. */
+	size_t stage_size = ((size_t) r->size + 1 > new_size + 1) ?
+	    (size_t) r->size + 1 : new_size + 1;
+	char *nc = realloc(r->chars, stage_size);
 	if (!nc)
 		return false;
 	r->chars = nc;
@@ -1623,6 +1627,11 @@ static bool undo_apply_replace_span(int row, int col, size_t from_len,
 		memcpy(&r->chars[col], to_text, to_len);
 	r->size = (int)new_size;
 	r->chars[r->size] = '\0';
+	if (stage_size != new_size + 1) {
+		nc = realloc(r->chars, new_size + 1);
+		if (nc)
+			r->chars = nc;
+	}
 	row_update(r, row);
 	ec.modified = true;
 	return true;
