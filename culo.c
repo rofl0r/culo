@@ -301,6 +301,7 @@ typedef union {
 		int saved_x, saved_y, saved_col, saved_row;
 		int highlight_line;	/* Row index with search highlight (-1 = none) */
 		char *saved_highlight;	/* Saved highlight data for highlight_line */
+		int saved_highlight_size;	/* Allocation size of saved_highlight */
 	} search;
 	struct {
 		char *buffer;
@@ -534,7 +535,9 @@ static void mode_set(editor_mode_t new_mode)
 		if (ec.mode_state.search.saved_highlight &&
 		    ec.mode_state.search.highlight_line >= 0 &&
 		    ec.mode_state.search.highlight_line < NR &&
-		    ROW(ec.mode_state.search.highlight_line)->highlight) {
+		    ROW(ec.mode_state.search.highlight_line)->highlight &&
+		    ec.mode_state.search.saved_highlight_size ==
+		    ROW(ec.mode_state.search.highlight_line)->render_size) {
 			memcpy(ROW(ec.mode_state.search.highlight_line)->
 			       highlight, ec.mode_state.search.saved_highlight,
 			       ROW(ec.mode_state.search.highlight_line)->
@@ -2521,10 +2524,14 @@ static void search_highlight_match(int row_idx, int match_offset, int match_len)
 	if (ec.mode_state.search.saved_highlight &&
 	    ec.mode_state.search.highlight_line != row_idx) {
 		int prev = ec.mode_state.search.highlight_line;
-		if (prev >= 0 && prev < NR && ROW(prev)->highlight) {
-			memcpy(ROW(prev)->highlight,
+		editor_row_t *prev_row = (prev >= 0 && prev < NR) ?
+		    ROW(prev) : NULL;
+		if (prev_row && prev_row->highlight &&
+		    ec.mode_state.search.saved_highlight_size ==
+		    prev_row->render_size) {
+			memcpy(prev_row->highlight,
 			       ec.mode_state.search.saved_highlight,
-			       ROW(prev)->render_size);
+			       prev_row->render_size);
 		}
 		free(ec.mode_state.search.saved_highlight);
 		ec.mode_state.search.saved_highlight = NULL;
@@ -2539,6 +2546,7 @@ static void search_highlight_match(int row_idx, int match_offset, int match_len)
 		memcpy(ec.mode_state.search.saved_highlight, r->highlight,
 		       r->render_size);
 		ec.mode_state.search.highlight_line = row_idx;
+		ec.mode_state.search.saved_highlight_size = r->render_size;
 	}
 
 	/* Bounds check: only mark if match fits within the render buffer */
