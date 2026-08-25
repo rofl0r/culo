@@ -2621,6 +2621,8 @@ static bool row_find_first_match(editor_row_t * r, int min_off,
 {
 	if (min_off > r->size)
 		return false;
+	if (min_off < 0)
+		min_off = 0;
 	if (re) {
 		regmatch_t m;
 		if (regexec(re, r->chars + min_off, 1, &m, 0) != 0)
