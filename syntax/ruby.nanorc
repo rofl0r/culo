@@ -1,12 +1,45 @@
-syntax "ruby" "\.rb$|Rakefile$"
+## Syntax highlighting for Ruby.
 
-color brightblack "\<(BEGIN|END|alias|and|begin|break|case|class|def|defined\?|do|else|elsif|end|ensure|false|for|if|in|module|next|nil|not|or|redo|rescue|retry|return|self|super|then|true|undef|unless|until|when|while|yield)\>"
-color yellow  "(^|[[:space:]]):[A-Za-z0-9_]+\>"
-color magenta  "/([^/]|(\\/))*/[iomx]*" "%r\{([^}]|(\\}))*\}[iomx]*"
-color yellow ""(\\.|[^"])*"|'(\\.|[^'])*'"
+syntax ruby "\.rb$|Rakefile$|\.rake$|\.gemspec$|\.ru$|Gemfile$|Podfile$|Vagrantfile$"
+
+# Symbols, variables, character literals, regex literals.
+color brightmagenta "(^|[[:space:]({\[,]):[A-Za-z_][A-Za-z0-9_]*[!?]?|[@$]{1,2}[A-Za-z_][A-Za-z0-9_]*|\?(\\.|[A-Za-z0-9_])|/([^/]|\\/)+/[iomx]*)"
+
+# Reminders.  Before comments so they win inside them.
+color brightwhite,cyan "\<(FIXME|TODO|XXX)\>"
+
+# Comments (before keywords, so they stay one uniform color).
 color cyan "(^|[[:space:]])#([^{].*)?$"
-color cyan start="^=begin$" end="^=end$"
-color brightwhite,cyan "TODO:?"
+
+# Strings, command substitution and %-literals.
+color brightyellow ""(\\.|[^"])*"|'(\\.|[^'])*'|`[^`]*`|%[QqWwIirxs]?(\{[^}]*\}|\[[^\]]*\]|\([^)]*\)|<[^>]*>|![^!]*!)""
+
+# Control flow keywords and SCREAMING_CASE constants.
+color brightred "\<(BEGIN|END|and|begin|break|case|do|else|elsif|end|ensure|for|if|in|next|not|or|redo|rescue|retry|return|then|unless|until|when|while|yield|defined\?)\>|\<[[:upper:]_][[:upper:][:digit:]_]*\>"
+
+# Definition keywords and calls, mirroring the C scheme.
+color brightblue "\<(class|module|def|alias|undef)\>|\<def\>[[:space:]]+[A-Za-z_][A-Za-z0-9_:.\?!=]*|[A-Za-z_][A-Za-z0-9_]*[[:space:]]*\("
+
+# Parentheses, like the C scheme.
+color black "[(]"
+
+# Numbers: hex, binary, octal, integers, floats, exponents, r/i suffixes.
+color blue "\<(0[xX][0-9A-Fa-f_]+|0[bB][01_]+|0[oO][0-7_]+|[0-9][0-9_]*(\.[0-9][0-9_]*)?([eE][-+]?[0-9]+)?)([ri])?\>"
+
+# Operators.
+color red "[-+*/%<>=!&|^~]+"
+
+# Booleans, self/super and Capitalized class/module names.
+color green "\<(true|false|nil|self|super|__method__|__callee__|__FILE__|__LINE__)\>|\<[[:upper:]][[:alnum:]_]*\>"
+
+# Heredocs (identifier alone on a line closes the span).
+color yellow start="<<[-~]?[A-Za-z_]+\"?" end="^[[:blank:]]*[A-Za-z_]+[[:space:]]*$"
+
+# Block comments.
+color cyan start="^=begin([[:space:]]|$)" end="^=end([[:space:]]|$)"
+
+# Trailing whitespace.
 color ,green "[[:space:]]+$"
+
+# Mixed tabs and spaces.
 color ,red "	+ +| +	+"
-# +EXTRALINT
