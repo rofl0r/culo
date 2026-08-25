@@ -50,6 +50,10 @@ typedef enum {
 #define KEY_FLAG_SHIFT 0x2000
 #define KEY_NAV_(id) (KEY_FLAG_NAV | (id))
 #define KEY_SHIFT_NAV_(id) (KEY_FLAG_SHIFT | KEY_NAV_(id))
+/* Synthetic keys: plain TAB/SPACE never carry these flags, so they can
+ * never collide with real input bytes. */
+#define SHIFT_TAB (KEY_SHIFT_NAV_(9))
+#define SHIFT_SPACE (KEY_SHIFT_NAV_(32))
 #define TAB_STOP 4
 #define TAB_HEAD_STYLE "\x1b[90m"
 #define UNDO_STACK_CAP 64
@@ -402,6 +406,7 @@ typedef enum {
 	EDIT_INSERT = 0,
 	EDIT_DELETE = 1,
 	EDIT_REPLACE = 2,
+	EDIT_BLOCK_INDENT = 3,
 } edit_type_t;
 
 typedef struct {
@@ -518,6 +523,11 @@ static void undo_record_replace(int row, int col, const char *old_text,
 				size_t new_len, int before_y, int before_x,
 				int after_y, int after_x);
 static void undo_perform(bool redo);
+static bool undo_insert_bytes(int row_idx, int col, const char *s,
+			      size_t len);
+static bool undo_delete_bytes(int row_idx, int col, size_t len);
+static void selection_indent(int dir, const char *indent);
+static bool undo_apply_block_indent(const undo_item_t * item, bool redo);
 
 /* Mode management implementation */
 static void mode_set(editor_mode_t new_mode)
@@ -642,6 +652,10 @@ static const char *const help_lines[] = {
 	"  M-A     Set/toggle mark",
 	"  Shift+Cursor transient mark (clears on first non-shift-cursor key)",
 	"  M-6     Copy marked region",
+	"  Tab     Indent selected lines by one tab (M-A or Shift+Cursor mark)",
+	"  S-Tab   Remove one tab from selected lines",
+	"  Space   Indent selected lines by one space (repeat for more)",
+	"  S-Space Remove one leading space from selected lines",
 	"",
 	"Search:",
 	"  ^W      Find text (Where is)",
@@ -724,21 +738,21 @@ static int term_read_key(void)
 {
 	static bool meta_pending = false;
 	int nread;
-	char c;
+	unsigned char c;
 	while ((nread = read(STDIN_FILENO, &c, 1)) != 1) {
 		if ((nread == -1) && (errno != EAGAIN))
 			panic("Error reading input: ");
 	}
-	/* If a previous lone ESC was recorded, combine it with this character */
+	/* If a previous lone ESC was recorded, combine it with this character.
+	 * A following ESC starts a new sequence instead: fall through so
+	 * CSI decoding still happens. */
 	if (meta_pending) {
 		meta_pending = false;
-		/* Only META printable characters; leave control chars for their normal handlers */
 		if (c != '\x1b' && (unsigned char)c >= 0x20)
 			return META_((unsigned char)c);
-		/* Two ESCs in a row, or a control char: fall through to handle normally */
 	}
 	if (c == '\x1b') {
-		char seq[3];
+		unsigned char seq[3];
 		if (read(STDIN_FILENO, &seq[0], 1) != 1) {
 			/* Lone ESC with no following byte — remember it for next call */
 			meta_pending = true;
@@ -821,6 +835,8 @@ static int term_read_key(void)
 					return HOME_KEY;
 				case 'F':
 					return END_KEY;
+				case 'Z':	/* Shift+Tab (backtab) */
+					return SHIFT_TAB;
 				}
 			}
 		} else if (seq[0] == 'O') {
@@ -1590,6 +1606,38 @@ static void undo_record_common(edit_type_t type, int row, int col,
 		undo_history_append(item);
 }
 
+/* Record a block indent over [row, aux_len] using the indent string.
+ * Stored as one item so undo/redo flips the whole operation. */
+static void undo_record_block_indent(int first_row, int last_row,
+				     const char *indent, size_t len,
+				     int before_y, int before_x, int after_y,
+				     int after_x)
+{
+	/* Deliberately NOT guarded by g_undo.batching: selection_indent
+	 * batches its row edits so each per-line insert/delete is not
+	 * recorded, then records the whole block as one item here. */
+	if (g_undo.replaying || !indent || len == 0)
+		return;
+	char *text = malloc(len + 1);
+	if (!text)
+		return;
+	memcpy(text, indent, len);
+	text[len] = '\0';
+	undo_item_t item = {
+		.type = EDIT_BLOCK_INDENT,
+		.row = first_row,
+		.aux_len = last_row,
+		.text = text,
+		.len = len,
+		.col = 0,
+		.before_y = before_y,
+		.before_x = before_x,
+		.after_y = after_y,
+		.after_x = after_x,
+	};
+	undo_history_append(item);
+}
+
 static void undo_record_insert(int row, int col, const char *text, size_t len,
 			       int before_y, int before_x, int after_y,
 			       int after_x)
@@ -1604,6 +1652,50 @@ static void undo_record_delete(int row, int col, const char *text, size_t len,
 {
 	undo_record_common(EDIT_DELETE, row, col, text, len, before_y, before_x,
 			   after_y, after_x);
+}
+
+/* Apply a whole-block indent recorded as one undo step.
+ * item->row = first line, item->aux_len = last line, item->text holds
+ * the indent string, item->len is its length.  Redo re-indents each
+ * line in the range; undo removes up to one indent per line bottom-up
+ * so row indices stay valid. */
+static bool undo_apply_block_indent(const undo_item_t * item, bool redo)
+{
+	if (!item->text || item->len == 0)
+		return false;
+	int first = item->row;
+	int last = (int) item->aux_len;
+
+	if (first < 0)
+		first = 0;
+	if (last > NR - 1)
+		last = NR - 1;
+	if (first > last)
+		return false;
+
+	for (int y = redo ? first : last;
+	     redo ? y <= last : y >= first; y += redo ? 1 : -1) {
+		editor_row_t *row = ROW(y);
+		if (!row || row->size == 0)
+			continue;
+		size_t ilen = item->len;
+		/* Redo: unconditionally re-add one indent.  The line may
+		 * legitimately start with the indent text here - it kept
+		 * the extra level from a later edit or an earlier press. */
+		if (redo) {
+			undo_insert_bytes(y, 0, item->text, ilen);
+			continue;
+		}
+		/* Undo: remove one indent, or one opposite indent char. */
+		bool starts_with_indent =
+		    (size_t) row->size >= ilen &&
+		    memcmp(row->chars, item->text, ilen) == 0;
+		size_t strip_len = starts_with_indent ? ilen :
+		    (row->chars[0] != item->text[0] ? 1 : 0);
+		if (strip_len > 0)
+			undo_delete_bytes(y, 0, strip_len);
+	}
+	return true;	/* best effort: keep cursor update */
 }
 
 static bool undo_apply_replace_span(int row, int col, size_t from_len,
@@ -1674,7 +1766,11 @@ static void undo_apply_item(const undo_item_t * item, bool redo)
 {
 	bool ok;
 	int cy, cx;
-	if (redo) {
+	if (item->type == EDIT_BLOCK_INDENT) {
+		ok = undo_apply_block_indent(item, redo);
+		cy = redo ? item->after_y : item->before_y;
+		cx = redo ? item->after_x : item->before_x;
+	} else if (redo) {
 		ok = (item->type ==
 		      EDIT_INSERT) ? undo_apply_insert_text(item->row,
 							    item->col,
@@ -1703,8 +1799,9 @@ static void undo_apply_item(const undo_item_t * item, bool redo)
 		    ? undo_apply_insert_text(item->row, item->col, item->text,
 					     item->
 					     len) :
-		    undo_apply_replace_span(item->row, item->col, item->aux_len,
-					    item->text, item->len);
+		    undo_apply_replace_span(item->row, item->col,
+					    item->aux_len, item->text,
+					    item->len);
 		cy = item->before_y;
 		cx = item->before_x;
 	}
@@ -2056,6 +2153,89 @@ static char *selection_get_text(void)
 	*p = '\0';
 
 	return buffer;
+}
+
+/* Indent or unindent every line covered by the active selection.
+ * dir > 0 inserts "indent" at each line start, dir < 0 removes up to
+ * one leading occurrence of it.  The whole operation is a single undo
+ * step; the selection stays active and its offsets are adjusted so the
+ * key can be repeated immediately. */
+static void selection_indent(int dir, const char *indent)
+{
+	if (!ec.selection.active || !indent || !*indent)
+		return;
+	size_t ilen = strlen(indent);
+
+	int start_y = ec.selection.start_y;
+	int end_y = ec.selection.end_y;
+
+	/* Normalize the row range only; column offsets handled below. */
+	if (start_y > end_y) {
+		int ty = start_y;
+		start_y = end_y;
+		end_y = ty;
+		int tx = ec.selection.start_x;
+		ec.selection.start_x = ec.selection.end_x;
+		ec.selection.end_x = tx;
+	}
+	if (end_y >= NR)
+		end_y = NR - 1;
+	if (start_y > end_y)
+		return;
+
+	int before_y = ec.cursor_y, before_x = ec.cursor_x;
+	int first_touched = -1, last_touched = -1;
+	g_undo.batching = true;
+	for (int y = start_y; y <= end_y; y++) {
+		editor_row_t *row = ROW(y);
+		if (!row)
+			continue;
+		bool changed = false;
+		int shift = 0;
+		if (dir > 0) {
+			changed = undo_insert_bytes(y, 0, indent, ilen);
+			shift = changed ? (int) ilen : 0;
+		} else if (row->size > 0) {
+			size_t strip_len = 0;
+			if ((size_t) row->size >= ilen &&
+			    memcmp(row->chars, indent, ilen) == 0) {
+				strip_len = ilen;
+			} else if (indent[0] == ' ' &&
+				   row->chars[0] == '\t') {
+				/* Space unindent also takes a tab, so a
+				 * space shift still works on files that
+				 * mix tabs into the indentation. */
+				strip_len = 1;
+			}
+			if (strip_len > 0)
+				changed = undo_delete_bytes(y, 0, strip_len);
+			shift = changed ? -(int) strip_len : 0;
+		}
+		if (!changed) {
+			if (dir > 0)
+				break;	/* OOM: keep undo consistent */
+			continue;
+		}
+		ec.modified = true;
+		if (first_touched < 0)
+			first_touched = y;
+		last_touched = y;
+		if (y == start_y)
+			ec.selection.start_x += shift;
+		if (y == end_y)
+			ec.selection.end_x += shift;
+		if (ec.cursor_y == y)
+			ec.cursor_x += shift;
+	}
+	g_undo.batching = false;
+
+	/* Record the exact range actually touched, not the selection:
+	 * empty lines at the end of a block get no indent and must not
+	 * be part of the undo item. */
+	undo_record_block_indent(first_touched < 0 ? start_y : first_touched,
+				 last_touched, indent, ilen,
+				 before_y, before_x, ec.cursor_y,
+				 ec.cursor_x);
 }
 
 /* Copy selected text to clipboard */
@@ -4267,6 +4447,29 @@ static void editor_process_key(void)
 		break;
 
 	case MODE_SELECT:
+		/* Block indent keys work regardless of how the selection
+		 * started; handle them before the navigation gates below,
+		 * whose flag tests would otherwise swallow them. */
+		if (c == '\t') {
+			selection_indent(1, "\t");
+			ui_set_message("Block indented");
+			return;
+		}
+		if (c == SHIFT_TAB) {
+			selection_indent(-1, "\t");
+			ui_set_message("Block unindented");
+			return;
+		}
+		if (c == ' ') {
+			selection_indent(1, " ");
+			ui_set_message("Block indented");
+			return;
+		}
+		if (c == SHIFT_SPACE) {
+			selection_indent(-1, " ");
+			ui_set_message("Block unindented");
+			return;
+		}
 		if (ec.mode_state.select.shift_only) {
 			if (key_is_shift_select_nav(c)) {
 				selection_move_cursor(c);
@@ -4305,6 +4508,17 @@ static void editor_process_key(void)
 		   \b (8) which is the actual char sent when using backspace */
 		case CTRL_('h'):
 			selection_delete();
+			return;
+		case META_('e'):	/* Redo likewise. */
+		case META_('E'):
+			mode_set(MODE_NORMAL);
+			undo_perform(true);
+			return;
+		case META_('u'):
+		case META_('U'):
+		case CTRL_('z'):
+			mode_set(MODE_NORMAL);
+			undo_perform(false);
 			return;
 		default:
 			/* Exit selection mode for other keys */
