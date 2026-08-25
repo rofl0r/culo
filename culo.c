@@ -2200,11 +2200,12 @@ static void selection_indent(int dir, const char *indent)
 			if ((size_t) row->size >= ilen &&
 			    memcmp(row->chars, indent, ilen) == 0) {
 				strip_len = ilen;
-			} else if (indent[0] == ' ' &&
+			} else if (row->chars[0] == ' ' ||
 				   row->chars[0] == '\t') {
-				/* Space unindent also takes a tab, so a
-				 * space shift still works on files that
-				 * mix tabs into the indentation. */
+				/* Line leads with the other indent character
+				 * (or a lone one): strip one so shifts work
+				 * on mixed-indent files.  Only whitespace
+				 * is ever removed. */
 				strip_len = 1;
 			}
 			if (strip_len > 0)
