@@ -2757,7 +2757,13 @@ static bool do_replace_one(const char *replacement, size_t repl_len)
 	size_t new_size = (size_t) row->size - (size_t) oldlen + repl_len;
 	if (new_size > INT_MAX)
 		goto out;
-	char *nc = realloc(row->chars, new_size + 1);
+	/* Resize to the larger of old/new before shifting the tail: the
+	 * memmove below reads the terminator at chars[row->size], which a
+	 * shrink-to-new_size realloc would already have cut off.  Reading
+	 * past a shrunken block copies adjacent heap bytes into the line. */
+	size_t stage_size = ((size_t) row->size + 1 > new_size + 1) ?
+	    (size_t) row->size + 1 : new_size + 1;
+	char *nc = realloc(row->chars, stage_size);
 	if (!nc)
 		goto out;
 	row->chars = nc;
@@ -2767,6 +2773,12 @@ static bool do_replace_one(const char *replacement, size_t repl_len)
 		memcpy(&row->chars[off], replacement, repl_len);
 	row->size = (int)new_size;
 	row->chars[row->size] = '\0';
+	if (stage_size != new_size + 1) {
+		/* Shrink back to the exact size; keep old block on failure. */
+		nc = realloc(row->chars, new_size + 1);
+		if (nc)
+			row->chars = nc;
+	}
 	row_update(row, g_last_match.row);
 	ec.modified = true;
 	undo_record_replace(g_last_match.row, off, old_text, (size_t) oldlen,
