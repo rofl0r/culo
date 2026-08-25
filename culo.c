@@ -4396,7 +4396,7 @@ static void editor_process_key(void)
 									replace_len]
 						    = '\0';
 					}
-				} else if (c < 0x100 && isprint(c)) {
+				} else if (c == '\t' || (c < 0x100 && isprint(c))) {
 					/* Ensure replace buffer is allocated */
 					if (!ec.search.replace_query) {
 						size_t cap = 128;
@@ -4495,7 +4495,7 @@ static void editor_process_key(void)
 				} else if (ec.search.query_len > 0)
 					ec.search.query[--ec.search.query_len] =
 					    '\0';
-			} else if (c < 0x100 && isprint(c)) {
+			} else if (c == '\t' || (c < 0x100 && isprint(c))) {
 				if (ec.search.prefill_from_start)
 					search_clear_prefilled_query();
 				/* Append character to query */
