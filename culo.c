@@ -48,8 +48,10 @@ typedef enum {
 #define META_(k) (0x800 | (unsigned char)(k))
 #define KEY_FLAG_NAV 0x1000
 #define KEY_FLAG_SHIFT 0x2000
+#define KEY_FLAG_CTRL 0x4000
 #define KEY_NAV_(id) (KEY_FLAG_NAV | (id))
 #define KEY_SHIFT_NAV_(id) (KEY_FLAG_SHIFT | KEY_NAV_(id))
+#define KEY_CTRL_NAV_(id) (KEY_FLAG_CTRL | KEY_NAV_(id))
 /* Synthetic keys: plain TAB/SPACE never carry these flags, so they can
  * never collide with real input bytes. */
 #define SHIFT_TAB (KEY_SHIFT_NAV_(9))
@@ -492,6 +494,8 @@ enum editor_key {
 	SHIFT_PAGE_UP = KEY_SHIFT_NAV_(5), SHIFT_PAGE_DOWN = KEY_SHIFT_NAV_(6),
 	SHIFT_HOME_KEY = KEY_SHIFT_NAV_(7), SHIFT_END_KEY =
 	    KEY_SHIFT_NAV_(8),
+	CTRL_ARROW_LEFT = KEY_CTRL_NAV_(1), CTRL_ARROW_RIGHT =
+	    KEY_CTRL_NAV_(2),
 };
 
 typedef enum {
@@ -513,6 +517,7 @@ static int get_line_number_width(void);
 static void editor_newline(void);
 static void editor_insert_char(int c, bool manual_typing);
 static void editor_move_cursor(int key);
+static void editor_move_word(int dir);
 static void undo_record_insert(int row, int col, const char *text, size_t len,
 			       int before_y, int before_x, int after_y,
 			       int after_x);
@@ -667,6 +672,8 @@ static const char *const help_lines[] = {
 	"",
 	"Navigation:",
 	"  Arrows  Move cursor",
+	"  ^Left   Jump to previous word",
+	"  ^Right  Jump to next word",
 	"  PgUp    Page up",
 	"  PgDn    Page down",
 	"  Home    Beginning of line",
@@ -790,6 +797,11 @@ static int term_read_key(void)
 						/* Incomplete CSI modifier sequence: treat as literal ESC
 						 * so we don't invent a partial key event from truncated bytes. */
 						return '\x1b';
+					if (mod == '5' && (fin == 'C' || fin == 'D'))
+						/* Ctrl+Right / Ctrl+Left */
+						return fin == 'C' ?
+						    CTRL_ARROW_RIGHT :
+						    CTRL_ARROW_LEFT;
 					if (mod == '2') {
 						if (fin == '~') {
 							switch (seq[1]) {
@@ -3977,6 +3989,44 @@ static void editor_move_cursor(int key)
 		ec.cursor_x = row_len;
 }
 
+/* A word character: letter, digit, or underscore. */
+static bool is_word_char(unsigned char c)
+{
+	return isalnum(c) || c == '_';
+}
+
+/* Jump one word forward (dir > 0) or backward (dir < 0).  A word is
+ * letters, digits, underscore.  Forward always ends on the first
+ * character of the next word; backward on the first character of the
+ * previous one - symbols between words are crossed, never landed on.
+ * Stops at line edges; does not cross rows, like nano's Ctrl+arrows. */
+static void editor_move_word(int dir)
+{
+	editor_row_t *row = (ec.cursor_y >= NR) ? NULL : ROW(ec.cursor_y);
+	if (!row)
+		return;
+	if (dir > 0) {
+		/* Leave the current word, then cross to the next. */
+		while (ec.cursor_x < row->size &&
+		       is_word_char((unsigned char) row->chars[ec.cursor_x]))
+			ec.cursor_x++;
+		while (ec.cursor_x < row->size &&
+		       !is_word_char((unsigned char) row->chars[ec.cursor_x]))
+			ec.cursor_x++;
+	} else {
+		/* Cross the gap, then walk the previous word down to
+		 * its first character.  Starting inside a word skips
+		 * the first loop and lands on that word's start. */
+		while (ec.cursor_x > 0 && !is_word_char((unsigned char)
+							row->chars[ec.cursor_x -
+								       1]))
+			ec.cursor_x--;
+		while (ec.cursor_x > 0 &&
+		       is_word_char((unsigned char) row->chars[ec.cursor_x - 1]))
+			ec.cursor_x--;
+	}
+}
+
 static void editor_goto_matching_bracket(void)
 {
 	static const char brackets[] = "{}()[]";
@@ -4854,6 +4904,12 @@ static void editor_process_key(void)
 	case ARROW_LEFT:
 	case ARROW_RIGHT:
 		editor_move_cursor(c);
+		break;
+	case CTRL_ARROW_LEFT:
+		editor_move_word(-1);
+		break;
+	case CTRL_ARROW_RIGHT:
+		editor_move_word(1);
 		break;
 	case PAGE_UP:
 	case PAGE_DOWN:{

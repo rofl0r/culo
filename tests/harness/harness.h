@@ -75,6 +75,16 @@ static void h_open(const char *path)
 /* Assertion helpers. */
 static int h_fails;
 
+static void h_expect_eq(int got, int want)
+{
+	if (got != want) {
+		printf("FAIL: got %d want %d\n", got, want);
+		h_fails++;
+	} else {
+		printf("ok   %d\n", got);
+	}
+}
+
 static void h_expect_row(int y, const char *want)
 {
 	const char *got = ROW(y)->chars;
