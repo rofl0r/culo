@@ -80,3 +80,6 @@ valgrind-*.txt
 *.patch
 *.diff
 config.mak
+
+tests/harness/test_*
+!tests/harness/test_*.c
