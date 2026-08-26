@@ -83,3 +83,10 @@ config.mak
 
 tests/harness/test_*
 !tests/harness/test_*.c
+
+# interactive key probe
+keydump
+
+# key probe dumps
+kd*.txt
+test_crap

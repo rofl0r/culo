@@ -15,7 +15,7 @@ BINARIES := $(TESTS:.c=)
 
 all: $(BINARIES)
 
-%: %.c harness.h
+%: %.c harness.h ../../culo.c ../../nregex.c
 	$(HARNESS_CC) $(HARNESS_CFLAGS) -include dlfcn.h -o $@ $< $(LDLIBS)
 
 run: all
