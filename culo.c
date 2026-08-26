@@ -415,6 +415,7 @@ typedef struct {
 	char *text;
 	size_t len;
 	size_t aux_len;
+	int dir;		/* block indent: +1 indented, -1 unindented */
 	int before_y, before_x;
 	int after_y, after_x;
 } undo_item_t;
@@ -655,7 +656,7 @@ static const char *const help_lines[] = {
 	"  Tab     Indent selected lines by one tab (M-A or Shift+Cursor mark)",
 	"  S-Tab   Remove one tab from selected lines",
 	"  Space   Indent selected lines by one space (repeat for more)",
-	"  S-Space Remove one leading space from selected lines",
+	"  M-Space Remove one leading space from selected lines",
 	"",
 	"Search:",
 	"  ^W      Find text (Where is)",
@@ -1587,7 +1588,7 @@ static bool undo_apply_delete_text(int row, int col, const char *text,
 
 /* Build an undo item; text is heap-copied, NULL on OOM. */
 static undo_item_t undo_item_make(edit_type_t type, int row, int col,
-				  const char *text, size_t len,
+				  const char *text, size_t len, int dir,
 				  int before_y, int before_x, int after_y,
 				  int after_x)
 {
@@ -1597,6 +1598,7 @@ static undo_item_t undo_item_make(edit_type_t type, int row, int col,
 		.col = col,
 		.text = xstrndup0(text, len),
 		.len = len,
+		.dir = dir,
 		.before_y = before_y,
 		.before_x = before_x,
 		.after_y = after_y,
@@ -1611,7 +1613,7 @@ static void undo_record_common(edit_type_t type, int row, int col,
 {
 	if (g_undo.replaying || g_undo.batching || !text || len == 0)
 		return;
-	undo_item_t item = undo_item_make(type, row, col, text, len,
+	undo_item_t item = undo_item_make(type, row, col, text, len, 0,
 					  before_y, before_x, after_y,
 					  after_x);
 	if (item.text)
@@ -1619,9 +1621,10 @@ static void undo_record_common(edit_type_t type, int row, int col,
 }
 
 /* Record a block indent over [row, aux_len] using the indent string.
- * Stored as one item so undo/redo flips the whole operation. */
+ * dir is +1 for indent, -1 for unindent.  Stored as one item so
+ * undo/redo flips the whole operation. */
 static void undo_record_block_indent(int first_row, int last_row,
-				     const char *indent, size_t len,
+				     const char *indent, size_t len, int dir,
 				     int before_y, int before_x, int after_y,
 				     int after_x)
 {
@@ -1631,8 +1634,8 @@ static void undo_record_block_indent(int first_row, int last_row,
 	if (g_undo.replaying || !indent || len == 0)
 		return;
 	undo_item_t item = undo_item_make(EDIT_BLOCK_INDENT, first_row, 0,
-					  indent, len, before_y, before_x,
-					  after_y, after_x);
+					  indent, len, dir, before_y,
+					  before_x, after_y, after_x);
 	if (!item.text)
 		return;
 	item.aux_len = last_row;
@@ -1695,18 +1698,18 @@ static bool undo_apply_block_indent(const undo_item_t * item, bool redo)
 		if (!row || row->size == 0)
 			continue;
 		size_t ilen = item->len;
-		/* Redo: unconditionally re-add one indent.  The line may
-		 * legitimately start with the indent text here - it kept
-		 * the extra level from a later edit or an earlier press. */
-		if (redo) {
+		/* Invert exactly what was recorded: an indent press is
+		 * undone by stripping, an unindent press by re-adding.
+		 * Strip follows the live rule so no text but whitespace
+		 * can ever be removed. */
+		if ((redo ? item->dir < 0 : item->dir > 0)) {
+			size_t strip_len =
+			    indent_strip_len(row, item->text, ilen);
+			if (strip_len > 0)
+				undo_delete_bytes(y, 0, strip_len);
+		} else {
 			undo_insert_bytes(y, 0, item->text, ilen);
-			continue;
 		}
-		/* Undo: remove one indent, else one whitespace char -
-		 * same rule as the live unindent pass. */
-		size_t strip_len = indent_strip_len(row, item->text, ilen);
-		if (strip_len > 0)
-			undo_delete_bytes(y, 0, strip_len);
 	}
 	return true;	/* best effort: keep cursor update */
 }
@@ -1824,6 +1827,10 @@ static void undo_apply_item(const undo_item_t * item, bool redo)
 		if (ec.cursor_y < NR && ec.cursor_x > ROW(ec.cursor_y)->size)
 			ec.cursor_x = ROW(ec.cursor_y)->size;
 	}
+	/* A replayed indent moves line starts; a live selection anchored
+	 * to the old geometry would then mis-shift the next keypress and
+	 * desync later undos.  Drop it. */
+	ec.selection.active = false;
 }
 
 static void undo_perform(bool redo)
@@ -2237,7 +2244,7 @@ static void selection_indent(int dir, const char *indent)
 	 * empty lines at the end of a block get no indent and must not
 	 * be part of the undo item. */
 	undo_record_block_indent(first_touched < 0 ? start_y : first_touched,
-				 last_touched, indent, ilen,
+				 last_touched, indent, ilen, dir,
 				 before_y, before_x, ec.cursor_y,
 				 ec.cursor_x);
 }
@@ -4469,7 +4476,9 @@ static void editor_process_key(void)
 			ui_set_message("Block indented");
 			return;
 		}
-		if (c == SHIFT_SPACE) {
+		if (c == SHIFT_SPACE || c == META_(' ')) {
+			/* Plain VT has no code for Shift+Space; M-Space
+			 * is the alias every terminal can send. */
 			selection_indent(-1, " ");
 			ui_set_message("Block unindented");
 			return;
@@ -4516,12 +4525,14 @@ static void editor_process_key(void)
 		case META_('e'):	/* Redo likewise. */
 		case META_('E'):
 			mode_set(MODE_NORMAL);
+			ec.selection.active = false;
 			undo_perform(true);
 			return;
 		case META_('u'):
 		case META_('U'):
 		case CTRL_('z'):
 			mode_set(MODE_NORMAL);
+			ec.selection.active = false;
 			undo_perform(false);
 			return;
 		default:

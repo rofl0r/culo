@@ -93,6 +93,17 @@ int main(void)
 	h_run("\033e");
 	h_expect_row(0, "  alpha");
 
+	/* --- 5. M-Space unindents by one space (Shift+Space is not
+	 *     expressible in plain VT; M-Space is the portable alias) */
+	h_open(FIXTURE_PATH);
+	h_run("\033[H\033[1;2B\033[1;2B");	/* select rows 1-3 */
+	h_run("    ");		/* four space indents */
+	h_expect_row(1, "    beta");
+	h_run("\033 ");		/* one M-Space peels one space */
+	h_expect_row(1, "   beta");
+	h_run("\033u");		/* undo reverses exactly that press */
+	h_expect_row(1, "    beta");
+
 	printf("block-indent tests: %d failures\n", h_fails);
 	return h_fails ? 1 : 0;
 }
