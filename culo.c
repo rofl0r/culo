@@ -1585,12 +1585,12 @@ static bool undo_apply_delete_text(int row, int col, const char *text,
 	return true;
 }
 
-static void undo_record_common(edit_type_t type, int row, int col,
-			       const char *text, size_t len, int before_y,
-			       int before_x, int after_y, int after_x)
+/* Build an undo item; text is heap-copied, NULL on OOM. */
+static undo_item_t undo_item_make(edit_type_t type, int row, int col,
+				  const char *text, size_t len,
+				  int before_y, int before_x, int after_y,
+				  int after_x)
 {
-	if (g_undo.replaying || g_undo.batching || !text || len == 0)
-		return;
 	undo_item_t item = {
 		.type = type,
 		.row = row,
@@ -1602,6 +1602,18 @@ static void undo_record_common(edit_type_t type, int row, int col,
 		.after_y = after_y,
 		.after_x = after_x,
 	};
+	return item;
+}
+
+static void undo_record_common(edit_type_t type, int row, int col,
+			       const char *text, size_t len, int before_y,
+			       int before_x, int after_y, int after_x)
+{
+	if (g_undo.replaying || g_undo.batching || !text || len == 0)
+		return;
+	undo_item_t item = undo_item_make(type, row, col, text, len,
+					  before_y, before_x, after_y,
+					  after_x);
 	if (item.text)
 		undo_history_append(item);
 }
@@ -1618,23 +1630,12 @@ static void undo_record_block_indent(int first_row, int last_row,
 	 * recorded, then records the whole block as one item here. */
 	if (g_undo.replaying || !indent || len == 0)
 		return;
-	char *text = malloc(len + 1);
-	if (!text)
+	undo_item_t item = undo_item_make(EDIT_BLOCK_INDENT, first_row, 0,
+					  indent, len, before_y, before_x,
+					  after_y, after_x);
+	if (!item.text)
 		return;
-	memcpy(text, indent, len);
-	text[len] = '\0';
-	undo_item_t item = {
-		.type = EDIT_BLOCK_INDENT,
-		.row = first_row,
-		.aux_len = last_row,
-		.text = text,
-		.len = len,
-		.col = 0,
-		.before_y = before_y,
-		.before_x = before_x,
-		.after_y = after_y,
-		.after_x = after_x,
-	};
+	item.aux_len = last_row;
 	undo_history_append(item);
 }
 
@@ -1652,6 +1653,21 @@ static void undo_record_delete(int row, int col, const char *text, size_t len,
 {
 	undo_record_common(EDIT_DELETE, row, col, text, len, before_y, before_x,
 			   after_y, after_x);
+}
+
+/* Bytes an unindent removes from a line start: one full leading copy
+ * of "indent", else one whitespace character (so shifts still work on
+ * mixed-indent files).  Never eats any other text.  Shared by the live
+ * unindent pass and by undo of a block indent, so both agree. */
+static size_t indent_strip_len(const editor_row_t * row, const char *indent,
+			       size_t ilen)
+{
+	if (!row || row->size == 0)
+		return 0;
+	if ((size_t) row->size >= ilen &&
+	    memcmp(row->chars, indent, ilen) == 0)
+		return ilen;
+	return (row->chars[0] == ' ' || row->chars[0] == '\t') ? 1 : 0;
 }
 
 /* Apply a whole-block indent recorded as one undo step.
@@ -1686,12 +1702,9 @@ static bool undo_apply_block_indent(const undo_item_t * item, bool redo)
 			undo_insert_bytes(y, 0, item->text, ilen);
 			continue;
 		}
-		/* Undo: remove one indent, or one opposite indent char. */
-		bool starts_with_indent =
-		    (size_t) row->size >= ilen &&
-		    memcmp(row->chars, item->text, ilen) == 0;
-		size_t strip_len = starts_with_indent ? ilen :
-		    (row->chars[0] != item->text[0] ? 1 : 0);
+		/* Undo: remove one indent, else one whitespace char -
+		 * same rule as the live unindent pass. */
+		size_t strip_len = indent_strip_len(row, item->text, ilen);
 		if (strip_len > 0)
 			undo_delete_bytes(y, 0, strip_len);
 	}
@@ -2195,22 +2208,12 @@ static void selection_indent(int dir, const char *indent)
 		if (dir > 0) {
 			changed = undo_insert_bytes(y, 0, indent, ilen);
 			shift = changed ? (int) ilen : 0;
-		} else if (row->size > 0) {
-			size_t strip_len = 0;
-			if ((size_t) row->size >= ilen &&
-			    memcmp(row->chars, indent, ilen) == 0) {
-				strip_len = ilen;
-			} else if (row->chars[0] == ' ' ||
-				   row->chars[0] == '\t') {
-				/* Line leads with the other indent character
-				 * (or a lone one): strip one so shifts work
-				 * on mixed-indent files.  Only whitespace
-				 * is ever removed. */
-				strip_len = 1;
-			}
-			if (strip_len > 0)
+		} else {
+			size_t strip_len = indent_strip_len(row, indent, ilen);
+			if (strip_len > 0) {
 				changed = undo_delete_bytes(y, 0, strip_len);
-			shift = changed ? -(int) strip_len : 0;
+				shift = -(int) strip_len;
+			}
 		}
 		if (!changed) {
 			if (dir > 0)
