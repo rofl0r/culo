@@ -3044,25 +3044,23 @@ static bool replace_and_advance(const char *rq, size_t rqlen)
 	bool backwards = (ec.search.mode & SM_BACKWARDS) != 0;
 	bool already_wrapped = ec.search.has_wrapped;
 	int prev_off = g_last_match.char_off;
-	int prev_len = g_last_match.char_len;
 	if (!do_replace_one(rq, rqlen))
 		return false;	/* invalid match: stop instead of looping */
 	editor_row_t *rp = ROW(g_last_match.row);
 	/* The row shrank/grew during the replace; clamp the skip offset so
 	 * the next search never starts past the string terminator. */
-	int replaced_len = prev_len;
-	if (rp && prev_off > rp->size)
-		replaced_len = 0;
 	ec.search.replace_count++;
 	/* Advance past the replaced range so we don't re-match it. */
 	int skip_off;
 	if (backwards) {
 		skip_off = prev_off - 1;	/* look strictly before the replaced position */
 	} else {
-		int advance = (int)rqlen > replaced_len ? (int)rqlen : replaced_len;
-		/* Guard against zero: rqlen==0 (empty replacement) and prev_len==0
-		 * (zero-width regex match like ^) would leave skip_off==prev_off
-		 * and cause an infinite loop. */
+		/* New line: prefix + replacement + old tail, so the old tail
+		 * starts at prev_off + rqlen. Using the old match length skips
+		 * matches when the row shrank (rqlen < old match length). */
+		int advance = (int)rqlen;
+			/* rqlen==0 (empty replacement) with a zero-width match would
+			 * leave skip_off==prev_off and cause an infinite loop. */
 		if (advance <= 0)
 			advance = 1;
 		skip_off = prev_off + advance;
