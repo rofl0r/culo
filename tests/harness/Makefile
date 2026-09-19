@@ -4,7 +4,7 @@
 # decoder, so assertions can inspect editor internals (selection state,
 # undo stack) that a pty-based suite cannot reach.  Run via `make check-harness`.
 
-HARNESS_CC ?= musl-gcc          # musl + valgrind exposes heap bugs glibc hides
+HARNESS_CC ?= $(CC)          # musl + valgrind exposes heap bugs glibc hides
 HARNESS_CFLAGS = -g -Wall -Wno-unused -std=gnu99 -D_GNU_SOURCE -I../..
 LDLIBS = ../../nregex.c -ldl
 
