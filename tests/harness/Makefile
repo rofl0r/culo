@@ -10,6 +10,9 @@ LDLIBS = ../../nregex.c -ldl
 
 TESTS := $(wildcard test_*.c)
 BINARIES := $(TESTS:.c=)
+# Fixtures use repo-root-relative paths, so the binaries run from the root.
+REPO_ROOT = ../..
+FIXTURE_DIR = $(REPO_ROOT)/tests/test_tmp
 
 .PHONY: all clean run
 
@@ -18,8 +21,11 @@ all: $(BINARIES)
 %: %.c harness.h ../../culo.c ../../nregex.c
 	$(HARNESS_CC) $(HARNESS_CFLAGS) -include dlfcn.h -o $@ $< $(LDLIBS)
 
-run: all
-	@for t in $(BINARIES); do ./$$t > /dev/null 2>&1 || { echo "FAIL: $$t"; exit 1; }; echo "ok   $$t"; done
+run: all $(FIXTURE_DIR)
+	@cd $(REPO_ROOT) && for t in $(addprefix tests/harness/,$(BINARIES)); do ./$$t > /dev/null 2>&1 || { echo "FAIL: $$t"; exit 1; }; echo "ok   $$t"; done
+
+$(FIXTURE_DIR):
+	mkdir -p $@
 
 clean:
 	$(RM) $(BINARIES)

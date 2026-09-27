@@ -33,6 +33,7 @@ declare -A TEST_SUITES=(
     ["test-search.sh"]="Search Tests"
     ["test-file_browser.sh"]="File Browser Tests"
     ["test-line_numbers.sh"]="Line Numbers Tests"
+    ["test-paste_burst.sh"]="Paste Burst Tests"
 )
 
 echo "===== Mazu Editor Test Suite ====="
@@ -64,7 +65,7 @@ trap "rm -f $ALL_OUTPUT" EXIT
     # Run all test suites
     for test_file in "test-file_operations.sh" "test-copy_paste.sh" "test-selection.sh" \
                      "test-undo_redo.sh" "test-search.sh" "test-file_browser.sh" \
-                     "test-line_numbers.sh"; do
+                     "test-line_numbers.sh" "test-paste_burst.sh"; do
         run_test_suite "$test_file" "${TEST_SUITES[$test_file]}"
     done
 } | tee "$ALL_OUTPUT"

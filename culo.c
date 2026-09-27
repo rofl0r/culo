@@ -21,6 +21,7 @@
 #include <dirent.h>
 #include <fcntl.h>
 #include <limits.h>
+#include <poll.h>
 #include <sys/ioctl.h>
 #include <sys/stat.h>
 #include <sys/types.h>
@@ -740,6 +741,25 @@ static void term_enable_raw(void)
 	term_open_buffer();
 	if (tcsetattr(STDIN_FILENO, TCSAFLUSH, &raw) == -1)
 		panic("Failed to set raw mode: ");
+}
+
+/* Report whether more input bytes are already waiting on stdin.
+ * A pasted burst arrives as many bytes in the tty input buffer, so
+ * this lets the main loop collapse the whole burst into one repaint.
+ * The timeout is zero on purpose: a nonzero timeout would add that
+ * delay to every single keypress, and a terminal that delivers a
+ * paste in chunks still only costs one repaint per chunk. */
+static bool input_pending(void)
+{
+	struct pollfd pfd;
+	pfd.fd = STDIN_FILENO;
+	pfd.events = POLLIN;
+	pfd.revents = 0;
+	int r;
+	do {
+		r = poll(&pfd, 1, 0);
+	} while (r == -1 && errno == EINTR);
+	return r > 0 && (pfd.revents & POLLIN) != 0;
 }
 
 static int term_read_key(void)
@@ -5052,6 +5072,11 @@ int main(int argc, char *argv[])
 	/* Main event loop */
 	while (1) {
 		editor_process_key();
+		/* A burst of input (paste) is still queued: skip the repaint
+		 * and keep consuming keys. The final key of the burst finds
+		 * the queue empty and repaints once. */
+		if (input_pending())
+			continue;
 		if (ec.mode != MODE_BROWSER && ec.mode != MODE_HELP &&
 		    ec.mode != MODE_SEARCH)
 			editor_refresh();
