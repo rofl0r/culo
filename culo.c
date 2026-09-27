@@ -4853,6 +4853,7 @@ static void editor_process_key(void)
 	/* Normal mode key handling */
 	switch (c) {
 	case '\r':
+	case '\n':		/* A paste delivers LF, not CR */
 		editor_newline();
 		break;
 	case CTRL_('x'):	/* Exit editor (GNU nano: ^X) */
