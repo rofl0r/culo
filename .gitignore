@@ -83,6 +83,8 @@ config.mak
 
 tests/harness/test_*
 !tests/harness/test_*.c
+# sanitized harness builds (SANITIZE=address)
+tests/harness/asan_test_*
 
 # interactive key probe
 keydump
