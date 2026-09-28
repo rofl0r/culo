@@ -85,6 +85,16 @@ static void h_expect_eq(int got, int want)
 	}
 }
 
+static void h_expect_ptr(const void *got, const void *want)
+{
+	if (got != want) {
+		printf("FAIL: got %p want %p\n", got, want);
+		h_fails++;
+	} else {
+		printf("ok   %p\n", got);
+	}
+}
+
 static void h_expect_row(int y, const char *want)
 {
 	const char *got = ROW(y)->chars;

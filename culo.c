@@ -4593,8 +4593,13 @@ static void editor_cleanup(void)
 	ec.search.replace_query = NULL;
 	free(ec.mode_state.search.saved_highlight);
 	ec.mode_state.search.saved_highlight = NULL;
-	free(ec.mode_state.prompt.buffer);
-	ec.mode_state.prompt.buffer = NULL;
+	/* prompt.buffer aliases the first word of the union, so it is
+	 * only a pointer while the prompt mode owns it.  Freeing it
+	 * unconditionally freed the saved cursor of search mode. */
+	if (ec.mode == MODE_PROMPT) {
+		free(ec.mode_state.prompt.buffer);
+		ec.mode_state.prompt.buffer = NULL;
+	}
 	syntax_reset_compiled_rules();
 	browser_free_entries();
 }
