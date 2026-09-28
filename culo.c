@@ -4168,10 +4168,19 @@ static void editor_goto_matching_bracket(void)
 	int dir;
 	int depth = 0;
 
+	/* An empty buffer has no row to read, and the cursor can also sit
+	 * one past the last byte of a row.  Read the row once and refuse a
+	 * position that is not on a byte of it. */
+	editor_row_t *cur = (row >= 0 && row < NR) ? ROW(row) : NULL;
+	if (!cur || col < 0 || col >= cur->size) {
+		set_overlay_msg("No matching bracket");
+		return;
+	}
+
 	/* could do this in one line with strchr but we don't use it elsewhere
 	   so pulling it in for this one case would make the binary bigger. */
 	for (int i = 0; i < (int)sizeof(brackets) - 1; i++) {
-		if (ROW(row)->chars[col] == brackets[i]) {
+		if (cur->chars[col] == brackets[i]) {
 			idx = i;
 			break;
 		}
