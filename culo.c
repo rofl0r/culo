@@ -914,9 +914,13 @@ static int term_get_size(int *screen_rows, int *screen_cols)
 	return 0;
 }
 
+/* Where the window size comes from.  A test replaces this with its own
+ * reader so a resize can be driven without a tty. */
+static int (*term_size_reader)(int *, int *) = term_get_size;
+
 static void term_update_size(void)
 {
-	if (term_get_size(&ec.screen_rows, &ec.screen_cols) == -1) {
+	if (term_size_reader(&ec.screen_rows, &ec.screen_cols) == -1) {
 		/* Fallback to reasonable defaults for testing */
 		ec.screen_rows = 24, ec.screen_cols = 80;
 	}
@@ -3844,8 +3848,15 @@ static void sig_winch_handler(int sig)
 {
 	(void)sig;		/* Unused parameter */
 	term_update_size();
-	ec.cursor_y = clamp(ec.cursor_y, 0, ec.screen_rows - 1);
-	ec.cursor_x = clamp(ec.cursor_x, 0, ec.screen_cols - 1);
+	/* Bound the cursor by the buffer, not by the window.  A resize
+	 * must not move the cursor to a different line: the window only
+	 * decides how much of the buffer is visible, and editor_scroll
+	 * follows the cursor into the new size. */
+	ec.cursor_y = clamp(ec.cursor_y, 0, NR > 0 ? NR - 1 : 0);
+	if (ec.cursor_y < NR)
+		ec.cursor_x = clamp(ec.cursor_x, 0, ROW(ec.cursor_y)->size);
+	else
+		ec.cursor_x = 0;
 	editor_refresh();
 }
 
