@@ -138,22 +138,41 @@ int main(void)
 	}
 	h_expect_eq(NR, 3 * SMALL + 1);
 
-	/* The lazy mark must be cleared once a row it covers is drawn, so
-	 * a later edit does not keep re-marking the file.  The mark is
-	 * cleared when the first row at or after it is highlighted. */
-	h_run_loop("z");
-	int mark = ec.hl_invalid_from;
-	if (mark < 0) {
-		printf("FAIL: a keystroke did not mark the rows below stale\n");
+	/* The mark must be lazy twice over: a keystroke must leave it on
+	 * paper, and a repaint must consume it.  A repaint draws the top
+	 * row first and clears the mark, so the mark is checked after the
+	 * key and before the draw, one keypress at a time. */
+	int y0 = ec.cursor_y, x0 = ec.cursor_x;
+	/* One key, no repaint: only the mark can be left behind. */
+	h_keys = "z";
+	h_pos = 0;
+	h_exhausted = 0;
+	burst_open(ec.cursor_y, ec.cursor_x);
+	editor_process_key();
+	burst_close();
+	if (ec.hl_invalid_from != y0) {
+		printf("FAIL: one keystroke left the mark at %d, want %d\n",
+		       ec.hl_invalid_from, y0);
 		h_fails++;
-	} else {
-		syntax_ensure_row_highlighted(mark);
-		if (ec.hl_invalid_from != -1) {
-			printf("FAIL: the mark at row %d survived the redraw\n",
-			       ec.hl_invalid_from);
-			h_fails++;
-		}
 	}
+	if (ROW(y0)->hl_valid) {
+		printf("FAIL: row %d still reads as highlighted after a\n"
+		       "      keystroke changed it\n", y0);
+		h_fails++;
+	}
+	/* The repaint that follows the key clears the mark. */
+	editor_refresh();
+	if (ec.hl_invalid_from != -1) {
+		printf("FAIL: the mark at row %d survived the redraw\n",
+		       ec.hl_invalid_from);
+		h_fails++;
+	}
+	if (!ROW(0)->hl_valid) {
+		printf("FAIL: the redraw left row 0 marked stale\n");
+		h_fails++;
+	}
+	(void) x0;
+	h_reset_keys();
 
 	/* An erased row renumbers every row below it, so the mark must go
 	 * back to the first row.  A ^K cut erases the current line, and

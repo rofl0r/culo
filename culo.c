@@ -1018,17 +1018,31 @@ static void syntax_invalidate_all_rows(void)
  * stale, and a change to any row can flip a multi-line span rule, so
  * every row from row_idx to the end is stale too.  Marking that with a
  * single number keeps the mark lazy: no walk of the row list on every
- * keystroke, and the re-highlight runs when a row is next drawn. */
+ * keystroke, and the re-highlight runs when a row is next drawn.
+ *
+ * One change, one mark: every row from row_idx down is stale, so keep
+ * the lowest index seen and never weaken it.  The row list itself
+ * carries no per-row stale bit, so hl_invalid_from is the record; a
+ * second mark must not forget the first. */
 static void hl_invalidate_from(int row_idx)
 {
-	if (ec.hl_invalid_from < 0 || row_idx < ec.hl_invalid_from)
+	if (row_idx < 0)
+		return;
+	if (ec.hl_invalid_from < 0 || row_idx < ec.hl_invalid_from) {
 		ec.hl_invalid_from = row_idx;
+		/* Clear the bits the lazy mark replaces, so nothing can be
+		 * read as fresh while the mark stands for it. */
+		for (int i = row_idx; i < NR; i++)
+			ROW(i)->hl_valid = false;
+	}
 }
 
 /* Mark every row stale, for a change that renumbers the rows below. */
 static void hl_mark_all(void)
 {
 	ec.hl_invalid_from = 0;
+	for (int i = 0; i < NR; i++)
+		ROW(i)->hl_valid = false;
 }
 
 static void syntax_disable(bool announce)
@@ -1190,15 +1204,20 @@ static void syntax_ensure_row_highlighted(int row_idx)
 	int start = row_idx;
 	if (row_idx < 0 || row_idx >= NR)
 		return;
-	if (ec.hl_invalid_from >= 0 && row_idx >= ec.hl_invalid_from) {
+	if (ec.hl_invalid_from >= 0) {
 		/* The lazy mark in hl_invalid_from says every row from that
-		 * index on is stale.  Clear the hl_valid bits once here so
-		 * no per-key O(n) walk is needed, and clear the mark after
-		 * the pass so the next change starts a fresh one. */
-		int mark = ec.hl_invalid_from;
-		for (int i = mark; i < NR; i++)
-			ROW(i)->hl_valid = false;
-		ec.hl_invalid_from = -1;
+		 * index on is stale.  Drop the hl_valid bits for the rows
+		 * this call covers, and drop the mark itself once nothing
+		 * can still be stale below the mark.  The mark is left in
+		 * place when it sits below row_idx, because rows under it
+		 * stay stale until a draw reaches them. */
+		if (row_idx >= ec.hl_invalid_from) {
+			for (int i = ec.hl_invalid_from; i < NR; i++)
+				ROW(i)->hl_valid = false;
+			ec.hl_invalid_from = -1;
+		} else {
+			ROW(row_idx)->hl_valid = false;
+		}
 	}
 	if (ROW(row_idx)->hl_valid)
 		return;
