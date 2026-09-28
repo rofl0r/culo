@@ -516,6 +516,7 @@ static char *ui_prompt(const char *prefix, const char *hint, const char *init, v
 static void editor_refresh(void);
 static int get_line_number_width(void);
 static void editor_newline(void);
+static void burst_append(const char *s, size_t n);
 static void editor_insert_char(int c, bool manual_typing);
 static void editor_move_cursor(int key);
 static void editor_move_word(int dir);
@@ -2396,6 +2397,7 @@ static void editor_newline(void)
 	ec.cursor_y++;
 	ec.cursor_x = 0;
 	ec.modified = true;
+	burst_append("\n", 1);
 	if (ec.line_ending == LINE_ENDING_UNKNOWN)
 		ec.line_ending = LINE_ENDING_LF;
 	if (!g_undo.replaying && !g_undo.batching) {
@@ -2412,6 +2414,67 @@ static struct {
 	int expected;
 } utf8_buffer = {
 .len = 0,.expected = 0};
+
+/* Text of the burst currently being applied, in buffer order.  A paste
+ * arrives as a run of keys, but it is one user action, so it must be
+ * one undo step.  While open, the key handlers append what they insert
+ * and skip their own undo records; the burst is closed when the input
+ * queue drains and one EDIT_INSERT item covers the whole run.
+ * undo_apply_insert_text already replays multi-line text, splitting on
+ * '\n', so the replay needs no special case. */
+static struct {
+	char *buf;
+	size_t len;
+	size_t cap;
+	bool open;
+	int row, col;		/* where the burst started */
+} g_burst = { 0 };
+
+/* Append pasted text to the open burst. */
+static void burst_append(const char *s, size_t n)
+{
+	if (!g_burst.open || n == 0)
+		return;
+	if (g_burst.len + n + 1 > g_burst.cap) {
+		size_t cap = g_burst.cap ? g_burst.cap * 2 : 1024;
+		while (cap < g_burst.len + n + 1)
+			cap *= 2;
+		char *nb = realloc(g_burst.buf, cap);
+		if (!nb)
+			return;	/* drop the text; the edit itself stands */
+		g_burst.buf = nb;
+		g_burst.cap = cap;
+	}
+	memcpy(g_burst.buf + g_burst.len, s, n);
+	g_burst.len += n;
+	g_burst.buf[g_burst.len] = '\0';
+}
+
+/* Open a burst at the cursor.  Suppresses the per-key undo records
+ * while it is open. */
+static void burst_open(int row, int col)
+{
+	if (g_burst.open)
+		return;
+	g_burst.len = 0;
+	g_burst.row = row;
+	g_burst.col = col;
+	g_burst.open = true;
+	g_undo.batching = true;
+}
+
+/* Close the burst and record it as one undo step. */
+static void burst_close(void)
+{
+	if (!g_burst.open)
+		return;
+	g_burst.open = false;
+	g_undo.batching = false;
+	if (g_burst.len > 0)
+		undo_record_insert(g_burst.row, g_burst.col, g_burst.buf,
+				   g_burst.len, g_burst.row, g_burst.col,
+				   ec.cursor_y, ec.cursor_x);
+}
 
 static void editor_insert_char(int c, bool manual_typing)
 {
@@ -2466,6 +2529,7 @@ static void editor_insert_char(int c, bool manual_typing)
 	row_update(row, ec.cursor_y);
 	ec.cursor_x += utf8_buffer.len;
 	ec.modified = true;
+	burst_append(utf8_buffer.bytes, (size_t) utf8_buffer.len);
 	if (!g_undo.replaying && !g_undo.batching) {
 		undo_record_insert(before_y, before_x, utf8_buffer.bytes,
 				   (size_t) utf8_buffer.len, before_y, before_x,
@@ -4414,6 +4478,11 @@ static void editor_cleanup(void)
 	tlist_free(ec.rows);
 	ec.rows = NULL;
 
+	/* Free the open burst buffer */
+	free(g_burst.buf);
+	g_burst.buf = NULL;
+	g_burst.len = g_burst.cap = 0;
+
 	/* Free file name */
 	free(ec.file_name);
 	ec.file_name = NULL;
@@ -5072,12 +5141,17 @@ int main(int argc, char *argv[])
 
 	/* Main event loop */
 	while (1) {
+		/* Input already queued means the previous keypress was part
+		 * of a burst, so this one is too: keep the burst open. */
+		if (input_pending())
+			burst_open(ec.cursor_y, ec.cursor_x);
 		editor_process_key();
 		/* A burst of input (paste) is still queued: skip the repaint
 		 * and keep consuming keys. The final key of the burst finds
 		 * the queue empty and repaints once. */
 		if (input_pending())
 			continue;
+		burst_close();
 		if (ec.mode != MODE_BROWSER && ec.mode != MODE_HELP &&
 		    ec.mode != MODE_SEARCH)
 			editor_refresh();

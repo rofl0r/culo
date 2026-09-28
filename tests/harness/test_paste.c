@@ -11,7 +11,7 @@
  * tty, and the repaint count is the one the loop actually decides on.
  *
  * Keys (octal escapes on purpose - see AGENTS.md):
- *   \022  ^R redo   \032  ^Z undo   \015  ^O save   \030  ^X quit
+ *   \033e M-e redo   \032  ^Z undo
  */
 #include <stdio.h>
 #include <string.h>
@@ -52,11 +52,14 @@ static void h_run_loop(const char *keys)
 	h_exhausted = 0;
 	n_refresh = 0;
 	while (h_keys[h_pos] && !h_exhausted) {
+		if (input_pending())
+			burst_open(ec.cursor_y, ec.cursor_x);
 		editor_process_key();
-		if (!input_pending()) {
-			n_refresh++;
-			editor_refresh();
-		}
+		if (input_pending())
+			continue;
+		burst_close();
+		n_refresh++;
+		editor_refresh();
 	}
 	h_reset_keys();
 }
@@ -113,6 +116,42 @@ int main(void)
 	h_run_loop(big);
 	h_expect_eq(n_refresh, 1);
 	h_expect_eq(NR, 4);	/* the burst must not add or lose rows */
+
+	editor_row_t *r3 = (NR == 4) ? ROW(3) : NULL;
+	h_expect_eq(r3 ? r3->size : -1, 405);	/* "first" + 400 x */
+
+	/* --- 3. The whole run is one undo step ------------------------ */
+	/* Three pasted lines then 400 characters: two records, because
+	 * each paste is its own burst.  A per-key record would overrun
+	 * the 64-slot ring and leave only the tail of the paste
+	 * undoable, which is what typing into a file must not do. */
+	h_expect_eq(g_undo.count, 2);
+	h_expect_eq(g_undo.cursor, 2);
+	h_expect_eq(g_undo.history[undo_history_index(0)].len, 17);
+	h_expect_eq(g_undo.history[undo_history_index(1)].len, 400);
+
+	h_run_loop("\032");	/* ^Z: drop the 400 x */
+	h_expect_eq(NR, 4);
+	h_expect_eq(g_undo.cursor, 1);
+	editor_row_t *r3b = (NR == 4) ? ROW(3) : NULL;
+	h_expect_eq(r3b ? r3b->size : -1, 5);	/* back to "first" */
+	h_expect_row_safe(3, "first");
+
+	h_run_loop("\032");	/* ^Z: drop the three pasted lines */
+	h_expect_eq(NR, 1);
+	h_expect_eq(g_undo.cursor, 0);	/* nothing applied, both redoable */
+	h_expect_row_safe(0, "first");
+
+	/* --- 4. Redo replays both steps, in order --------------------- */
+	h_run_loop("\033e");	/* M-e: redo the three lines */
+	h_expect_eq(NR, 4);
+	h_expect_row_safe(0, "alpha");
+	h_expect_row_safe(3, "first");
+	h_run_loop("\033e");	/* M-e: redo the 400 x */
+	h_expect_eq(NR, 4);
+	h_expect_eq(g_undo.cursor, 2);
+	editor_row_t *r3c = (NR == 4) ? ROW(3) : NULL;
+	h_expect_eq(r3c ? r3c->size : -1, 405);
 
 	h_summary("paste tests");
 	return h_fails ? 1 : 0;
