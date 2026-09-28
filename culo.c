@@ -3004,22 +3004,30 @@ static bool search_do_from(const char *query, int start_row, int start_char_off,
 
 	size_t qlen = use_regex ? 0 : strlen(query);
 	int dir = backwards ? -1 : 1;
-	/* When no_wrap is true: scan only the rows reachable in the search direction
-	 * before hitting the file boundary. */
-	int max_rows =
-	    no_wrap ? (backwards ? start_row + 1 : n - start_row) : n;
+	/* A wrapping scan visits every row, then gives the start row a
+	 * second pass with a full-width window.  Without that pass a match
+	 * that sits before start_char_off on the start row is never seen:
+	 * the row was reached once with the window already consumed, so
+	 * ^W reported "not found" on a line that plainly held the text. */
+	int max_rows = no_wrap ? (backwards ? start_row + 1 : n - start_row)
+	    : n + 1;
 	bool found = false;
 
 	for (int i = 0; i < max_rows && !found; i++) {
+		/* i == n is the second visit to the start row. */
+		bool revisit = i >= n;
 		int ri = no_wrap ? start_row + i * dir
-		    : ((start_row + i * dir) % n + n) % n;
+		    : ((start_row + (revisit ? 0 : i) * dir) % n + n) % n;
 		editor_row_t *r = ROW(ri);
-		if (!r->chars)
+		if (!r || !r->chars)
 			continue;
 
-		/* For the starting row honour start_char_off; for subsequent rows
-		 * scan from the appropriate end based on direction. */
-		int search_off = (i == 0) ? start_char_off
+		/* Window for this row: the start row honours
+		 * start_char_off on the first pass and scans its whole width
+		 * on the revisit, later rows scan from the end the search
+		 * arrives at. */
+		int search_off = revisit ? (backwards ? r->size : 0)
+		    : (i == 0) ? start_char_off
 		    : (backwards ? r->size : 0);
 
 		int match_off = -1, match_len = -1;
