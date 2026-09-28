@@ -359,6 +359,7 @@ struct {
 	size_t syntax_compiled_count;
 	compiled_span_rule_t *syntax_span_compiled;
 	size_t syntax_span_compiled_count;
+	int hl_invalid_from;	/* first row with a stale highlight, -1 if none */
 	struct {
 		color_id_t fg;
 		color_id_t bg;
@@ -403,6 +404,8 @@ static void init_ec(void)
 	/* orig_row=-1 means "no active replace cycle"; orig_char is only
 	 * meaningful when orig_row >= 0, so 0 is a fine default. */
 	ec.search.orig_row = -1;
+	/* -1 means "no row carries a stale highlight". */
+	ec.hl_invalid_from = -1;
 }
 
 typedef enum {
@@ -434,16 +437,27 @@ typedef struct {
 
 static undo_state_t g_undo = { 0 };
 
+/* Row access goes through these two names.  A test that defines
+ * HL_COUNT_WALKS supplies its own wrappers and counts the treap walks,
+ * which is how a per-keystroke walk of the row list stays visible. */
+#ifndef HL_COUNT_WALKS
+#define h_tlist_getsize tlist_getsize
+#define h_tlist_get tlist_get
+#endif
+
 /* Number of rows */
-#define NR ((int)tlist_getsize(ec.rows))
+#define NR ((int)h_tlist_getsize(ec.rows))
 
 /* Pointer to the editor_row_t at index i */
 static inline editor_row_t *ROW(int i)
 {
 	if (!ec.rows || i < 0 || i >= NR)
 		return NULL;
-	return (editor_row_t *) tlist_get(ec.rows, (size_t) (i));
+	return (editor_row_t *) h_tlist_get(ec.rows, (size_t) (i));
 }
+
+static void hl_invalidate_from(int row_idx);
+static void hl_mark_all(void);
 
 /* Manual typing growth alignment (power of two). */
 #define ROW_MANUAL_ALLOC_ALIGN 64
@@ -474,6 +488,10 @@ static void row_erase(int at)
 	editor_row_t *r = ROW(at);
 	if (r)
 		row_free_contents(r);
+	/* Every row above moves down one index, so any row below keeps
+	 * its bytes but changes index, and a span rule that started or
+	 * ended in the erased row changes state for all of them. */
+	hl_mark_all();
 	tlist_delete(ec.rows, (size_t) at);
 }
 
@@ -987,8 +1005,26 @@ static void syntax_reset_compiled_rules(void)
 
 static void syntax_invalidate_all_rows(void)
 {
+	ec.hl_invalid_from = 0;
 	for (int file_row = 0; file_row < NR; file_row++)
 		ROW(file_row)->hl_valid = false;
+}
+
+/* row_update changed the bytes of row row_idx, so its own highlight is
+ * stale, and a change to any row can flip a multi-line span rule, so
+ * every row from row_idx to the end is stale too.  Marking that with a
+ * single number keeps the mark lazy: no walk of the row list on every
+ * keystroke, and the re-highlight runs when a row is next drawn. */
+static void hl_invalidate_from(int row_idx)
+{
+	if (ec.hl_invalid_from < 0 || row_idx < ec.hl_invalid_from)
+		ec.hl_invalid_from = row_idx;
+}
+
+/* Mark every row stale, for a change that renumbers the rows below. */
+static void hl_mark_all(void)
+{
+	ec.hl_invalid_from = 0;
 }
 
 static void syntax_disable(bool announce)
@@ -1150,6 +1186,16 @@ static void syntax_ensure_row_highlighted(int row_idx)
 	int start = row_idx;
 	if (row_idx < 0 || row_idx >= NR)
 		return;
+	if (ec.hl_invalid_from >= 0 && row_idx >= ec.hl_invalid_from) {
+		/* The lazy mark in hl_invalid_from says every row from that
+		 * index on is stale.  Clear the hl_valid bits once here so
+		 * no per-key O(n) walk is needed, and clear the mark after
+		 * the pass so the next change starts a fresh one. */
+		int mark = ec.hl_invalid_from;
+		for (int i = mark; i < NR; i++)
+			ROW(i)->hl_valid = false;
+		ec.hl_invalid_from = -1;
+	}
 	if (ROW(row_idx)->hl_valid)
 		return;
 	if (ec.syntax_span_compiled_count > 0)
@@ -1429,12 +1475,7 @@ static void row_update(editor_row_t * row, int row_idx)
 	row->render_size = idx;
 	if (row->size > ec.longest_line)
 		ec.longest_line = row->size;
-	if (ec.syntax_span_compiled_count > 0) {
-		for (int i = row_idx; i < NR; i++)
-			ROW(i)->hl_valid = false;
-	} else {
-		row->hl_valid = false;
-	}
+	hl_invalidate_from(row_idx);
 }
 
 static void row_insert(int at, const char *s, size_t line_len)
@@ -2385,6 +2426,7 @@ static void editor_newline(void)
 	int before_y = ec.cursor_y, before_x = ec.cursor_x;
 	if (ec.cursor_x == 0) {
 		row_insert(ec.cursor_y, "", 0);
+		hl_invalidate_from(ec.cursor_y);
 	} else {
 		editor_row_t *row = ROW(ec.cursor_y);
 		row_insert(ec.cursor_y + 1, &row->chars[ec.cursor_x],
