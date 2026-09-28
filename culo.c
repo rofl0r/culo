@@ -2591,6 +2591,8 @@ static void editor_delete_char(void)
 		return;
 
 	editor_row_t *row = ROW(ec.cursor_y);
+	if (!row)
+		return;		/* cursor below the last row: nothing to join */
 	int before_y = ec.cursor_y, before_x = ec.cursor_x;
 
 	if (ec.cursor_x > 0) {
@@ -4089,8 +4091,12 @@ static void editor_move_cursor(int key)
 				ec.cursor_x--;
 			}
 		} else if (ec.cursor_y > 0) {
+			/* The row above exists whenever the cursor is in
+			 * range, but read it once so a cursor left out of
+			 * range cannot dereference NULL. */
 			ec.cursor_y--;
-			ec.cursor_x = ROW(ec.cursor_y)->size;
+			editor_row_t *prev = ROW(ec.cursor_y);
+			ec.cursor_x = prev ? prev->size : 0;
 		}
 		break;
 	case ARROW_RIGHT:
@@ -5136,8 +5142,16 @@ static void editor_process_key(void)
 				long lnum = strtol(s, &endp, 10);
 				if (endp > s && *endp == '\0') {
 					if (lnum < 1) lnum = 1;
-					if (NR > 0 && lnum > NR) lnum = NR;
-					ec.cursor_y = (int)lnum - 1;
+					/* Clamp to the last row, or to row 0 on
+					 * an empty buffer: a cursor past the end
+					 * of the file makes the next cursor move
+					 * dereference a row that is not there. */
+					if (NR > 0) {
+						if (lnum > NR) lnum = NR;
+						ec.cursor_y = (int)lnum - 1;
+					} else {
+						ec.cursor_y = 0;
+					}
 					ec.cursor_x = 0;
 				} else {
 					set_overlay_msg
