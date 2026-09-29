@@ -83,6 +83,20 @@ static void open_with(void)
 	editor_refresh();
 }
 
+/* Row text check that tolerates a missing row: a control byte that
+ * still acts as a key can cut or erase rows, and the test should report
+ * that rather than dereference NULL. */
+static void h_expect_row_safe(int y, const char *want)
+{
+	editor_row_t *row = (y >= 0 && y < NR) ? ROW(y) : NULL;
+	if (!row) {
+		printf("FAIL row %d: missing (NR=%d)\n", y + 1, NR);
+		h_fails++;
+		return;
+	}
+	h_expect_row(y, want);
+}
+
 /* Every one of these must leave the buffer exactly as the printable
  * text of the paste describes, and the clipboard alone. */
 static void paste_with_control(int byte)
@@ -95,12 +109,15 @@ static void paste_with_control(int byte)
 	keys[4] = '\0';
 	open_with();
 	h_run_burst(keys);
+	show("after paste with a control byte");
 	h_expect_eq(NR, 3);
-	h_expect_row(0, "ABCone");
-	h_expect_row(1, "two");
-	h_expect_row(2, "three");
+	h_expect_row_safe(0, "ABCone");
+	h_expect_row_safe(1, "two");
+	h_expect_row_safe(2, "three");
 	h_expect_ptr(ec.copied_char_buffer, NULL);
 }
+
+
 
 int main(void)
 {
