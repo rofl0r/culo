@@ -113,13 +113,19 @@ test_insert_character() {
     local expected="hello"
     create_test_file "$test_file" "" # start empty
 
+    # The sends are separated by a pause: the editor reads one key at a
+    # time, and keys that arrive in one burst are pasted text, so a
+    # control byte sent with no pause in between is dropped.
     expect -c "
         set timeout 2
         spawn $EDITOR_BIN $test_file
         after 100
         send -- \"hello\"
+        after 200
         send \"\x0F\"      ;# Ctrl-O (Save)
+        after 200
         send \"\r\"        ;# enter to confirm
+        after 200
         send \"\x18\"      ;# Ctrl-X (Quit)
         expect eof
     " > /dev/null 2>&1
@@ -184,14 +190,19 @@ test_interleaved_nav_ins() {
         send \"\033\[D\"
         send \"\033\[D\"
         send \"\033\[D\"
+        after 200
         send -- \"!!\"	
         send \"\033\[C\"
         send \"\033\[C\"	
         send \"\033\[C\"	
         send \"\033\[C\"	
+        after 200
         send -- \"!!\"	
+        after 200
         send \"\x0F\"      ;# Ctrl-O (Save)
+        after 200
         send \"\r\"        ;# enter to confirm
+        after 200
         send \"\x18\"      ;# Ctrl-X (Quit)
         expect eof
     " > /dev/null 2>&1
