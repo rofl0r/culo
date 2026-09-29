@@ -1,10 +1,16 @@
 /* Cleanup must not free a union member it does not own.
  *
- * mode_data_t is a union, so prompt.buffer is the same word as
- * search.saved_x.  editor_cleanup() freed it whatever the mode, so a
- * cleanup taken from search mode freed the saved cursor of the search,
- * and a cleanup taken from browser mode freed the entry list a second
- * time.  Both are heap corruption on a normal key sequence.
+ * mode_data_t is a union, so browser.entries is the same word as
+ * search.saved_x.  editor_cleanup() freed prompt.buffer whatever the
+ * mode, and that word belonged to whichever mode was live, so a cleanup
+ * taken from search mode freed the saved cursor of the search and a
+ * cleanup taken from browser mode freed the entry list a second time.
+ * Both are heap corruption on a normal key sequence.
+ *
+ * The prompt mode is gone, and with it the one member of the union that
+ * was a pointer, so the only frees left in the mode switch are the ones
+ * in mode_owners, whose owner is named.  The last section checks that
+ * a browser left open at cleanup does not free the list twice.
  */
 #include <stdio.h>
 #include <string.h>
@@ -104,30 +110,23 @@ int main(void)
 	browser_free_entries();
 	h_expect_ptr(ec.mode_owners.browser_entries, NULL);
 
-	/* --- 3. The prompt buffer is not cleanup's to free ------------ */
-	/* MODE_PROMPT is never entered: mode_set() has no caller for it
-	 * and ui_prompt() manages its own buffer, so the word that
-	 * prompt.buffer shares with the rest of the union belongs to
-	 * whichever mode is live.  Cleanup must leave it alone, and
-	 * mode_set() is what frees a prompt buffer, on the way out of
-	 * the mode that owns it. */
+	/* --- 3. Cleanup taken in browser mode frees the list once ---- */
+	/* A cleanup in a mode other than normal is not reachable from a
+	 * key sequence, but the frees in the mode switch must not depend
+	 * on that: the union holds a treap pointer while the browser is
+	 * live, and the free belongs to mode_owners, not to the union. */
 	h_release_buffer();
 	editor_init();
 	term_update_size();
 	if (!file_open(FIXTURE_PATH))
 		exit(2);
-	mode_set(MODE_PROMPT);
-	ec.mode_state.prompt.buffer = xstrndup0("typed", 5);
-	if (!ec.mode_state.prompt.buffer)
+	mode_set(MODE_BROWSER);
+	ec.mode_owners.browser_entries = tlist_new(sizeof(browser_entry_t));
+	if (!ec.mode_owners.browser_entries)
 		exit(2);
-	/* Leaving the mode is what releases the prompt buffer, so the
-	 * editor is in a normal mode before cleanup runs.  Cleanup with
-	 * the union still holding a prompt pointer is not reachable from
-	 * a key sequence: ^X leaves MODE_PROMPT through mode_set() on its
-	 * way out, and no other path reaches editor_cleanup. */
-	mode_set(MODE_NORMAL);
-	h_expect_ptr(ec.mode_state.prompt.buffer, NULL);
+	ec.mode_state.browser.selected = 0;
 	editor_cleanup();
+	h_expect_ptr(ec.mode_owners.browser_entries, NULL);
 	/* h_summary frees the state a test still owns; the last
 	 * editor_cleanup() left nothing behind. */
 	ec.rows = tlist_new(sizeof(editor_row_t));

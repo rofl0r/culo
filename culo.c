@@ -259,7 +259,6 @@ typedef struct {
 #define EDITOR_MODES                                  \
     _(NORMAL, "EDIT", "Default editing mode")         \
     _(SEARCH, "SEARCH", "Search mode (Ctrl-W)")       \
-    _(PROMPT, "PROMPT", "Generic prompt mode")        \
     _(SELECT, "SELECT", "Text selection mode")        \
     _(CONFIRM, "CONFIRM", "Confirmation dialog mode") \
     _(HELP, "HELP", "Help screen mode")               \
@@ -304,14 +303,11 @@ typedef struct {
 
 /* Mode-specific state data.  A union because only one mode is live at
  * a time, and the browser's current_dir is by far the largest member,
- * so a struct would waste it on the other five. */
+ * so a struct would waste it on the other four. */
 typedef union {
 	struct {
 		int saved_x, saved_y, saved_col, saved_row;
 	} search;
-	struct {
-		char *buffer;
-	} prompt;
 	struct {
 		tlist *entries;	/* Browser entries */
 		int selected;	/* Currently selected entry */
@@ -598,8 +594,7 @@ static bool undo_apply_block_indent(const undo_item_t * item, bool redo);
 static void mode_set(editor_mode_t new_mode)
 {
 	/* Save current mode as previous (unless entering temporary mode) */
-	if (ec.mode != MODE_PROMPT && ec.mode != MODE_CONFIRM &&
-	    ec.mode != MODE_HELP)
+	if (ec.mode != MODE_CONFIRM && ec.mode != MODE_HELP)
 		ec.prev_mode = ec.mode;
 
 	/* Clean up old mode state */
@@ -620,10 +615,6 @@ static void mode_set(editor_mode_t new_mode)
 		}
 		free(ec.mode_owners.search_saved_highlight);
 		ec.mode_owners.search_saved_highlight = NULL;
-		break;
-	case MODE_PROMPT:
-		free(ec.mode_state.prompt.buffer);
-		ec.mode_state.prompt.buffer = NULL;
 		break;
 	default:
 		break;
@@ -4888,9 +4879,8 @@ static void editor_cleanup(void)
 	ec.search.replace_query = NULL;
 	/* The saved search highlight and the browser list are owned by
 	 * mode_owners, not by whichever mode happens to be live, so
-	 * cleanup can release them whatever the mode.  The prompt buffer
-	 * has no owner here: mode_set() frees it on the way out of
-	 * MODE_PROMPT, and no key sequence reaches cleanup in that mode. */
+	 * cleanup can release them whatever the mode.  No mode owns a
+	 * pointer in the union, so nothing else needs a free here. */
 	free(ec.mode_owners.search_saved_highlight);
 	ec.mode_owners.search_saved_highlight = NULL;
 	ec.mode_owners.search_highlight_line = -1;
@@ -5331,9 +5321,8 @@ static void editor_process_key(void)
 			return;
 		}
 
-	case MODE_PROMPT:
 	case MODE_CONFIRM:
-		/* These modes handle their own input */
+		/* The confirm dialog handles its own input */
 		return;
 
 	case MODE_NORMAL:
