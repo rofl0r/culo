@@ -3611,6 +3611,29 @@ static int key_to_select_nav(int c)
 	return c & ~KEY_FLAG_SHIFT;
 }
 
+/* Move the cursor one page up or down and leave it on a row that
+ * exists.  A page is the visible window, so the cursor and the window
+ * both move by the height of the window and the cursor keeps its place
+ * in it.  The old code jumped to the last visible line and then walked
+ * down one row per screen row, which moved the cursor two pages and, on
+ * a file shorter than the window, walked off the end onto the virtual
+ * line past the last row. */
+static void page_move_cursor(int key)
+{
+	int page = ec.screen_rows > 0 ? ec.screen_rows : 1;
+	int last = NR > 0 ? NR - 1 : 0;
+	int dir = (key == PAGE_UP) ? -1 : 1;
+	ec.cursor_y = clamp(ec.cursor_y + dir * page, 0, last);
+	/* Scroll by a page as well.  editor_scroll only pulls the window to
+	 * the cursor, which would show one new line. */
+	ec.row_offset = clamp(ec.row_offset + dir * page, 0, last);
+	/* Keep the column on a row that exists. */
+	if (ec.cursor_y < NR)
+		ec.cursor_x = clamp(ec.cursor_x, 0, ROW(ec.cursor_y)->size);
+	else
+		ec.cursor_x = 0;
+}
+
 static void selection_move_cursor(int key)
 {
 	int nav = key_to_select_nav(key);
@@ -3637,18 +3660,9 @@ static void selection_move_cursor(int key)
 			ec.cursor_x = ROW(ec.cursor_y)->size;
 		break;
 	case PAGE_UP:
-	case PAGE_DOWN:{
-			if (nav == PAGE_UP)
-				ec.cursor_y = ec.row_offset;
-			else
-				ec.cursor_y = ec.row_offset + ec.screen_rows - 1;
-			int times = ec.screen_rows;
-			while (times--)
-				editor_move_cursor((nav ==
-						    PAGE_UP) ? ARROW_UP :
-						   ARROW_DOWN);
-			break;
-		}
+	case PAGE_DOWN:
+		page_move_cursor(nav);
+		break;
 	default:
 		break;
 	}
@@ -5408,18 +5422,8 @@ static void editor_process_key(void)
 		editor_move_word(1);
 		break;
 	case PAGE_UP:
-	case PAGE_DOWN:{
-			if (c == PAGE_UP)
-				ec.cursor_y = ec.row_offset;
-			else if (c == PAGE_DOWN)
-				ec.cursor_y =
-				    ec.row_offset + ec.screen_rows - 1;
-			int times = ec.screen_rows;
-			while (times--)
-				editor_move_cursor((c ==
-						    PAGE_UP) ? ARROW_UP :
-						   ARROW_DOWN);
-		}
+	case PAGE_DOWN:
+		page_move_cursor(c);
 		break;
 	case HOME_KEY:
 		ec.cursor_x = 0;
