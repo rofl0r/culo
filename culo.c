@@ -1473,47 +1473,6 @@ static int row_cursorx_to_renderx(editor_row_t * row, int cursor_x)
 	return render_x;
 }
 
-static int row_renderx_to_cursorx(editor_row_t * row, int render_x)
-{
-	if (row->render_direct_map) {
-		if (render_x < 0)
-			return 0;
-		return render_x > row->size ? row->size : render_x;
-	}
-
-	int cur_render_x = 0;
-	int byte_pos = 0;
-
-	while (byte_pos < row->size) {
-		int next_render_x = cur_render_x;
-		int char_len = 1;
-
-		if (row->chars[byte_pos] == '\t') {
-			next_render_x +=
-			    (TAB_STOP - 1) - (cur_render_x % TAB_STOP);
-			next_render_x++;
-		} else {
-			next_render_x +=
-			    utf8_char_width_and_len(&row->chars[byte_pos],
-						    (size_t) (row->size -
-							      byte_pos),
-						    &char_len);
-		}
-
-		if (next_render_x > render_x)
-			return byte_pos;
-
-		cur_render_x = next_render_x;
-
-		if (row->chars[byte_pos] == '\t') {
-			byte_pos++;
-		} else {
-			byte_pos += char_len;
-		}
-	}
-	return byte_pos;
-}
-
 static void row_update(editor_row_t * row, int row_idx)
 {
 	int tabs = 0;
@@ -3897,11 +3856,56 @@ static void ui_draw_rows(editor_buf_t * eb)
 			bool in_selection = false;
 			int prev_tab_cursor_x = -1;
 			bool prev_tab_cursor_x_valid = false;
+			/* The tab head and the selection test both need the byte
+			 * offset of the column being drawn, and that offset
+			 * used to be found by walking the row from its start,
+			 * twice per column.  On a row with tabs or wide
+			 * characters that walk is O(row length), so one
+			 * repaint of a long line was quadratic in the width of
+			 * the window.  The walk only moves forward, so one
+			 * cursor for the whole column range replaces both. */
+			/* The byte offset of a column, advanced one column at a
+			 * time.  Both the selection test and the tab head need
+			 * it, and it used to be found by walking the row from
+			 * its start, twice per column.  On a row with tabs or
+			 * wide characters that walk is O(row length), so one
+			 * repaint of a long line was quadratic in the width of
+			 * the window. */
+			int scan_byte_pos = 0;
+			int scan_render_x = 0;
 
 			for (int j = 0; j < len; j++) {
-				/* Check if this character is in selection */
-				int cursor_x =
-				    row_renderx_to_cursorx(row, ec.col_offset + j);
+				int render_pos = ec.col_offset + j;
+				/* One step per column: a tab advances the byte
+				 * offset past the bytes it covers, a plain byte
+				 * by one, and a wide character by its length. */
+				if (row->render_direct_map) {
+					scan_byte_pos = render_pos;
+				} else {
+					while (scan_render_x < render_pos
+					       && scan_byte_pos < row->size) {
+						if (row->chars[scan_byte_pos]
+						    == '\t') {
+							scan_render_x +=
+							    (TAB_STOP - 1)
+							    - (scan_render_x %
+							       TAB_STOP) + 1;
+							scan_byte_pos++;
+						} else {
+							int clen = 1;
+							scan_render_x +=
+							    utf8_char_width_and_len
+							    (&row->chars
+							     [scan_byte_pos],
+							     (size_t) (row->size - scan_byte_pos),
+							     &clen);
+							scan_byte_pos +=
+							    clen;
+						}
+					}
+					scan_render_x = render_pos;
+				}
+				int cursor_x = scan_byte_pos;
 				bool is_selected =
 				    selection_contains(cursor_x, file_row);
 
@@ -3916,20 +3920,15 @@ static void ui_draw_rows(editor_buf_t * eb)
 					in_selection = false;
 				}
 
-				int render_pos = ec.col_offset + j;
-				int tab_cursor_x =
-				    row_renderx_to_cursorx(row, render_pos);
-				int prev_cursor_x = prev_tab_cursor_x_valid ?
-				    prev_tab_cursor_x : ((render_pos > 0) ?
-							 row_renderx_to_cursorx
-							 (row, render_pos - 1) :
-							 -1);
-				bool tab_head =
-				    tab_cursor_x < row->size
-				    && row->chars[tab_cursor_x] == '\t'
+				/* The tab head is the first column of a tab, which is
+				 * the column whose byte offset differs from the
+				 * offset of the column before it. */
+				bool tab_head = cursor_x < row->size
+				    && row->chars[cursor_x] == '\t'
 				    && (render_pos == 0
-					|| prev_cursor_x != tab_cursor_x);
-				prev_tab_cursor_x = tab_cursor_x;
+					|| prev_tab_cursor_x_valid == false
+					|| prev_tab_cursor_x != cursor_x);
+				prev_tab_cursor_x = cursor_x;
 				prev_tab_cursor_x_valid = true;
 				if (ec.show_whitespace && tab_head) {
 					if (!in_selection)
