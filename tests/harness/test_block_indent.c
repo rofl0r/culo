@@ -49,7 +49,6 @@ int main(void)
 	write_fixture();
 	editor_init();
 	term_update_size();
-	ec.rows = tlist_new(sizeof(editor_row_t));
 	file_open(FIXTURE_PATH);
 	editor_refresh();
 
@@ -104,6 +103,6 @@ int main(void)
 	h_run("\033u");		/* undo reverses exactly that press */
 	h_expect_row(1, "    beta");
 
-	printf("block-indent tests: %d failures\n", h_fails);
-	return h_fails ? 1 : 0;
+	h_summary("block-indent tests");
+	return 0;
 }

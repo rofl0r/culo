@@ -37,9 +37,9 @@ static void goto_pos(int row, int col)
 int main(void)
 {
 	write_fixture();
+	h_release_buffer();
 	editor_init();
 	term_update_size();
-	ec.rows = tlist_new(sizeof(editor_row_t));
 	file_open(FIXTURE_PATH);
 	editor_refresh();
 
@@ -85,6 +85,6 @@ int main(void)
 	h_run(cleft);
 	h_expect_eq(ec.cursor_x, szt);
 
-	printf("word-jump tests: %d failures\n", h_fails);
-	return h_fails ? 1 : 0;
+	h_summary("word-jump tests");
+	return 0;
 }

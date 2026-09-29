@@ -61,12 +61,30 @@ static void h_run(const char *keys)
 	h_reset_keys();
 }
 
+/* Release the buffer of the last open, so a test that opens twice does
+ * not leak the rows, the row list and the file name of the first one.
+ * editor_cleanup() cannot be reused here: it frees the compiled syntax
+ * rules as well, and the next editor_init() does not zero the state
+ * that owns them. */
+static void h_release_buffer(void)
+{
+	if (!ec.rows)
+		return;
+	for (int i = 0; i < NR; i++)
+		row_free_contents(ROW(i));
+	tlist_free(ec.rows);
+	ec.rows = NULL;
+	free(ec.file_name);
+	ec.file_name = NULL;
+	syntax_reset_compiled_rules();
+}
+
 /* Open path with a clean editor state. */
 static void h_open(const char *path)
 {
+	h_release_buffer();
 	editor_init();
 	term_update_size();
-	ec.rows = tlist_new(sizeof(editor_row_t));
 	if (!file_open(path))
 		exit(2);
 	editor_refresh();
@@ -106,10 +124,13 @@ static void h_expect_row(int y, const char *want)
 	}
 }
 
+/* Free the editor state, then report.  The free is last so a test
+ * still owns its buffer while it makes assertions. */
 static void h_summary(const char *name)
 {
 	printf("%s %s (%d failures)\n", h_fails ? "FAILED" : "PASSED",
 	       name, h_fails);
+	editor_cleanup();
 	exit(h_fails ? 1 : 0);
 }
 
