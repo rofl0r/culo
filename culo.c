@@ -2641,9 +2641,56 @@ static void editor_insert_char(int c, bool manual_typing)
 
 static void editor_delete_char(void)
 {
-	if (ec.cursor_y == NR)
-		return;
 	burst_break();
+	/* The cursor may sit on the virtual line past the last row, which
+	 * is where nano puts it and where the next character lands.  There
+	 * Backspace removes the newline before the last line, the same
+	 * join the start-of-row path does at the end of a line. */
+	if (ec.cursor_y >= NR) {
+		if (NR == 0)
+			return;	/* nothing to join */
+		int before_y = ec.cursor_y, before_x = ec.cursor_x;
+		/* Join the row above with the last row, which is what the
+		 * newline between them held. */
+		ec.cursor_y = NR - 1;
+		ec.cursor_x = ROW(NR - 1)->size;
+		int prev_size = ec.cursor_x;
+		editor_row_t *prev_row = ROW(NR - 2);
+		editor_row_t *last = ROW(NR - 1);
+		/* The last row keeps its text: the newline is the only
+		 * thing removed, and the virtual line is empty, so the
+		 * result is the last row merged into the one above. */
+		if (prev_row && last) {
+			/* Record the index before the erase: row_erase()
+			 * drops a row, so every index below it moves. */
+			int joined = NR - 2;
+			char *new_chars =
+			    realloc(prev_row->chars,
+				    (size_t) prev_row->size + (size_t) last->size + 1);
+			if (!new_chars) {
+				ec.cursor_y = before_y;
+				ec.cursor_x = before_x;
+				return;
+			}
+			prev_row->chars = new_chars;
+			memcpy(&prev_row->chars[prev_row->size], last->chars,
+			       (size_t) last->size);
+			prev_row->size += last->size;
+			prev_row->chars[prev_row->size] = '\0';
+			row_update(prev_row, joined);
+			row_erase(NR - 1);
+			ec.cursor_y = joined;
+			ec.cursor_x = prev_size;
+			ec.modified = true;
+			if (!g_undo.replaying && !g_undo.batching) {
+				static const char nl[] = "\n";
+				undo_record_delete(joined, prev_size, nl, 1,
+						   before_y, before_x,
+						   ec.cursor_y, ec.cursor_x);
+			}
+		}
+		return;
+	}
 	if (ec.cursor_x == 0 && ec.cursor_y == 0)
 		return;
 
