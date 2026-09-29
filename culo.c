@@ -302,13 +302,12 @@ typedef struct {
 	bool is_dir;
 } browser_entry_t;
 
-/* Mode-specific state data */
+/* Mode-specific state data.  A union because only one mode is live at
+ * a time, and the browser's current_dir is by far the largest member,
+ * so a struct would waste it on the other five. */
 typedef union {
 	struct {
 		int saved_x, saved_y, saved_col, saved_row;
-		int highlight_line;	/* Row index with search highlight (-1 = none) */
-		char *saved_highlight;	/* Saved highlight data for highlight_line */
-		int saved_highlight_size;	/* Allocation size of saved_highlight */
 	} search;
 	struct {
 		char *buffer;
@@ -327,6 +326,29 @@ typedef union {
 		bool shift_only;	/* Selection was initiated by Shift+cursor keys */
 	} select;
 } mode_data_t;
+
+/* Members of the union that outlive the mode that filled them.
+ *
+ * A union member read as a member that is not live is a garbage value,
+ * and the editor had two such bugs before the owners below existed: the
+ * search highlight is restored on the way out of search mode, but the
+ * highlight only stays valid while no other mode has overwritten the
+ * union; and the browser list has to be freed on a ^X from browser
+ * mode, which is not the mode that filled it if a modal took over in
+ * between.  These two fields are outside the union for that reason, so
+ * the owner is named and there is nothing to read as anything else.
+ */
+typedef struct {
+	/* Row index with the search highlight (-1 = none), and the copy of
+	 * that row's highlight to put back when search mode ends.  Owned by
+	 * editor_cleanup() and by mode_set() on the way out of search. */
+	int search_highlight_line;
+	char *search_saved_highlight;
+	int search_saved_highlight_size;
+	/* The browser entry list, owned by browser_free_entries() and
+	 * editor_cleanup(). */
+	tlist *browser_entries;
+} mode_owners_t;
 
 typedef struct {
 	regex_t compiled;
@@ -371,6 +393,7 @@ struct {
 	editor_mode_t mode;
 	editor_mode_t prev_mode;	/* For returning from temporary modes */
 	mode_data_t mode_state;	/* Mode-specific state data */
+	mode_owners_t mode_owners;	/* members that outlive their mode */
 	selection_state_t selection;	/* Text selection state */
 	bool show_line_numbers;	/* Toggle line numbers display */
 	bool show_whitespace;	/* Toggle tab/whitespace markers */
@@ -584,19 +607,19 @@ static void mode_set(editor_mode_t new_mode)
 	case MODE_SEARCH:
 		/* ec.search.query is persistent — do NOT free it here */
 		/* Restore saved highlight if leaving search mode */
-		if (ec.mode_state.search.saved_highlight &&
-		    ec.mode_state.search.highlight_line >= 0 &&
-		    ec.mode_state.search.highlight_line < NR &&
-		    ROW(ec.mode_state.search.highlight_line)->highlight &&
-		    ec.mode_state.search.saved_highlight_size ==
-		    ROW(ec.mode_state.search.highlight_line)->render_size) {
-			memcpy(ROW(ec.mode_state.search.highlight_line)->
-			       highlight, ec.mode_state.search.saved_highlight,
-			       ROW(ec.mode_state.search.highlight_line)->
+		if (ec.mode_owners.search_saved_highlight &&
+		    ec.mode_owners.search_highlight_line >= 0 &&
+		    ec.mode_owners.search_highlight_line < NR &&
+		    ROW(ec.mode_owners.search_highlight_line)->highlight &&
+		    ec.mode_owners.search_saved_highlight_size ==
+		    ROW(ec.mode_owners.search_highlight_line)->render_size) {
+			memcpy(ROW(ec.mode_owners.search_highlight_line)->
+			       highlight, ec.mode_owners.search_saved_highlight,
+			       ROW(ec.mode_owners.search_highlight_line)->
 			       render_size);
 		}
-		free(ec.mode_state.search.saved_highlight);
-		ec.mode_state.search.saved_highlight = NULL;
+		free(ec.mode_owners.search_saved_highlight);
+		ec.mode_owners.search_saved_highlight = NULL;
 		break;
 	case MODE_PROMPT:
 		free(ec.mode_state.prompt.buffer);
@@ -641,8 +664,15 @@ static void mode_set(editor_mode_t new_mode)
 			ec.search.replace_phase = 0;
 			ec.search.replace_count = 0;
 			ec.search.prefill_from_start = (ec.search.query_len > 0);
-			ec.mode_state.search.highlight_line = -1;
-			ec.mode_state.search.saved_highlight = NULL;
+			/* A new search starts with no saved highlight.  A copy
+			 * from an earlier search can still be here, because
+			 * the highlight is stored before the mode is entered
+			 * on some paths, so it is released rather than
+			 * dropped. */
+			free(ec.mode_owners.search_saved_highlight);
+			ec.mode_owners.search_saved_highlight = NULL;
+			ec.mode_owners.search_highlight_line = -1;
+			ec.mode_owners.search_saved_highlight_size = 0;
 			break;
 		}
 	case MODE_HELP:
@@ -3039,32 +3069,32 @@ static void search_highlight_match(int row_idx, int match_offset, int match_len)
 		return;
 
 	/* Restore previous highlight if we've moved to a different row */
-	if (ec.mode_state.search.saved_highlight &&
-	    ec.mode_state.search.highlight_line != row_idx) {
-		int prev = ec.mode_state.search.highlight_line;
+	if (ec.mode_owners.search_saved_highlight &&
+	    ec.mode_owners.search_highlight_line != row_idx) {
+		int prev = ec.mode_owners.search_highlight_line;
 		editor_row_t *prev_row = (prev >= 0 && prev < NR) ?
 		    ROW(prev) : NULL;
 		if (prev_row && prev_row->highlight &&
-		    ec.mode_state.search.saved_highlight_size ==
+		    ec.mode_owners.search_saved_highlight_size ==
 		    prev_row->render_size) {
 			memcpy(prev_row->highlight,
-			       ec.mode_state.search.saved_highlight,
+			       ec.mode_owners.search_saved_highlight,
 			       prev_row->render_size);
 		}
-		free(ec.mode_state.search.saved_highlight);
-		ec.mode_state.search.saved_highlight = NULL;
-		ec.mode_state.search.highlight_line = -1;
+		free(ec.mode_owners.search_saved_highlight);
+		ec.mode_owners.search_saved_highlight = NULL;
+		ec.mode_owners.search_highlight_line = -1;
 	}
 
 	/* Save current row's highlight if not already saved */
-	if (!ec.mode_state.search.saved_highlight) {
-		ec.mode_state.search.saved_highlight = malloc(r->render_size);
-		if (!ec.mode_state.search.saved_highlight)
+	if (!ec.mode_owners.search_saved_highlight) {
+		ec.mode_owners.search_saved_highlight = malloc(r->render_size);
+		if (!ec.mode_owners.search_saved_highlight)
 			return;	/* Can't save highlight; skip marking to avoid inconsistency */
-		memcpy(ec.mode_state.search.saved_highlight, r->highlight,
+		memcpy(ec.mode_owners.search_saved_highlight, r->highlight,
 		       r->render_size);
-		ec.mode_state.search.highlight_line = row_idx;
-		ec.mode_state.search.saved_highlight_size = r->render_size;
+		ec.mode_owners.search_highlight_line = row_idx;
+		ec.mode_owners.search_saved_highlight_size = r->render_size;
 	}
 
 	/* Bounds check: only mark if match fits within the render buffer */
@@ -4537,11 +4567,14 @@ static const char *get_file_type_info(const char *filename, bool is_dir, int *co
 
 static void browser_free_entries(void)
 {
-	if (ec.mode_state.browser.entries) {
-		tlist_free(ec.mode_state.browser.entries);
-		ec.mode_state.browser.entries = NULL;
+	if (ec.mode_owners.browser_entries) {
+		tlist_free(ec.mode_owners.browser_entries);
+		ec.mode_owners.browser_entries = NULL;
 	}
-	ec.mode_state.browser.current_dir[0] = '\0';
+	/* current_dir is a union member, so it is only the browser's to
+	 * clear while the browser mode is live. */
+	if (ec.mode == MODE_BROWSER)
+		ec.mode_state.browser.current_dir[0] = '\0';
 }
 
 static int browser_entry_cmp(const void *ap, const void *bp)
@@ -4585,8 +4618,8 @@ static void browser_load_directory(const char *path)
 
 	snprintf(ec.mode_state.browser.current_dir,
 		 sizeof(ec.mode_state.browser.current_dir), "%s", dir_path);
-	ec.mode_state.browser.entries = tlist_new(sizeof(browser_entry_t));
-	if (!ec.mode_state.browser.entries) {
+	ec.mode_owners.browser_entries = tlist_new(sizeof(browser_entry_t));
+	if (!ec.mode_owners.browser_entries) {
 		closedir(dir);
 		mode_set(MODE_NORMAL);
 		ui_set_message("Out of memory");
@@ -4614,7 +4647,7 @@ static void browser_load_directory(const char *path)
 			browser_entry_t e;
 			snprintf(e.name, sizeof(e.name), "%s", de->d_name);
 			e.is_dir = S_ISDIR(st.st_mode);
-			if (!tlist_insert_sorted(ec.mode_state.browser.entries, &e,
+			if (!tlist_insert_sorted(ec.mode_owners.browser_entries, &e,
 						 browser_entry_cmp))
 				break;
 		}
@@ -4720,11 +4753,11 @@ static void list_screen_render(const char *title, int total_lines, int offset,
 
 static void browser_open_selected(void)
 {
-	int count = (int)tlist_getsize(ec.mode_state.browser.entries);
+	int count = (int)tlist_getsize(ec.mode_owners.browser_entries);
 	if (ec.mode_state.browser.selected >= count)
 		return;
 	browser_entry_t *entry =
-	    (browser_entry_t *) tlist_get(ec.mode_state.browser.entries,
+	    (browser_entry_t *) tlist_get(ec.mode_owners.browser_entries,
 					  (size_t) ec.mode_state.browser.selected);
 	if (!entry)
 		return;
@@ -4788,7 +4821,7 @@ static void help_render(void)
 static void browser_render(void)
 {
 	/* Adjust offset to keep selected item visible */
-	int count = (int)tlist_getsize(ec.mode_state.browser.entries);
+	int count = (int)tlist_getsize(ec.mode_owners.browser_entries);
 	int visible = ec.screen_rows - 1;
 	if (ec.mode_state.browser.selected < ec.mode_state.browser.offset)
 		ec.mode_state.browser.offset = ec.mode_state.browser.selected;
@@ -4809,7 +4842,7 @@ static void browser_render(void)
 	list_screen_render(title, count,
 			   ec.mode_state.browser.offset,
 			   ec.mode_state.browser.selected, NULL,
-			   ec.mode_state.browser.entries, title, status_right);
+			   ec.mode_owners.browser_entries, title, status_right);
 }
 
 /* Clean up all allocated memory before exit */
@@ -4839,12 +4872,15 @@ static void editor_cleanup(void)
 	ec.search.query = NULL;
 	free(ec.search.replace_query);
 	ec.search.replace_query = NULL;
-	free(ec.mode_state.search.saved_highlight);
-	ec.mode_state.search.saved_highlight = NULL;
-	/* mode_set() frees the prompt buffer when it leaves MODE_PROMPT, so
-	 * there is nothing to free here: the union word only holds that
-	 * pointer while the prompt mode owns it, and freeing it in every
-	 * mode is what read the saved search cursor as a pointer. */
+	/* The saved search highlight and the browser list are owned by
+	 * mode_owners, not by whichever mode happens to be live, so
+	 * cleanup can release them whatever the mode.  The prompt buffer
+	 * has no owner here: mode_set() frees it on the way out of
+	 * MODE_PROMPT, and no key sequence reaches cleanup in that mode. */
+	free(ec.mode_owners.search_saved_highlight);
+	ec.mode_owners.search_saved_highlight = NULL;
+	ec.mode_owners.search_highlight_line = -1;
+	ec.mode_owners.search_saved_highlight_size = 0;
 	syntax_reset_compiled_rules();
 	browser_free_entries();
 }
@@ -4915,7 +4951,7 @@ static void editor_process_key(void)
 			return;
 		case ARROW_DOWN:
 		{
-			int count = (int)tlist_getsize(ec.mode_state.browser.entries);
+			int count = (int)tlist_getsize(ec.mode_owners.browser_entries);
 			if (ec.mode_state.browser.selected <
 			    count - 1) {
 				ec.mode_state.browser.selected++;
@@ -4931,7 +4967,7 @@ static void editor_process_key(void)
 			return;
 		case PAGE_DOWN:
 		{
-			int count = (int)tlist_getsize(ec.mode_state.browser.entries);
+			int count = (int)tlist_getsize(ec.mode_owners.browser_entries);
 			ec.mode_state.browser.selected += ec.screen_rows - 3;
 			if (ec.mode_state.browser.selected >= count)
 				ec.mode_state.browser.selected = count - 1;
@@ -4946,7 +4982,7 @@ static void editor_process_key(void)
 			return;
 		case END_KEY:
 		{
-			int count = (int)tlist_getsize(ec.mode_state.browser.entries);
+			int count = (int)tlist_getsize(ec.mode_owners.browser_entries);
 			ec.mode_state.browser.selected = count > 0 ? count - 1 : 0;
 			browser_render();
 			return;

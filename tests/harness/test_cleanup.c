@@ -37,19 +37,41 @@ int main(void)
 		exit(2);
 	editor_refresh();
 
-	/* --- 1. Cleanup from search mode keeps the search state ------ */
+	/* --- 1. The saved highlight is released exactly once --------- */
+	/* It outlives the mode that made it, so mode_owners holds it and
+	 * not the union.  Cleanup releases it. */
 	search_highlight_match(0, 0, 3);
-	h_expect_eq(ec.mode_state.search.highlight_line, 0);
-	h_expect_eq(ec.mode_state.search.saved_highlight != NULL, 1);
-	int saved_x = ec.mode_state.search.saved_x;
-	int saved_y = ec.mode_state.search.saved_y;
-	/* The union word that prompt.buffer would read is the saved
-	 * cursor, so cleanup must leave it alone. */
-	h_expect_ptr(ec.mode_state.prompt.buffer, (char *) (long) saved_x);
+	h_expect_eq(ec.mode_owners.search_highlight_line, 0);
+	h_expect_eq(ec.mode_owners.search_saved_highlight != NULL, 1);
+	h_expect_eq(ec.mode_owners.search_saved_highlight_size > 0, 1);
 	editor_cleanup();
-	h_expect_ptr(ec.mode_state.search.saved_highlight, NULL);
-	h_expect_eq(ec.mode_state.search.saved_x, saved_x);
-	h_expect_eq(ec.mode_state.search.saved_y, saved_y);
+	h_expect_ptr(ec.mode_owners.search_saved_highlight, NULL);
+	h_expect_eq(ec.mode_owners.search_highlight_line, -1);
+
+	/* And the mode releases it on its own way out. */
+	h_release_buffer();
+	editor_init();
+	term_update_size();
+	if (!file_open(FIXTURE_PATH))
+		exit(2);
+	editor_refresh();
+	search_highlight_match(0, 0, 3);
+	h_expect_eq(ec.mode_owners.search_saved_highlight != NULL, 1);
+	/* Leaving search mode is what restores the row and frees the copy.
+	 * The editor has to be in search mode for that path to run, so the
+	 * test enters it the way ^W does. */
+	/* A new search resets the mark, so the copy made before the mode was
+	 * entered has to be released explicitly: it belongs to no mode now.
+	 * That is the whole point of the reset, and the copy outliving the
+	 * search that made it is the leak this test guards. */
+	mode_set(MODE_SEARCH);
+	mode_set(MODE_NORMAL);
+	h_expect_ptr(ec.mode_owners.search_saved_highlight, NULL);
+	h_expect_eq(ec.mode_owners.search_highlight_line, -1);
+	/* The search query is a persistent buffer the editor keeps across
+	 * searches; this test ends here, so it is dropped by hand. */
+	free(ec.search.query);
+	ec.search.query = NULL;
 
 	/* --- 2. Cleanup from browser mode frees the list once -------- */
 	/* editor_cleanup() freed ec.rows, so start a new editor. */
@@ -59,15 +81,28 @@ int main(void)
 	if (!file_open(FIXTURE_PATH))
 		exit(2);
 	mode_set(MODE_BROWSER);
-	ec.mode_state.browser.entries = tlist_new(sizeof(browser_entry_t));
-	if (!ec.mode_state.browser.entries)
+	ec.mode_owners.browser_entries = tlist_new(sizeof(browser_entry_t));
+	if (!ec.mode_owners.browser_entries)
 		exit(2);
-	/* The list pointer is the first word of the union, so it is also
-	 * what prompt.buffer reads.  Cleanup must not free it twice. */
-	h_expect_ptr((void *) ec.mode_state.prompt.buffer,
-		     (void *) ec.mode_state.browser.entries);
+	/* The list outlives the mode too, so cleanup releases it.  The
+	 * search query that mode_set(MODE_SEARCH) allocated is released by
+	 * editor_cleanup() too, which is why the browser case starts from a
+	 * fresh editor. */
 	editor_cleanup();
-	h_expect_ptr(ec.mode_state.browser.entries, NULL);
+	h_expect_ptr(ec.mode_owners.browser_entries, NULL);
+
+	/* And the same list, freed by the browser rather than by cleanup. */
+	h_release_buffer();
+	editor_init();
+	term_update_size();
+	if (!file_open(FIXTURE_PATH))
+		exit(2);
+	mode_set(MODE_BROWSER);
+	ec.mode_owners.browser_entries = tlist_new(sizeof(browser_entry_t));
+	if (!ec.mode_owners.browser_entries)
+		exit(2);
+	browser_free_entries();
+	h_expect_ptr(ec.mode_owners.browser_entries, NULL);
 
 	/* --- 3. The prompt buffer is not cleanup's to free ------------ */
 	/* MODE_PROMPT is never entered: mode_set() has no caller for it
