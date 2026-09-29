@@ -353,7 +353,7 @@ struct {
 	char status_msg[512];	/* active prompt/dialog text shown in statusbar (not timed; use overlay_msg for transient messages) */
 	char *copied_char_buffer;
 	size_t file_size_bytes;
-	int longest_line;	/* longest line length (bytes) seen in current buffer */
+	int longest_line;	/* longest row in the buffer, in bytes */
 	const struct syntax_desc *syntax;
 	compiled_rule_t *syntax_compiled;
 	size_t syntax_compiled_count;
@@ -458,6 +458,7 @@ static inline editor_row_t *ROW(int i)
 
 static void hl_invalidate_from(int row_idx);
 static void hl_mark_all(void);
+static int rows_longest(void);
 
 /* Manual typing growth alignment (power of two). */
 #define ROW_MANUAL_ALLOC_ALIGN 64
@@ -493,6 +494,12 @@ static void row_erase(int at)
 	 * ended in the erased row changes state for all of them. */
 	hl_mark_all();
 	tlist_delete(ec.rows, (size_t) at);
+	/* A removed row may have been the longest, and the rows below it
+	 * have all moved up, so the width is measured again.  This is the
+	 * one place a whole-buffer walk is worth it: the erase is rare and
+	 * the counter would otherwise keep the width of a line that is
+	 * gone. */
+	ec.longest_line = rows_longest();
 }
 
 typedef struct {
@@ -1067,6 +1074,21 @@ static void hl_mark_all(void)
 	ec.hl_invalid_from = 0;
 	for (int i = 0; i < NR; i++)
 		ROW(i)->hl_valid = false;
+	ec.longest_line = rows_longest();
+}
+
+/* Longest row in the buffer, in bytes.  The status bar sizes the column
+ * counter from it, and it has to shrink as well as grow: a line that
+ * was cut or backspaced away must not keep the width it once needed. */
+static int rows_longest(void)
+{
+	int longest = 0;
+	for (int i = 0; i < NR; i++) {
+		editor_row_t *row = ROW(i);
+		if (row && row->size > longest)
+			longest = row->size;
+	}
+	return longest;
 }
 
 static void syntax_disable(bool announce)
@@ -1547,6 +1569,10 @@ static void row_update(editor_row_t * row, int row_idx)
 	}
 	row->render[idx] = '\0';
 	row->render_size = idx;
+	/* The status bar sizes the column counter from the longest row,
+	 * and a row that shrank may have been it.  Only the row that grew
+	 * is compared, so a shrink does not walk the whole row list on
+	 * every keystroke. */
 	if (row->size > ec.longest_line)
 		ec.longest_line = row->size;
 	hl_invalidate_from(row_idx);
@@ -1643,6 +1669,11 @@ static bool undo_insert_bytes(int row_idx, int col, const char *s, size_t len)
 	memcpy(&row->chars[col], s, len);
 	row->size += (int)len;
 	row_update(row, row_idx);
+	/* row_update only widens the counter, because a shrink would cost
+	 * a walk of every row on each keystroke.  Here the row is known,
+	 * so the exact widest line is cheap. */
+	if (ec.longest_line > row->size)
+		ec.longest_line = rows_longest();
 	return true;
 }
 
@@ -1672,6 +1703,15 @@ static bool undo_apply_insert_text(int row, int col, const char *text,
 			r->size = x;
 			r->chars[x] = '\0';
 			row_update(r, y);
+			/* The row above was split, so the widest line may now
+			 * be shorter than the counter says.  Measuring is one
+			 * pass over the rows, and the replay is not on the
+			 * per-keystroke path. */
+			ec.longest_line = rows_longest();
+			/* row_insert grew the new row, so the counter is at
+			 * least its width. */
+			if (ROW(y + 1) && ROW(y + 1)->size > ec.longest_line)
+				ec.longest_line = ROW(y + 1)->size;
 			y++;
 			x = 0;
 			i++;
@@ -1692,6 +1732,10 @@ static bool undo_delete_bytes(int row_idx, int col, size_t len)
 		(size_t) (row->size - col) - len + 1);
 	row->size -= (int)len;
 	row_update(row, row_idx);
+	/* The row shrank, so the counter has to be measured again if this
+	 * row was the widest.  Same reasoning as undo_insert_bytes(). */
+	if (ec.longest_line > row->size)
+		ec.longest_line = rows_longest();
 	return true;
 }
 
