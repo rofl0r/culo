@@ -641,16 +641,10 @@ static void mode_set(editor_mode_t new_mode)
 		    ("-- SELECT MODE -- Use arrows to extend, ^C to cancel");
 		break;
 	case MODE_SEARCH:{
-			/* Allocate the query buffer the first time; subsequent ^W reuses it */
-			if (!ec.search.query) {
-				size_t cap = 128;
-				char *q = calloc(cap, 1);
-				if (q) {
-					ec.search.query = q;
-					ec.search.query_cap = cap;
-					ec.search.query_len = 0;
-				}
-			}
+			/* The query buffer is made by strbuf_grow() on the first
+			 * character typed, so there is nothing to allocate here.
+			 * A NULL query with a zero length is the state before the
+			 * first key, and every reader already handles it. */
 			/* Reset replace phase each time search mode is entered */
 			ec.search.replace_phase = 0;
 			ec.search.replace_count = 0;
@@ -1605,6 +1599,53 @@ static char *xstrndup0(const char *s, size_t len)
 		memcpy(p, s, len);
 	p[len] = '\0';
 	return p;
+}
+
+/* Append one byte to a NUL terminated buffer, growing it by doubling.
+ * The editor had three copies of this: the search query, the
+ * replacement text, and the buffer ui_prompt() edits.  The two search
+ * buffers grew by one byte per character, so typing a query reallocated
+ * once per key and copied everything typed so far each time.
+ *
+ * A failed allocation appends nothing and leaves the buffer, the length
+ * and the cap as they were, so the caller keeps whatever it had and the
+ * next keystroke tries again.  The cap always holds the NUL: it doubles
+ * when len + 1 exceeds it, and never below the first allocation. */
+static bool strbuf_grow(char **buf, size_t *len, size_t *cap, int byte)
+{
+	if (*len + 2 > *cap) {
+		size_t new_cap = *cap ? *cap : 128;
+		while (new_cap < *len + 2)
+			new_cap *= 2;
+		char *nb = realloc(*buf, new_cap);
+		if (!nb) {
+			/* errno is set by realloc; the buffer is untouched. */
+			return false;
+		}
+		*buf = nb;
+		*cap = new_cap;
+	}
+	(*buf)[(*len)++] = (char)byte;
+	(*buf)[*len] = '\0';
+	return true;
+}
+
+/* Make room for `want` bytes and a NUL, doubling as strbuf_grow() does,
+ * without writing anything.  A caller that already has the bytes copies
+ * them in itself, rather than handing them over one at a time. */
+static bool strbuf_reserve(char **buf, size_t *len, size_t *cap, size_t want)
+{
+	if (want + 1 <= *cap)
+		return true;
+	size_t new_cap = *cap ? *cap : 128;
+	while (new_cap < want + 1)
+		new_cap *= 2;
+	char *nb = realloc(*buf, new_cap);
+	if (!nb)
+		return false;
+	*buf = nb;
+	*cap = new_cap;
+	return true;
 }
 
 static void undo_item_free(undo_item_t * item)
@@ -4259,27 +4300,25 @@ static int ui_confirm(const char *msg)
 static char *ui_prompt(const char *prefix, const char *hint,
 		       const char *init, void (*callback) (char *, int))
 {
-	size_t buf_size = 128;
-	char *buf = malloc(buf_size);
-	if (!buf)
-		return NULL;
+	size_t buf_size = 0;
+	char *buf = NULL;
 	size_t buf_len = 0;
-	buf[0] = '\0';
 	int trunc_visible_chars = -1;
 	const int min_trunc_visible_chars = 2;
 
 	if (init) {
-		buf_len = strlen(init);
-		if (buf_len + 1 > buf_size) {
-			buf_size = buf_len + 1;
-			char *new_buf = realloc(buf, buf_size);
-			if (!new_buf) {
-				free(buf);
-				return NULL;
-			}
-			buf = new_buf;
+		/* Make room for the text that is already there, then copy it
+		 * in one go.  Going through the growth helper byte by byte
+		 * would reallocate once per character of the file name, and
+		 * would read nothing: the helper is not a reader, so the
+		 * only cost is the copying. */
+		size_t init_len = strlen(init);
+		if (!strbuf_reserve(&buf, &buf_len, &buf_size, init_len)) {
+			free(buf);
+			return NULL;
 		}
-		memcpy(buf, init, buf_len + 1);
+		memcpy(buf, init, init_len + 1);
+		buf_len = init_len;
 	}
 
 	while (1) {
@@ -4365,18 +4404,14 @@ static char *ui_prompt(const char *prefix, const char *hint,
 				return buf;
 			}
 		} else if (!iscntrl(c) && isprint(c)) {
-			if (buf_len == buf_size - 1) {
-				buf_size *= 2;
-				/* In case realloc fails */
-				char *new_buf = realloc(buf, buf_size);
-				if (NULL == new_buf) {
-					free(buf);
-					return NULL;
-				}
-				buf = new_buf;
+			/* A prompt that cannot grow ends here.  The text typed so
+			 * far is returned, not dropped: the caller asked for it. */
+			if (!strbuf_grow(&buf, &buf_len, &buf_size, c)) {
+				ec.status_msg[0] = '\0';
+				if (callback)
+					callback(buf, c);
+				return buf;
 			}
-			buf[buf_len++] = c;
-			buf[buf_len] = '\0';
 			if ((int)buf_len > max_bvis && max_bvis > 0)
 				trunc_visible_chars = max_bvis;
 		}
@@ -5194,42 +5229,14 @@ static void editor_process_key(void)
 						    = '\0';
 					}
 				} else if (c == '\t' || (c < 0x100 && isprint(c))) {
-					/* Ensure replace buffer is allocated */
-					if (!ec.search.replace_query) {
-						size_t cap = 128;
-						ec.search.replace_query =
-						    calloc(cap, 1);
-						ec.search.replace_cap = cap;
-						ec.search.replace_len = 0;
-					}
-					if (ec.search.replace_query &&
-					    ec.search.replace_len + 2 >
-					    ec.search.replace_cap) {
-						size_t new_cap =
-						    ec.search.replace_cap * 2;
-						char *nq =
-						    realloc(ec.search.
-							    replace_query,
-							    new_cap);
-						if (nq) {
-							ec.search.
-							    replace_query = nq;
-							ec.search.replace_cap =
-							    new_cap;
-						}
-					}
-					if (ec.search.replace_query &&
-					    ec.search.replace_len + 2 <=
-					    ec.search.replace_cap) {
-						ec.search.replace_query[ec.
-									search.
-									replace_len++]
-						    = (char)c;
-						ec.search.replace_query[ec.
-									search.
-									replace_len]
-						    = '\0';
-					}
+					/* Append to the replacement text.  The buffer is made
+					 * on the first character, so a replace that was given
+					 * no input leaves no allocation.  A replacement that
+					 * cannot grow keeps the text so far, as the old
+					 * grow-then-append pair did. */
+					strbuf_grow(&ec.search.replace_query,
+						    &ec.search.replace_len,
+						    &ec.search.replace_cap, c);
 				}
 				editor_refresh();
 				return;
@@ -5295,27 +5302,13 @@ static void editor_process_key(void)
 			} else if (c == '\t' || (c < 0x100 && isprint(c))) {
 				if (ec.search.prefill_from_start)
 					search_clear_prefilled_query();
-				/* Append character to query */
-				if (ec.search.query &&
-				    ec.search.query_len + 2 >
-				    ec.search.query_cap) {
-					size_t new_cap =
-					    ec.search.query_cap * 2;
-					char *nq =
-					    realloc(ec.search.query, new_cap);
-					if (nq) {
-						ec.search.query = nq;
-						ec.search.query_cap = new_cap;
-					}
-				}
-				if (ec.search.query &&
-				    ec.search.query_len + 2 <=
-				    ec.search.query_cap) {
-					ec.search.query[ec.search.query_len++] =
-					    (char)c;
-					ec.search.query[ec.search.query_len] =
-					    '\0';
-				}
+				/* Append character to query.  The buffer is made here
+				 * rather than when the mode opens, so an empty search
+				 * allocates nothing.  A query that cannot grow loses
+				 * this character and keeps the rest, as the old
+				 * grow-then-append pair did. */
+				strbuf_grow(&ec.search.query, &ec.search.query_len,
+					    &ec.search.query_cap, c);
 			}
 			editor_refresh();
 			return;
