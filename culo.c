@@ -717,10 +717,30 @@ static const char *const help_lines[] = {
 
 #define HELP_NUM_LINES (int)(sizeof(help_lines) / sizeof(help_lines[0]))
 
+/* Write the whole buffer, even when the tty takes it in pieces.  A
+ * frame is one repaint of the whole screen, and a short write on a busy
+ * or slow tty would leave the rest of it on the next frame, so the tail
+ * is written until nothing is left.  A write that fails outright is
+ * reported by the caller, so a closed terminal does not spin here. */
+static void term_write_all(const char *buf, size_t len)
+{
+	size_t off = 0;
+	while (off < len) {
+		ssize_t n = write(STDOUT_FILENO, buf + off, len - off);
+		if (n > 0) {
+			off += (size_t) n;
+			continue;
+		}
+		if (n < 0 && errno == EINTR)
+			continue;	/* a signal landed mid-write */
+		return;		/* the terminal is gone; nothing to do */
+	}
+}
+
 static void term_clear(void)
 {
-	write(STDOUT_FILENO, "\x1b[2J", 4);
-	write(STDOUT_FILENO, "\x1b[1;1H", 6);
+	term_write_all("\x1b[2J", 4);
+	term_write_all("\x1b[1;1H", 6);
 }
 
 static void perr(const char *s) {
@@ -3984,7 +4004,7 @@ static void editor_refresh(void)
 	snprintf(buf, sizeof(buf), "\x1b[%d;%dH", row, col);
 	buf_append(&eb, buf, strlen(buf));
 	buf_append(&eb, "\x1b[?25h", 6);
-	write(STDOUT_FILENO, eb.buf, eb.len);
+	term_write_all(eb.buf, (size_t) eb.len);
 	buf_destroy(&eb);
 }
 
@@ -4007,7 +4027,7 @@ static void editor_refresh_full(void)
 	snprintf(buf, sizeof(buf), "\x1b[%d;%dH", row, col);
 	buf_append(&eb, buf, strlen(buf));
 	buf_append(&eb, "\x1b[?25h", 6);
-	write(STDOUT_FILENO, eb.buf, eb.len);
+	term_write_all(eb.buf, (size_t) eb.len);
 	buf_destroy(&eb);
 }
 
@@ -4611,7 +4631,7 @@ static void list_screen_render(const char *title, int total_lines, int offset,
 	}
 	buf_append(&eb, "\x1b[m", 3);
 	buf_append_overlay(&eb);
-	write(STDOUT_FILENO, eb.buf, eb.len);
+	term_write_all(eb.buf, (size_t) eb.len);
 	buf_destroy(&eb);
 }
 
