@@ -130,7 +130,10 @@ int main(void)
 	h_expect_eq(g_undo.history[undo_history_index(0)].len, 17);
 	h_expect_eq(g_undo.history[undo_history_index(1)].len, 400);
 
-	h_run_loop("\032");	/* ^Z: drop the 400 x */
+	/* ^Z is undo.  It is a control byte, so the burst path drops it as
+	 * pasted text: undo is pressed on its own, with the input queue
+	 * empty, which is how a keypress arrives. */
+	h_run_loop("\032");
 	h_expect_eq(NR, 4);
 	h_expect_eq(g_undo.cursor, 1);
 	editor_row_t *r3b = (NR == 4) ? ROW(3) : NULL;

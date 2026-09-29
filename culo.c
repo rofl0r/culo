@@ -4730,6 +4730,26 @@ static void editor_process_key(void)
 	ec.last_was_cut = false;
 	int c = term_read_key();
 
+	/* A control byte that follows inserted text in the same burst is
+	 * pasted text, not a key the user pressed.  A terminal paste
+	 * carries whatever was in the clipboard, and a control byte in it
+	 * would otherwise run a command: ^K cut a line, ^W opened the
+	 * search prompt, ^X asked to quit and pulled the rest of the
+	 * paste into the dialog, where the editor waited for a key that
+	 * was never going to arrive.
+	 *
+	 * The first byte of a burst is still a key.  The loop opens a
+	 * burst whenever input is already queued, so the byte of a lone
+	 * keypress can be queued too, and that key must act.  Only once
+	 * the burst has inserted something does it read as a run of text
+	 * arriving at once.  The bytes a paste may carry are LF, CR, tab
+	 * and everything printable. */
+	if (g_burst.open && g_burst.len > 0 && c < 0x20 &&
+	    c != '\n' && c != '\r' && c != '\t') {
+		burst_break();
+		return;
+	}
+
 	/* Handle mode-specific keys first */
 	switch (ec.mode) {
 	case MODE_BROWSER:

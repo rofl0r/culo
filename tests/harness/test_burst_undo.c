@@ -127,8 +127,13 @@ int main(void)
 	h_expect_row_safe(0, "abcdef");
 
 	/* --- A cut inside a run must not swallow the run -------------- */
+	/* A control byte inside a burst is dropped as pasted text, not
+	 * run as a key, so the cut is driven key by key: h_run() leaves the
+	 * burst closed between calls, which is how a keypress arrives. */
 	open_with("abcdef\nghijkl\n");
-	h_run_burst("xy\013z");	/* type, ^K, type: one run of keys */
+	h_run_burst("xy");
+	h_run("\013");
+	h_run_burst("z");
 	/* ^K leaves the cut line in the clipboard, and the clipboard is
 	 * freed by the cleanup at the end of the test. */
 	show("after run");
@@ -194,11 +199,15 @@ int main(void)
 	h_expect_row_safe(0, "abcdef");
 
 	/* --- A delete inside a run must not swallow the run ----------- */
-	/* 0x7f is DEL_KEY: it moves right and deletes.  Two of them in one
-	 * run must each keep their own undo step, and the "z" that follows
-	 * must not be folded into the "xy" that came before them. */
+	/* 0x7f is DEL_KEY: it moves right and deletes.  Each delete is its
+	 * own undo step, and the "z" that follows must not be folded into
+	 * the "xy" that came before them.  DEL_KEY is above 0x1f, so it
+	 * still reaches the handler as a key. */
 	open_with("abcdef\n");
-	h_run_burst("xy\177\177z");
+	h_run_burst("xy");
+	h_run("\177");
+	h_run("\177");
+	h_run_burst("z");
 	show("after run");
 	h_expect_row_safe(0, "zabcdef");
 	records = g_undo.count;
