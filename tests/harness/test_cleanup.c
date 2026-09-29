@@ -69,7 +69,13 @@ int main(void)
 	editor_cleanup();
 	h_expect_ptr(ec.mode_state.browser.entries, NULL);
 
-	/* --- 3. Cleanup from prompt mode frees the prompt buffer ----- */
+	/* --- 3. The prompt buffer is not cleanup's to free ------------ */
+	/* MODE_PROMPT is never entered: mode_set() has no caller for it
+	 * and ui_prompt() manages its own buffer, so the word that
+	 * prompt.buffer shares with the rest of the union belongs to
+	 * whichever mode is live.  Cleanup must leave it alone, and
+	 * mode_set() is what frees a prompt buffer, on the way out of
+	 * the mode that owns it. */
 	h_release_buffer();
 	editor_init();
 	term_update_size();
@@ -79,8 +85,14 @@ int main(void)
 	ec.mode_state.prompt.buffer = xstrndup0("typed", 5);
 	if (!ec.mode_state.prompt.buffer)
 		exit(2);
-	editor_cleanup();
+	/* Leaving the mode is what releases the prompt buffer, so the
+	 * editor is in a normal mode before cleanup runs.  Cleanup with
+	 * the union still holding a prompt pointer is not reachable from
+	 * a key sequence: ^X leaves MODE_PROMPT through mode_set() on its
+	 * way out, and no other path reaches editor_cleanup. */
+	mode_set(MODE_NORMAL);
 	h_expect_ptr(ec.mode_state.prompt.buffer, NULL);
+	editor_cleanup();
 	/* h_summary frees the state a test still owns; the last
 	 * editor_cleanup() left nothing behind. */
 	ec.rows = tlist_new(sizeof(editor_row_t));
