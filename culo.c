@@ -537,6 +537,8 @@ static volatile sig_atomic_t g_resize_pending;
 static int get_line_number_width(void);
 static void editor_newline(void);
 static void burst_append(const char *s, size_t n);
+static void burst_break(void);
+static void burst_close(void);
 static void editor_insert_char(int c, bool manual_typing);
 static void editor_move_cursor(int key);
 static void editor_move_word(int dir);
@@ -1967,6 +1969,7 @@ static void editor_cut(bool append)
 {
 	if (ec.cursor_y >= NR)
 		return;
+	burst_break();
 
 	int before_y = ec.cursor_y, before_x = ec.cursor_x;
 	bool is_last_line = (ec.cursor_y == NR - 1);
@@ -2055,6 +2058,7 @@ static void editor_paste(void)
 {
 	if (!ec.copied_char_buffer)
 		return;
+	burst_break();
 
 	/* Validate cursor position first */
 	if (ec.cursor_y >= NR) {
@@ -2448,6 +2452,9 @@ static void selection_cut(void)
 
 static void editor_newline(void)
 {
+	/* A newline does not break the burst: it is part of the pasted
+	 * text, and undo_apply_insert_text() replays it by splitting on
+	 * '\n', so the recorded item still describes the edit. */
 	int before_y = ec.cursor_y, before_x = ec.cursor_x;
 	if (ec.cursor_x == 0) {
 		row_insert(ec.cursor_y, "", 0);
@@ -2494,6 +2501,7 @@ static struct {
 	size_t len;
 	size_t cap;
 	bool open;
+	bool pure;		/* every key so far only inserted text */
 	int row, col;		/* where the burst started */
 } g_burst = { 0 };
 
@@ -2524,10 +2532,32 @@ static void burst_open(int row, int col)
 	if (g_burst.open)
 		return;
 	g_burst.len = 0;
+	g_burst.pure = true;
 	g_burst.row = row;
 	g_burst.col = col;
 	g_burst.open = true;
 	g_undo.batching = true;
+}
+
+/* A burst is one undo step, but only while it is nothing but inserted
+ * text.  A cut, a paste, a delete or a cursor move inside the burst
+ * changes the buffer somewhere the recorded start row and column do
+ * not describe, so the accumulated text no longer matches the
+ * position and the single item would undo the wrong bytes.
+ *
+ * Such a key ends the burst.  The text typed so far is flushed as its
+ * own step first, because g_undo.batching is still suppressing the
+ * per-key records that would otherwise cover it, and the key that
+ * breaks the burst then records its own edit with batching off. */
+static void burst_break(void)
+{
+	if (!g_burst.open)
+		return;
+	if (g_burst.pure && g_burst.len > 0)
+		undo_record_insert(g_burst.row, g_burst.col, g_burst.buf,
+				   g_burst.len, g_burst.row, g_burst.col,
+				   ec.cursor_y, ec.cursor_x);
+	burst_close();
 }
 
 /* Close the burst and record it as one undo step. */
@@ -2535,9 +2565,10 @@ static void burst_close(void)
 {
 	if (!g_burst.open)
 		return;
+	bool pure = g_burst.pure;
 	g_burst.open = false;
 	g_undo.batching = false;
-	if (g_burst.len > 0)
+	if (pure && g_burst.len > 0)
 		undo_record_insert(g_burst.row, g_burst.col, g_burst.buf,
 				   g_burst.len, g_burst.row, g_burst.col,
 				   ec.cursor_y, ec.cursor_x);
@@ -2612,6 +2643,7 @@ static void editor_delete_char(void)
 {
 	if (ec.cursor_y == NR)
 		return;
+	burst_break();
 	if (ec.cursor_x == 0 && ec.cursor_y == 0)
 		return;
 
@@ -4136,6 +4168,9 @@ static char *ui_prompt(const char *prefix, const char *hint,
 
 static void editor_move_cursor(int key)
 {
+	/* A move inside a burst means the burst is no longer a run of
+	 * insertions at one spot, so it must not become one undo step. */
+	burst_break();
 	editor_row_t *row = (ec.cursor_y >= NR) ? NULL : ROW(ec.cursor_y);
 	switch (key) {
 	case ARROW_LEFT:
