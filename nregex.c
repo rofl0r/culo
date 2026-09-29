@@ -25,6 +25,17 @@
 #define MAX(a, b)	((a) < (b) ? (b) : (a))
 #define LEN(a)		(sizeof(a) / sizeof((a)[0]))
 
+/* Largest repetition count regcomp() will build a program for.  A count
+ * above this is REG_BADPAT.  a{N} emits 2N instructions, so this bounds
+ * the program, not the text: a query a user can type is far below it,
+ * and one above it would take gigabytes and minutes to compile for a match
+ * that cannot exist in a line of text. */
+#define RE_MAX_REPEAT 65536
+
+/* Most instructions a program may hold, so a very long pattern is a
+ * REG_BADPAT instead of an allocation the size of the machine. */
+#define RE_MAX_INSTS (1L << 20)
+
 /* regular expressions atoms */
 #define RA_CHR		'\0'	/* character literal */
 #define RA_BEG		'^'	/* string start */
@@ -64,7 +75,7 @@ struct rinst {
 /* regular expression program */
 struct regex {
 	struct rinst *p;	/* the program */
-	int n;			/* number of instructions */
+	long n;			/* number of instructions */
 	int flg;		/* regcomp() flags */
 };
 
@@ -510,8 +521,17 @@ static struct rnode *rnode_atom(const char *restrict * pat)
 			rnode_free(rnode);
 			return NULL;
 		}
-		while (isdigit((unsigned char)*p))
-			mincnt = mincnt * 10 + *p++ - '0';
+		/* Read the digits into a long and check every step: mincnt
+		 * * 10 overflows an int on a count of ten digits or more,
+		 * and the overflowed value is then used as a repetition
+		 * count. */
+		while (isdigit((unsigned char)*p)) {
+			mincnt = (int) ((long) mincnt * 10 + (*p++ - '0'));
+			if (mincnt > RE_MAX_REPEAT) {
+				rnode_free(rnode);
+				return NULL;
+			}
+		}
 		if (*p == ',') {
 			p++;
 			if (*p == '}') {
@@ -521,8 +541,14 @@ static struct rnode *rnode_atom(const char *restrict * pat)
 					rnode_free(rnode);
 					return NULL;
 				}
-				while (isdigit((unsigned char)*p))
-					maxcnt = maxcnt * 10 + *p++ - '0';
+				while (isdigit((unsigned char)*p)) {
+					maxcnt = (int) ((long) maxcnt * 10
+							 + (*p++ - '0'));
+					if (maxcnt > RE_MAX_REPEAT) {
+						rnode_free(rnode);
+						return NULL;
+					}
+				}
 			}
 		} else {
 			maxcnt = mincnt;
@@ -559,29 +585,50 @@ static struct rnode *rnode_parse(const char *restrict * pat)
 	return c2 ? rnode_make(RN_ALT, c1, c2) : c1;
 }
 
-static int rnode_count(struct rnode *rnode)
+/* Count the instructions the program needs, or return -1 if it would need
+ * more than the limit.  The arithmetic is in long: a pattern of bounded
+ * counts can still multiply out past an int, and the overflowed count
+ * became a negative malloc size in regcomp(). */
+static long rnode_count(struct rnode *rnode)
 {
-	int n = 1;
+	long n = 1;
+	long a, b;
 	if (!rnode)
 		return 0;
-	if (rnode->rn == RN_CAT)
-		n = rnode_count(rnode->c1) + rnode_count(rnode->c2);
-	if (rnode->rn == RN_ALT)
-		n = rnode_count(rnode->c1) + rnode_count(rnode->c2) + 2;
-	if (rnode->rn == RN_GRP)
-		n = rnode_count(rnode->c1) + 2;
+	if (rnode->rn == RN_CAT) {
+		a = rnode_count(rnode->c1);
+		b = rnode_count(rnode->c2);
+		if (a < 0 || b < 0)
+			return -1;
+		n = a + b;
+	}
+	if (rnode->rn == RN_ALT) {
+		a = rnode_count(rnode->c1);
+		b = rnode_count(rnode->c2);
+		if (a < 0 || b < 0)
+			return -1;
+		n = a + b + 2;
+	}
+	if (rnode->rn == RN_GRP) {
+		a = rnode_count(rnode->c1);
+		if (a < 0)
+			return -1;
+		n = a + 2;
+	}
 	if (rnode->mincnt == 0 && rnode->maxcnt == 0)
 		return 0;
 	if (rnode->mincnt == 1 && rnode->maxcnt == 1)
 		return n;
 	if (rnode->maxcnt < 0) {
-		n = (rnode->mincnt + 1) * n + 2;
+		n = ((long) rnode->mincnt + 1) * n + 2;
 	} else {
-		n = (rnode->mincnt + rnode->maxcnt) * n +
+		n = ((long) rnode->mincnt + rnode->maxcnt) * n +
 		    rnode->maxcnt - rnode->mincnt;
 	}
 	if (!rnode->mincnt)
 		n++;
+	if (n > RE_MAX_INSTS)
+		return -1;
 	return n;
 }
 
@@ -671,7 +718,7 @@ int regcomp(regex_t * restrict preg, const char *restrict pat, int flg)
 {
 	struct rnode *rnode;
 	struct regex *re;
-	int n;
+	long n;
 	int mark;
 	if (!(flg & REG_EXTENDED))
 		return REG_BADPAT;
@@ -681,12 +728,28 @@ int regcomp(regex_t * restrict preg, const char *restrict pat, int flg)
 			rnode_free(rnode);
 		return REG_BADPAT;
 	}
-	n = rnode_count(rnode) + 3;
+	n = rnode_count(rnode);
+	if (n < 0) {		/* the program would not fit */
+		rnode_free(rnode);
+		return REG_BADPAT;
+	}
+	n += 3;			/* the two whole-match marks and the match */
 	rnode_grpnum(rnode, 1);
 	re = malloc(sizeof(*re));
+	if (!re) {
+		rnode_free(rnode);
+		return REG_BADPAT;
+	}
 	memset(re, 0, sizeof(*re));
-	re->p = malloc(n * sizeof(re->p[0]));
-	memset(re->p, 0, n * sizeof(re->p[0]));
+	/* The size is checked above, and the allocation is checked here: a
+	 * failed malloc used to be memset, which is a write through NULL. */
+	re->p = malloc((size_t) n * sizeof(re->p[0]));
+	if (!re->p) {
+		free(re);
+		rnode_free(rnode);
+		return REG_BADPAT;
+	}
+	memset(re->p, 0, (size_t) n * sizeof(re->p[0]));
 	mark = re_insert(re, RI_MARK);
 	re->p[mark].mark = 0;
 	rnode_emit(rnode, re);
