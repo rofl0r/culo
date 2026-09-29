@@ -2751,14 +2751,16 @@ static FILE* try_open(const char *file_name, bool* m) {
 	return f;
 }
 
-static bool file_open(const char *file_name)
+/* Drop every row and reset the view, without touching the name, the
+ * undo history or the compiled syntax.  The caller has already decided
+ * this is a fresh buffer. */
+static void file_clear_buffer(void)
 {
 	undo_history_clear();
 	for (int i = 0; i < NR; i++)
 		row_free_contents(ROW(i));
 	tlist_free_items(ec.rows);
 
-	/* Reset cursor and scroll position */
 	ec.cursor_x = 0;
 	ec.cursor_y = 0;
 	ec.row_offset = 0;
@@ -2767,15 +2769,30 @@ static bool file_open(const char *file_name)
 	ec.file_size_bytes = 0;
 	ec.longest_line = 0;
 	ec.line_ending = LINE_ENDING_UNKNOWN;
+	ec.modified = false;
+	hl_mark_all();
+}
+
+static bool file_open(const char *file_name)
+{
+	/* Read first, clear second.  Opening a directory or a file the
+	 * user may not read fails, and the old order had already thrown
+	 * the buffer away by then: the browser reported the failure and
+	 * left an empty editor on screen, so every unsaved change was
+	 * gone with no way back. */
+	FILE *file = try_open(file_name, &ec.read_only);
+	if (!file && errno != ENOENT)
+		return false;
+	/* No syntax on the old name: the rows are about to go. */
+	syntax_reset_compiled_rules();
+	ec.syntax = NULL;
+	file_clear_buffer();
 
 	free(ec.file_name);
 	ec.file_name = strdup(file_name);
 	browser_set_base_dir_from_path(file_name);
 	syntax_select();
-	FILE *file = try_open(file_name, &ec.read_only);
 	if (!file) {
-		if (errno != ENOENT)
-			return false;
 		ec.modified = false;
 		return true;
 	}
