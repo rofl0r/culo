@@ -366,6 +366,7 @@ struct {
 	} syntax_palette[256];
 	unsigned char syntax_palette_count;
 	struct termios orig_termios;
+	bool orig_termios_valid;	/* orig_termios holds the cooked state */
 	/* Editor mode state machine */
 	editor_mode_t mode;
 	editor_mode_t prev_mode;	/* For returning from temporary modes */
@@ -541,6 +542,9 @@ static char *ui_prompt(const char *prefix, const char *hint, const char *init, v
 static void editor_refresh(void);
 /* Set by the SIGWINCH handler, acted on by editor_refresh. */
 static volatile sig_atomic_t g_resize_pending;
+/* Set by the SIGCONT handler, acted on by editor_refresh.  sig_atomic_t
+ * is the only type a signal handler may touch. */
+static volatile sig_atomic_t g_cont_pending;
 static int get_line_number_width(void);
 static void editor_newline(void);
 static void burst_append(const char *s, size_t n);
@@ -778,10 +782,21 @@ static void term_disable_raw(void)
 
 static void term_enable_raw(void)
 {
-	if (tcgetattr(STDIN_FILENO, &ec.orig_termios) == -1)
+	struct termios raw;
+	/* The state to restore is taken once, from the terminal as the
+	 * shell left it.  A second call, which the resume after a Ctrl-Z
+	 * makes, would otherwise read back the raw settings this function
+	 * installed and store those, so the exit handler would put the
+	 * terminal back in raw mode.  The atexit registration is per
+	 * session for the same reason: twice would run the restore twice.
+	 */
+	if (tcgetattr(STDIN_FILENO, &raw) == -1)
 		panic("Failed to get current terminal state: ");
-	atexit(term_disable_raw);
-	struct termios raw = ec.orig_termios;
+	if (!ec.orig_termios_valid) {
+		ec.orig_termios = raw;
+		ec.orig_termios_valid = true;
+		atexit(term_disable_raw);
+	}
 	raw.c_iflag &= ~(BRKINT | ICRNL | INPCK | ISTRIP | IXON);
 	raw.c_oflag &= ~(OPOST);
 	raw.c_cflag |= (CS8);
@@ -4017,6 +4032,16 @@ static void editor_get_cursor_pos(int *row, int *col)
 
 static void editor_refresh(void)
 {
+	/* The editor was suspended and is back: the shell owned the
+	 * terminal while it was stopped, so raw mode and the alternate
+	 * buffer have to be taken back.  The handler only raised the flag.
+	 */
+	if (g_cont_pending) {
+		g_cont_pending = 0;
+		term_disable_raw();
+		term_open_buffer();
+		term_enable_raw();
+	}
 	/* A resize arrived while the loop was reading a key.  The handler
 	 * only set the flag, so the work happens here, in the main loop. */
 	if (g_resize_pending) {
@@ -4085,13 +4110,16 @@ static void sig_winch_handler(int sig)
 	g_resize_pending = 1;
 }
 
+/* Set by the SIGCONT handler, acted on by editor_refresh.  After a
+ * Ctrl-Z the shell owns the terminal again, so the editor has to take
+ * raw mode back and repaint.  None of that is async-signal-safe:
+ * tcsetattr, the malloc in a repaint and the second atexit registration
+ * inside term_enable_raw all belong in the main loop, so the handler
+ * only sets this flag. */
 static void sig_cont_handler(int sig)
 {
 	(void)sig;		/* Unused parameter */
-	term_disable_raw();
-	term_open_buffer();
-	term_enable_raw();
-	editor_refresh();
+	g_cont_pending = 1;
 }
 
 /* Ask a question with selectable options.
