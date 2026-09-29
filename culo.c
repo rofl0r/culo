@@ -506,6 +506,7 @@ static void row_erase(int at)
 typedef struct {
 	char *buf;
 	int len;
+	int cap;		/* bytes allocated for buf */
 } editor_buf_t;
 
 /* clang-format off */
@@ -3490,11 +3491,22 @@ static void search_clear_prefilled_query(void)
 
 static void buf_append(editor_buf_t * eb, const char *s, int len)
 {
-	char *new = realloc(eb->buf, eb->len + len);
-	if (!new)
+	if (len <= 0)
 		return;
-	memcpy(&new[eb->len], s, len);
-	eb->buf = new;
+	/* Grow by doubling.  A repaint appends per byte, so reallocating
+	 * to the exact size each time made every repaint do thousands of
+	 * reallocs and copy what is already there. */
+	if (eb->len + len > eb->cap) {
+		int cap = eb->cap ? eb->cap : 256;
+		while (cap < eb->len + len)
+			cap *= 2;
+		char *new = realloc(eb->buf, (size_t) cap);
+		if (!new)
+			return;		/* drop the append; the frame is short */
+		eb->buf = new;
+		eb->cap = cap;
+	}
+	memcpy(&eb->buf[eb->len], s, (size_t) len);
 	eb->len += len;
 }
 
@@ -4058,7 +4070,7 @@ static void editor_refresh(void)
 			ec.cursor_x = 0;
 	}
 	editor_scroll();
-	editor_buf_t eb = { NULL, 0 };
+	editor_buf_t eb = { NULL, 0, 0 };
 	buf_append(&eb, "\x1b[?25l", 6);
 	buf_append(&eb, "\x1b[H", 3);
 	ui_draw_rows(&eb);
@@ -4080,7 +4092,7 @@ static void editor_refresh(void)
 static void editor_refresh_full(void)
 {
 	editor_scroll();
-	editor_buf_t eb = { NULL, 0 };
+	editor_buf_t eb = { NULL, 0, 0 };
 	buf_append(&eb, "\x1b[?25l", 6);
 	buf_append(&eb, "\x1b[2J", 4);	/* Clear entire screen */
 	buf_append(&eb, "\x1b[H", 3);
@@ -4619,7 +4631,7 @@ static void list_screen_render(const char *title, int total_lines, int offset,
 			       tlist *entries, const char *status_left,
 			       const char *status_right)
 {
-	editor_buf_t eb = { NULL, 0 };
+	editor_buf_t eb = { NULL, 0, 0 };
 	int visible = ec.screen_rows - 1;
 
 	buf_append(&eb, "\x1b[?25l\x1b[H", 9);
