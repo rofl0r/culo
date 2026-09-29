@@ -532,6 +532,8 @@ const struct syntax_desc syntax_rules[] = {
 
 static char *ui_prompt(const char *prefix, const char *hint, const char *init, void (*callback) (char *, int));
 static void editor_refresh(void);
+/* Set by the SIGWINCH handler, acted on by editor_refresh. */
+static volatile sig_atomic_t g_resize_pending;
 static int get_line_number_width(void);
 static void editor_newline(void);
 static void burst_append(const char *s, size_t n);
@@ -3821,6 +3823,22 @@ static void editor_get_cursor_pos(int *row, int *col)
 
 static void editor_refresh(void)
 {
+	/* A resize arrived while the loop was reading a key.  The handler
+	 * only set the flag, so the work happens here, in the main loop. */
+	if (g_resize_pending) {
+		g_resize_pending = 0;
+		term_update_size();
+		/* Bound the cursor by the buffer, not by the window.  A
+		 * resize must not move the cursor to a different line: the
+		 * window only decides how much of the buffer is visible,
+		 * and editor_scroll follows the cursor into the new size. */
+		ec.cursor_y = clamp(ec.cursor_y, 0, NR > 0 ? NR - 1 : 0);
+		if (ec.cursor_y < NR)
+			ec.cursor_x = clamp(ec.cursor_x, 0,
+					     ROW(ec.cursor_y)->size);
+		else
+			ec.cursor_x = 0;
+	}
 	editor_scroll();
 	editor_buf_t eb = { NULL, 0 };
 	buf_append(&eb, "\x1b[?25l", 6);
@@ -3863,20 +3881,14 @@ static void editor_refresh_full(void)
 	buf_destroy(&eb);
 }
 
+/* The handler does nothing but set the flag above, because a handler
+ * that repaints would malloc, realloc and write from signal context,
+ * which is not async-signal-safe: a SIGWINCH that lands inside a malloc
+ * on a paste can deadlock on the allocator lock. */
 static void sig_winch_handler(int sig)
 {
 	(void)sig;		/* Unused parameter */
-	term_update_size();
-	/* Bound the cursor by the buffer, not by the window.  A resize
-	 * must not move the cursor to a different line: the window only
-	 * decides how much of the buffer is visible, and editor_scroll
-	 * follows the cursor into the new size. */
-	ec.cursor_y = clamp(ec.cursor_y, 0, NR > 0 ? NR - 1 : 0);
-	if (ec.cursor_y < NR)
-		ec.cursor_x = clamp(ec.cursor_x, 0, ROW(ec.cursor_y)->size);
-	else
-		ec.cursor_x = 0;
-	editor_refresh();
+	g_resize_pending = 1;
 }
 
 static void sig_cont_handler(int sig)

@@ -53,12 +53,14 @@ static void open_with(const char *body)
 	editor_refresh();
 }
 
-/* One resize, through the real handler. */
+/* One resize, the way the main loop sees it: the handler raises the
+ * flag and the next repaint does the work. */
 static void resize(int rows, int cols)
 {
 	fake_rows = rows;
 	fake_cols = cols;
 	sig_winch_handler(0);
+	editor_refresh();
 }
 
 int main(void)
@@ -66,6 +68,21 @@ int main(void)
 	mkdir("tests/test_tmp", 0777);	/* ok if it exists */
 	open_with("a\nb\nc\nd\ne\nf\ng\nh\n");
 	resize(40, 200);
+
+	/* --- The handler itself must do no work ----------------------- */
+	/* The handler only sets a flag, so the size the editor believes
+	 * cannot change until the main loop repaints.  A handler that
+	 * repainted would malloc and write from signal context. */
+	int before = ec.screen_rows;
+	fake_rows = 6;
+	sig_winch_handler(0);
+	h_expect_eq(ec.screen_rows, before);
+	/* The repaint that follows consumes the flag.  term_update_size
+	 * drops the last row for the status line. */
+	editor_refresh();
+	h_expect_eq(ec.screen_rows, 5);
+	fake_rows = 41;
+	editor_refresh();
 
 	/* --- Cursor past the window, inside the file ------------------ */
 	ec.cursor_y = 6;
