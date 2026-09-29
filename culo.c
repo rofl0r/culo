@@ -1060,6 +1060,8 @@ static void syntax_disable(bool announce)
 
 static void syntax_apply_rules(editor_row_t *row)
 {
+	if (!row->render)		/* allocation failed: nothing to match */
+		return;
 	for (size_t r = 0; r < ec.syntax_compiled_count; r++) {
 		size_t offset = 0;
 		regmatch_t match;
@@ -1125,6 +1127,8 @@ static bool syntax_find_match(regex_t *rx, const char *s, size_t offset,
 
 static void syntax_apply_span_rules(editor_row_t *row, int row_idx)
 {
+	if (!row->render)		/* allocation failed: nothing to match */
+		return;
 	size_t pos = 0;
 	bool in_span = false;
 	int active_span = -1;
@@ -1235,7 +1239,20 @@ static void syntax_ensure_row_highlighted(int row_idx)
 
 static void syntax_highlight(editor_row_t *row, int row_idx)
 {
-	row->highlight = realloc(row->highlight, row->render_size);
+	/* render_size 0 means an empty row, and realloc(p, 0) may free the
+	 * buffer and return NULL, while the draw reads the highlight for
+	 * every column it paints, so keep a one-byte buffer instead.  A
+	 * failed realloc returns NULL and leaves the old pointer alone, so
+	 * the result is only stored once it is known to be good. */
+	size_t want = row->render_size > 0 ? (size_t) row->render_size : 1;
+	unsigned char *hl = realloc(row->highlight, want);
+	if (!hl) {
+		/* No highlight to write.  Leave the row stale so the next
+		 * draw tries again, and draw it without colours. */
+		row->hl_valid = false;
+		return;
+	}
+	row->highlight = hl;
 	memset(row->highlight, NORMAL, row->render_size);
 	row->span_open = false;
 	row->span_rule = -1;
@@ -1475,9 +1492,19 @@ static void row_update(editor_row_t * row, int row_idx)
 	row->render_direct_map = direct_map;
 
 	free(row->render);
-	/* Allocate extra space for tabs and wide characters */
+	/* Allocate extra space for tabs and wide characters.  The old
+	 * pointer goes first, so a failed allocation leaves the row without
+	 * a render buffer rather than with a dangling one, and the writes
+	 * below are skipped. */
 	row->render =
 	    malloc(row->size + tabs * (TAB_STOP - 1) + wide_chars + 1);
+	if (!row->render) {
+		row->render_size = 0;
+		row->render_direct_map = false;
+		ui_set_message("Memory allocation failed");
+		hl_invalidate_from(row_idx);
+		return;
+	}
 
 	int idx = 0;
 	byte_pos = 0;
@@ -3778,8 +3805,15 @@ static void ui_draw_rows(editor_buf_t * eb)
 				len = 0;
 			if (len > available_cols)
 				len = available_cols;
-			char *c = row->render + ec.col_offset;
-			unsigned char *hl = row->highlight + ec.col_offset;
+			/* A row whose render or highlight allocation failed
+			 * has nothing to draw.  Applying col_offset to
+			 * NULL is undefined, so skip the row. */
+			if (!row->render || !row->highlight)
+				len = 0;
+			char *c = row->render ? row->render + ec.col_offset
+			    : NULL;
+			unsigned char *hl = row->highlight
+			    ? row->highlight + ec.col_offset : NULL;
 			unsigned char current_style = NORMAL;
 			bool in_selection = false;
 			int prev_tab_cursor_x = -1;
@@ -4746,6 +4780,13 @@ static void editor_process_key(void)
 	 * and everything printable. */
 	if (g_burst.open && g_burst.len > 0 && c < 0x20 &&
 	    c != '\n' && c != '\r' && c != '\t') {
+		/* Pasted text and a fast typist are the same on the wire: the
+		 * burst only knows the tty had bytes queued.  A control byte
+		 * in that stream is dropped, because a dialog waiting for
+		 * its own key would otherwise swallow the rest of the paste
+		 * and hang.  The first byte of a burst is still a key, so
+		 * ^K, ^O, ^X and the rest keep working when they are typed
+		 * on their own. */
 		burst_break();
 		return;
 	}
