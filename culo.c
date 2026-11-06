@@ -4243,7 +4243,10 @@ static void editor_handle_signals(void)
 	if (g_resize_pending) {
 		g_resize_pending = 0;
 		term_update_size();
-		ec.cursor_y = clamp(ec.cursor_y, 0, NR > 0 ? NR - 1 : 0);
+		/* Allow the virtual line (NR) as a valid cursor row.
+		 * Clamping to NR-1 moved the cursor off the virtual
+		 * line while the user typed at the end of the file. */
+		ec.cursor_y = clamp(ec.cursor_y, 0, NR > 0 ? NR : 0);
 		if (ec.cursor_y < NR)
 			ec.cursor_x = clamp(ec.cursor_x, 0,
 					     ROW(ec.cursor_y)->size);
