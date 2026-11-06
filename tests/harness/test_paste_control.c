@@ -167,6 +167,32 @@ int main(void)
 	h_expect_row(1, "two");
 	h_expect_row(2, "three");
 
+	/* --- DEL and an escape sequence inside a paste must not act -- */
+	/* BACKSPACE 0x7f is above 0x20, so the old byte check missed
+	 * it and a pasted DEL deleted a character. An ESC in a paste
+	 * ends the burst in the old code, and the rest of the sequence
+	 * then acted as keys. */
+	{
+		char keys[8];
+		keys[0] = 'A'; keys[1] = 'B'; keys[2] = '\177'; keys[3] = 'C';
+		keys[4] = '\0';
+		open_with();
+		h_run_burst(keys);
+		show("after paste with DEL");
+		h_expect_row_safe(0, "ABCone");
+	}
+	{
+		char keys[16];
+		keys[0] = 'A'; keys[1] = 'B'; keys[2] = '\033'; keys[3] = '[';
+		keys[4] = 'D'; keys[5] = 'C'; keys[6] = '\0';
+		open_with();
+		h_run_burst(keys);
+		show("after paste with arrow escape");
+		h_expect_row_safe(0, "ABCone");
+		h_expect_eq(ec.cursor_y, 0);
+		h_expect_eq(ec.cursor_x, 3);
+	}
+
 	/* --- A control byte typed on its own still reaches the command - */
 	/* The burst is closed between keypresses, so ^K keeps cutting. */
 	open_with();

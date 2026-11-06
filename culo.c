@@ -4989,29 +4989,24 @@ static void editor_process_key(void)
 	ec.last_was_cut = false;
 	int c = term_read_key();
 
-	/* A control byte that follows inserted text in the same burst is
-	 * pasted text, not a key the user pressed.  A terminal paste
-	 * carries whatever was in the clipboard, and a control byte in it
-	 * would otherwise run a command: ^K cut a line, ^W opened the
-	 * search prompt, ^X asked to quit and pulled the rest of the
-	 * paste into the dialog, where the editor waited for a key that
-	 * was never going to arrive.
+	/* A control byte, DEL, or escape sequence that follows inserted
+	 * text in the same burst is pasted text, not a key the user
+	 * pressed.  A terminal paste carries whatever was in the
+	 * clipboard, and such bytes would otherwise run a command:
+	 * ^K cut a line, ^W opened search, ^X asked to quit and pulled
+	 * the rest of the paste into the dialog, where the editor
+	 * waited for a key that never arrived.
 	 *
-	 * The first byte of a burst is still a key.  The loop opens a
-	 * burst whenever input is already queued, so the byte of a lone
-	 * keypress can be queued too, and that key must act.  Only once
-	 * the burst has inserted something does it read as a run of text
-	 * arriving at once.  The bytes a paste may carry are LF, CR, tab
-	 * and everything printable. */
-	if (g_burst.open && g_burst.len > 0 && c < 0x20 &&
-	    c != '\n' && c != '\r' && c != '\t') {
-		/* Pasted text and a fast typist are the same on the wire: the
-		 * burst only knows the tty had bytes queued.  A control byte
-		 * in that stream is dropped, because a dialog waiting for
-		 * its own key would otherwise swallow the rest of the paste
-		 * and hang.  The first byte of a burst is still a key, so
-		 * ^K, ^O, ^X and the rest keep working when they are typed
-		 * on their own. */
+	 * The check is on the decoded key, not the raw byte: DEL arrives
+	 * as BACKSPACE 0x7f, and an escape sequence arrives as a nav
+	 * code or Meta code, both above 0x20. The old byte check missed
+	 * DEL and ended the burst on ESC, so the rest of the sequence
+	 * then acted as keys. The first byte of a burst is still a key.
+	 * The bytes a paste may carry are LF, CR, tab and printable. */
+	if (g_burst.open && g_burst.len > 0 &&
+	    (c == BACKSPACE || c == DEL_KEY || c == '\x1b' ||
+	     ((c < 0x20 || c >= 0x800) && c != '\n' && c != '\r' &&
+	      c != '\t'))) {
 		burst_break();
 		return;
 	}
