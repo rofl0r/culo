@@ -2805,8 +2805,8 @@ static void editor_delete_char(void)
 	 * Backspace removes the newline before the last line, the same
 	 * join the start-of-row path does at the end of a line. */
 	if (ec.cursor_y >= NR) {
-		if (NR == 0)
-			return;	/* nothing to join */
+		if (NR < 2)
+			return; /* no newline to join: empty or single row */
 		int before_y = ec.cursor_y, before_x = ec.cursor_x;
 		/* Join the row above with the last row, which is what the
 		 * newline between them held. */

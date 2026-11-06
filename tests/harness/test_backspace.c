@@ -67,6 +67,29 @@ int main(void)
 	h_expect_eq(NR, 1);
 	h_expect_row(0, "abcdef");
 
+	/* A single row file has no newline to join. Backspace on the
+	 * virtual line must stay on the virtual line, not move the
+	 * cursor to the end of the only row. */
+	{
+		FILE *f2 = fopen(FIXTURE_PATH, "w");
+		if (!f2) exit(2);
+		fputs("only\n", f2);
+		fclose(f2);
+		h_release_buffer();
+		editor_init();
+		term_update_size();
+		if (!file_open(FIXTURE_PATH)) exit(2);
+		editor_refresh();
+		h_expect_eq(NR, 1);
+		ec.cursor_y = NR;
+		ec.cursor_x = 0;
+		h_run("\177");
+		h_expect_eq(NR, 1);
+		h_expect_eq(ec.cursor_y, NR);
+		h_expect_eq(ec.cursor_x, 0);
+		h_expect_row(0, "only");
+	}
+
 	h_summary("backspace on the virtual line tests");
 	return 0;
 }
