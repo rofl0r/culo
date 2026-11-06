@@ -3689,13 +3689,17 @@ static int key_to_select_nav(int c)
  * line past the last row. */
 static void page_move_cursor(int key)
 {
+	burst_break();
 	int page = ec.screen_rows > 0 ? ec.screen_rows : 1;
 	int last = NR > 0 ? NR - 1 : 0;
 	int dir = (key == PAGE_UP) ? -1 : 1;
 	ec.cursor_y = clamp(ec.cursor_y + dir * page, 0, last);
 	/* Scroll by a page as well.  editor_scroll only pulls the window to
-	 * the cursor, which would show one new line. */
-	ec.row_offset = clamp(ec.row_offset + dir * page, 0, last);
+	 * the cursor, which would show one new line. Clamp the offset to
+	 * the last full page start, not the last row, so a page down near
+	 * the end does not leave blank rows below the last row. */
+	int max_offset = NR > page ? NR - page : 0;
+	ec.row_offset = clamp(ec.row_offset + dir * page, 0, max_offset);
 	/* Keep the column on a row that exists. */
 	if (ec.cursor_y < NR)
 		ec.cursor_x = clamp(ec.cursor_x, 0, ROW(ec.cursor_y)->size);
