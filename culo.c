@@ -4316,6 +4316,14 @@ static char *ui_prompt(const char *prefix, const char *hint,
 	int trunc_visible_chars = -1;
 	const int min_trunc_visible_chars = 2;
 
+	/* Allocate an empty buffer at entry: the display snprintf reads
+	 * buf even when init is NULL, and a NULL %s argument is undefined. */
+	if (!strbuf_reserve(&buf, &buf_len, &buf_size, 0)) {
+		free(buf);
+		return NULL;
+	}
+	buf[0] = '\0';
+
 	if (init) {
 		/* Make room for the text that is already there, then copy it
 		 * in one go.  Going through the growth helper byte by byte
