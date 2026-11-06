@@ -68,7 +68,7 @@ struct ratom {
 struct rinst {
 	struct ratom ra;	/* regular expression atom (RI_ATOM) */
 	int ri;			/* instruction type (RI_*) */
-	int dst;		/* destination of RI_FORK, RI_JUMP */
+	long dst;		/* destination of RI_FORK, RI_JUMP */
 	int mark;		/* mark (RI_MARK) */
 };
 
@@ -81,7 +81,8 @@ struct regex {
 
 /* regular expression matching state */
 struct rstate_saved {
-	int s, mark_pos, pc;	/* saved rstate state */
+	int s, mark_pos;
+	long pc;	/* saved rstate state */
 };
 struct rstate_mark {
 	int num, val;		/* updated mark and its value */
@@ -89,7 +90,7 @@ struct rstate_mark {
 struct rstate {
 	const char *s;		/* the current position in the string */
 	const char *o;		/* the beginning of the string */
-	int pc;			/* program counter */
+	long pc;		/* program counter */
 	int flg;		/* flags passed to regcomp() and regexec() */
 	int subcnt;		/* number of groups to return */
 	struct rstate_mark *mark;	/* mark updates */
@@ -123,7 +124,7 @@ static void rstate_done(struct rstate *rs)
 		free(rs->saved);
 }
 
-static int rstate_push(struct rstate *rs, int pc)
+static int rstate_push(struct rstate *rs, long pc)
 {
 	if (rs->saved_pos >= rs->saved_len) {
 		int saved_len = rs->saved_len * 2;
@@ -600,18 +601,24 @@ static long rnode_count(struct rnode *rnode)
 		b = rnode_count(rnode->c2);
 		if (a < 0 || b < 0)
 			return -1;
+		/* Check the sum too: two bounded children can still sum
+		 * past the limit, and the parent then multiplies it. */
+		if (a > RE_MAX_INSTS - b)
+			return -1;
 		n = a + b;
-	}
-	if (rnode->rn == RN_ALT) {
+	} else if (rnode->rn == RN_ALT) {
 		a = rnode_count(rnode->c1);
 		b = rnode_count(rnode->c2);
 		if (a < 0 || b < 0)
 			return -1;
+		if (a > RE_MAX_INSTS - b - 2)
+			return -1;
 		n = a + b + 2;
-	}
-	if (rnode->rn == RN_GRP) {
+	} else if (rnode->rn == RN_GRP) {
 		a = rnode_count(rnode->c1);
 		if (a < 0)
+			return -1;
+		if (a > RE_MAX_INSTS - 2)
 			return -1;
 		n = a + 2;
 	}
@@ -620,13 +627,24 @@ static long rnode_count(struct rnode *rnode)
 	if (rnode->mincnt == 1 && rnode->maxcnt == 1)
 		return n;
 	if (rnode->maxcnt < 0) {
-		n = ((long) rnode->mincnt + 1) * n + 2;
+		/* Check before multiply: (min+1)*n can overflow long
+		 * when n is already near the limit. */
+		long mult = (long) rnode->mincnt + 1;
+		if (mult > 0 && n > (RE_MAX_INSTS - 2) / mult)
+			return -1;
+		n = mult * n + 2;
 	} else {
-		n = ((long) rnode->mincnt + rnode->maxcnt) * n +
-		    rnode->maxcnt - rnode->mincnt;
+		long mult = (long) rnode->mincnt + rnode->maxcnt;
+		long add = (long) rnode->maxcnt - rnode->mincnt;
+		if (mult > 0 && n > (RE_MAX_INSTS - add) / mult)
+			return -1;
+		n = mult * n + add;
 	}
-	if (!rnode->mincnt)
+	if (!rnode->mincnt) {
+		if (n >= RE_MAX_INSTS)
+			return -1;
 		n++;
+	}
 	if (n > RE_MAX_INSTS)
 		return -1;
 	return n;
@@ -644,7 +662,7 @@ static int rnode_grpnum(struct rnode *rnode, int num)
 	return cur;
 }
 
-static int re_insert(struct regex *p, int ri)
+static long re_insert(struct regex *p, int ri)
 {
 	p->p[p->n++].ri = ri;
 	return p->n - 1;
@@ -654,7 +672,7 @@ static void rnode_emit(struct rnode *n, struct regex *p);
 
 static void rnode_emitnorep(struct rnode *n, struct regex *p)
 {
-	int fork, done, mark;
+	long fork, done, mark;
 	if (n->rn == RN_ALT) {
 		fork = re_insert(p, RI_FORK);
 		rnode_emit(n->c1, p);
@@ -675,14 +693,14 @@ static void rnode_emitnorep(struct rnode *n, struct regex *p)
 		p->p[mark].mark = 2 * n->grp + 1;
 	}
 	if (n->rn == RN_ATOM) {
-		int atom = re_insert(p, RI_ATOM);
+		long atom = re_insert(p, RI_ATOM);
 		ratom_copy(&p->p[atom].ra, &n->ra);
 	}
 }
 
 static void rnode_emit(struct rnode *n, struct regex *p)
 {
-	int jump = -1;		/* the last jump to repetition end */
+	long jump = -1;		/* the last jump to repetition end */
 	int i;
 	if (!n)
 		return;
@@ -695,18 +713,18 @@ static void rnode_emit(struct rnode *n, struct regex *p)
 	for (i = 0; i < n->mincnt; i++)
 		rnode_emitnorep(n, p);
 	for (i = n->mincnt; i < n->maxcnt; i++) {
-		int fork = re_insert(p, RI_FORK);
+		long fork = re_insert(p, RI_FORK);
 		p->p[fork].dst = jump;
 		jump = fork;
 		rnode_emitnorep(n, p);
 	}
 	while (jump >= 0) {
-		int prev = p->p[jump].dst;
+		long prev = p->p[jump].dst;
 		p->p[jump].dst = p->n;
 		jump = prev;
 	}
 	if (n->maxcnt < 0) {
-		int fork = re_insert(p, RI_FORK);
+		long fork = re_insert(p, RI_FORK);
 		rnode_emitnorep(n, p);
 		jump = re_insert(p, RI_JUMP);
 		p->p[jump].dst = fork;
@@ -719,7 +737,7 @@ int regcomp(regex_t * restrict preg, const char *restrict pat, int flg)
 	struct rnode *rnode;
 	struct regex *re;
 	long n;
-	int mark;
+	long mark;
 	if (!(flg & REG_EXTENDED))
 		return REG_BADPAT;
 	rnode = rnode_parse(&pat);
@@ -765,7 +783,7 @@ int regcomp(regex_t * restrict preg, const char *restrict pat, int flg)
 void regfree(regex_t * preg)
 {
 	struct regex *re = *preg;
-	int i;
+	long i;
 	for (i = 0; i < re->n; i++)
 		if (re->p[i].ri == RI_ATOM)
 			free(re->p[i].ra.s);

@@ -136,6 +136,34 @@ int main(void)
 		}
 	}
 
+	/* --- 4b. A long cat of bounded repeats must not bypass the
+	 *     sum check.  Each a{40000} alone is under the per count
+	 *     bound, but 30 of them need 30*80000 instructions, past
+	 *     the 1M program limit.  Without a sum check the count
+	 *     wraps in the parent and the program is built anyway. */
+	{
+		char pat[1024];
+		pat[0] = '\0';
+		for (int k = 0; k < 30; k++)
+			strcat(pat, "a{40000}");
+		if (compiles(pat)) {
+			printf("FAIL: cat of a{40000} x30 should be rejected\n");
+			h_fails++;
+		} else {
+			printf("ok   rejected cat of a{40000} x30\n");
+		}
+		/* And a cat that fits still compiles. */
+		pat[0] = '\0';
+		for (int k = 0; k < 5; k++)
+			strcat(pat, "a{1000}");
+		if (!compiles(pat)) {
+			printf("FAIL: cat of a{1000} x5 should compile\n");
+			h_fails++;
+		} else {
+			printf("ok   cat of a{1000} x5 compiles\n");
+		}
+	}
+
 	/* --- 5. A rejected pattern leaves nothing behind.  regcomp()
 	 * returns REG_BADPAT, and the caller must not regfree() a
 	 * regex_t it never got.  The tree is freed on the way out, so
