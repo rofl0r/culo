@@ -1092,13 +1092,17 @@ static void hl_invalidate_from(int row_idx)
 {
 	if (row_idx < 0)
 		return;
-	if (ec.hl_invalid_from < 0 || row_idx < ec.hl_invalid_from) {
+	/* Keep only the lowest mark. Do not walk rows here: the mark
+	 * is the lazy record, and the per row bits are cleared when
+	 * a draw reaches the mark. The old code walked every row from
+	 * row_idx to the end on each edit, which made a paste
+	 * quadratic again. */
+	if (ec.hl_invalid_from < 0 || row_idx < ec.hl_invalid_from)
 		ec.hl_invalid_from = row_idx;
-		/* Clear the bits the lazy mark replaces, so nothing can be
-		 * read as fresh while the mark stands for it. */
-		for (int i = row_idx; i < NR; i++)
-			ROW(i)->hl_valid = false;
-	}
+	/* The changed row itself is stale at once, so a direct read
+	 * of its bit cannot claim it is fresh. */
+	if (row_idx < NR)
+		ROW(row_idx)->hl_valid = false;
 }
 
 /* Mark every row stale, for a change that renumbers the rows below. */
@@ -1288,14 +1292,13 @@ static void syntax_ensure_row_highlighted(int row_idx)
 	if (row_idx < 0 || row_idx >= NR)
 		return;
 	if (ec.hl_invalid_from >= 0) {
-		/* The lazy mark in hl_invalid_from says every row from that
-		 * index on is stale.  Drop the hl_valid bits for the rows
-		 * this call covers, and drop the mark itself once nothing
-		 * can still be stale below the mark.  The mark is left in
-		 * place when it sits below row_idx, because rows under it
-		 * stay stale until a draw reaches them. */
+		/* The lazy mark says every row from that index on is
+		 * stale. Clear the bits for the rows this call covers
+		 * and drop the mark once a draw at or past the mark
+		 * covers them. A draw above the mark leaves it in
+		 * place for rows below. */
 		if (row_idx >= ec.hl_invalid_from) {
-			for (int i = ec.hl_invalid_from; i < NR; i++)
+			for (int i = ec.hl_invalid_from; i <= row_idx; i++)
 				ROW(i)->hl_valid = false;
 			ec.hl_invalid_from = -1;
 		} else {
