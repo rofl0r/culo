@@ -778,15 +778,29 @@ static const char *const help_lines[] = {
 static void term_write_all(const char *buf, size_t len)
 {
 	size_t off = 0;
+	int eagain_retries = 0;
 	while (off < len) {
 		ssize_t n = write(STDOUT_FILENO, buf + off, len - off);
 		if (n > 0) {
 			off += (size_t) n;
+			eagain_retries = 0;
 			continue;
 		}
 		if (n < 0 && errno == EINTR)
-			continue;	/* a signal landed mid-write */
-		return;		/* the terminal is gone; nothing to do */
+			continue;
+		if (n < 0 && (errno == EAGAIN || errno == EWOULDBLOCK)) {
+			/* Busy tty: wait briefly for space instead of
+			 * truncating the frame. Give up after a few
+			 * tries so a closed terminal does not spin. */
+			if (++eagain_retries > 10)
+				return;
+			struct pollfd pfd = { STDOUT_FILENO, POLLOUT, 0 };
+			poll(&pfd, 1, 10);
+			continue;
+		}
+		if (n == 0)
+			return; /* no progress; avoid spin */
+		return;		/* terminal is gone */
 	}
 }
 
@@ -812,8 +826,7 @@ static void panic(const char *s)
 
 static void term_open_buffer(void)
 {
-	if (write(STDOUT_FILENO, "\x1b[?47h", 6) == -1)
-		panic("Error changing terminal buffer: ");
+	term_write_all("\x1b[?47h", 6);
 }
 
 static void term_disable_raw(void)
@@ -1019,9 +1032,8 @@ static void term_update_size(void)
 
 static void term_close_buffer(void)
 {
-	if (write(STDOUT_FILENO, "\x1b[?9l", 5) == -1 ||
-	    write(STDOUT_FILENO, "\x1b[?47l", 6) == -1)
-		panic("Error restoring buffer state: ");
+	term_write_all("\x1b[?9l", 5);
+	term_write_all("\x1b[?47l", 6);
 	term_clear();
 }
 
@@ -4498,7 +4510,7 @@ static char *ui_prompt(const char *prefix, const char *hint,
 		int n =
 		    snprintf(posbuf, sizeof(posbuf), "\x1b[%d;%dH",
 			     ec.screen_rows + 1, pfx_len + vis_blen + 1);
-		write(STDOUT_FILENO, posbuf, n);
+		term_write_all(posbuf, (size_t)n);
 
 		int c = term_read_key();
 		if ((c == DEL_KEY) || (c == CTRL_('h')) || (c == BACKSPACE)) {
