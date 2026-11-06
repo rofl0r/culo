@@ -533,6 +533,7 @@ typedef struct {
 	char *buf;
 	int len;
 	int cap;		/* bytes allocated for buf */
+	bool oom;		/* an append failed to allocate */
 } editor_buf_t;
 
 /* clang-format off */
@@ -3652,19 +3653,25 @@ static void buf_append(editor_buf_t * eb, const char *s, int len)
 	/* Grow by doubling.  A repaint appends per byte, so reallocating
 	 * to the exact size each time made every repaint do thousands of
 	 * reallocs and copy what is already there. */
-	if (eb->len > 0 && len > INT_MAX - eb->len)
+	if (eb->len > 0 && len > INT_MAX - eb->len) {
+		eb->oom = true;
 		return; /* would overflow int len */
+	}
 	if (eb->len + len > eb->cap) {
 		int need = eb->len + len;
 		int cap = eb->cap ? eb->cap : 256;
 		while (cap < need) {
-			if (cap > INT_MAX / 2)
+			if (cap > INT_MAX / 2) {
+				eb->oom = true;
 				return; /* doubling would overflow */
+			}
 			cap *= 2;
 		}
 		char *new = realloc(eb->buf, (size_t) cap);
-		if (!new)
+		if (!new) {
+			eb->oom = true;
 			return;		/* drop the append; the frame is short */
+		}
 		eb->buf = new;
 		eb->cap = cap;
 	}
@@ -4272,7 +4279,7 @@ static void editor_refresh(void)
 {
 	editor_handle_signals();
 	editor_scroll();
-	editor_buf_t eb = { NULL, 0, 0 };
+	editor_buf_t eb = { NULL, 0, 0, false };
 	buf_append(&eb, "\x1b[?25l", 6);
 	buf_append(&eb, "\x1b[H", 3);
 	ui_draw_rows(&eb);
@@ -4287,6 +4294,8 @@ static void editor_refresh(void)
 	buf_append(&eb, buf, strlen(buf));
 	buf_append(&eb, "\x1b[?25h", 6);
 	term_write_all(eb.buf, (size_t) eb.len);
+	if (eb.oom)
+		ui_set_message("Memory allocation failed");
 	buf_destroy(&eb);
 }
 
@@ -4294,7 +4303,7 @@ static void editor_refresh(void)
 static void editor_refresh_full(void)
 {
 	editor_scroll();
-	editor_buf_t eb = { NULL, 0, 0 };
+	editor_buf_t eb = { NULL, 0, 0, false };
 	buf_append(&eb, "\x1b[?25l", 6);
 	buf_append(&eb, "\x1b[2J", 4);	/* Clear entire screen */
 	buf_append(&eb, "\x1b[H", 3);
@@ -4844,7 +4853,7 @@ static void list_screen_render(const char *title, int total_lines, int offset,
 			       tlist *entries, const char *status_left,
 			       const char *status_right)
 {
-	editor_buf_t eb = { NULL, 0, 0 };
+	editor_buf_t eb = { NULL, 0, 0, false };
 	int visible = ec.screen_rows - 1;
 
 	buf_append(&eb, "\x1b[?25l\x1b[H", 9);
