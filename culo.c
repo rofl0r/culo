@@ -1323,7 +1323,13 @@ static void syntax_highlight(editor_row_t *row, int row_idx)
 	unsigned char *hl = realloc(row->highlight, want);
 	if (!hl) {
 		/* No highlight to write.  Leave the row stale so the next
-		 * draw tries again, and draw it without colours. */
+		 * draw tries again, and draw it without colours. Drop the
+		 * old buffer and zero render_size so the draw cannot read
+		 * past the old allocation, which may be smaller than the
+		 * new render_size. */
+		free(row->highlight);
+		row->highlight = NULL;
+		row->render_size = 0;
 		row->hl_valid = false;
 		return;
 	}
