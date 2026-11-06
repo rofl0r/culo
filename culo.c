@@ -4365,6 +4365,7 @@ static int ui_dialog_ask(const char *msg, char *const options[])
 		int c = term_read_key();
 		switch (c) {
 		case '\r':	/* Enter key */
+		case '\n':	/* Paste delivers LF */
 			ec.status_msg[0] = '\0';
 			return choice;
 		case CTRL_('c'):	/* ^C - cancel */
@@ -4517,7 +4518,7 @@ static char *ui_prompt(const char *prefix, const char *hint,
 				callback(buf, c);
 			free(buf);
 			return NULL;
-		} else if (c == '\r') {
+		} else if (c == '\r' || c == '\n') {
 			if (buf_len != 0) {
 				ec.status_msg[0] = '\0';
 				if (callback)
@@ -5099,6 +5100,7 @@ static void editor_process_key(void)
 			editor_refresh_full();	/* Full redraw the editor */
 			return;
 		case '\r':	/* Enter - open file/directory */
+		case '\n':	/* Paste delivers LF */
 			browser_open_selected();
 			if (ec.mode == MODE_BROWSER)
 				browser_render();
@@ -5292,7 +5294,7 @@ static void editor_process_key(void)
 	case MODE_SEARCH:{
 			/* Phase 1: entering replacement text */
 			if (ec.search.replace_phase == 1) {
-				if (c == '\r') {
+				if (c == '\r' || c == '\n') {
 					/* Execute: find first match at or after the saved position (wrapping).
 					 * Use search_do_from directly with saved_x so we include any match
 					 * sitting exactly at the cursor rather than starting at saved_x+1. */
@@ -5364,7 +5366,7 @@ static void editor_process_key(void)
 			}
 
 			/* Phase 0: entering search term (default) */
-			if (c == '\r') {
+			if (c == '\r' || c == '\n') {
 				if (ec.search.query && ec.search.query_len > 0) {
 					if (ec.search.mode & SM_REPLACE) {
 						/* Switch to replacement text entry */
