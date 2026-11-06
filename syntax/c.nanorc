@@ -5,6 +5,17 @@ header "-\*-.*\<C(\+\+)?((;|[[:blank:]]).*)?-\*-"
 magic "^(C|C\+\+) (source|program)"
 comment "//"
 
+# Preprocessor directives.
+# Must come before keywords, operators and strings: the engine
+# applies rules in order and first wins, so a flow control
+# "else" or an operator "<" would otherwise recolor the
+# directive. The include path stays brightyellow, so keep the
+# string rule for the path but after the directive rule.
+color brightcyan start="^[[:blank:]]*#[[:blank:]]*(if(n?def)?|elif|warning|error|pragma)\>" end="(\`|[^\])$"
+color brightcyan "^[[:blank:]]*#[[:blank:]]*((define|else|endif|line|undef)\>|$)"
+color brightcyan "^[[:blank:]]*#[[:blank:]]*include(_next)?\>"
+color brightyellow ""([^"]|\\")*"|#[[:blank:]]*include[[:blank:]]*<[^>]+>"
+
 # Constants.
 color brightred "\<[[:upper:]_][[:upper:][:digit:]_]*\>"
 # Labels.
@@ -38,13 +49,6 @@ color brightmagenta "'([^'\]|\\(["'\abfnrtv]|x[[:xdigit:]]{1,2}|[0-3]?[0-7]{1,2}
 
 # GCC builtins.
 color cyan "__attribute__[[:blank:]]*\(\([^)]*\)\)|__(aligned|asm|builtin|hidden|inline|packed|restrict|section|typeof|weak)__"
-
-# Strings and names of included files.
-color brightyellow ""([^"]|\\")*"|#[[:blank:]]*include[[:blank:]]*<[^>]+>"
-
-# Preprocessor directives.
-color brightcyan start="^[[:blank:]]*#[[:blank:]]*(if(n?def)?|elif|warning|error|pragma)\>" end="(\`|[^\])$"
-color brightcyan "^[[:blank:]]*#[[:blank:]]*((define|else|endif|include(_next)?|line|undef)\>|$)"
 
 # Comments.
 color cyan "//[^"]*$|(^|[[:blank:]])//.*"
