@@ -76,6 +76,18 @@ int main(void)
 	h_expect_eq(ec.cursor_y, 1);
 	h_expect_eq(wrapped, 0);
 
+	/* A revisit match on the start row is not a wrap. Replace
+	 * logic uses wrapped to stop after a full cycle, so a same
+	 * row revisit must not set it. */
+	ec.cursor_y = 1;
+	ec.cursor_x = 2;
+	wrapped = false;
+	found = search_do_from("a", 1, 3, false, &wrapped);
+	h_expect_eq(found, 1);
+	h_expect_eq(wrapped, 0);
+	h_expect_eq(ec.cursor_y, 1);
+	h_expect_eq(ec.cursor_x, 0);
+
 	h_summary("search start row revisit tests");
 	return 0;
 }

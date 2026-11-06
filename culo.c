@@ -3355,9 +3355,13 @@ static bool search_do_from(const char *query, int start_row, int start_char_off,
 			if (render_len > 0)
 				search_highlight_match(ri, render_off,
 						       render_len);
-			/* Detect wrap: for forward search ri wrapped if ri < start_row (after i>0);
-			 * for backward search ri wrapped if ri > start_row (after i>0). */
-			if (out_wrapped && i > 0)
+			/* Detect wrap: a match on the start row found on the
+			 * revisit is not a wrap. The revisit (i == n) is the
+			 * start row again by construction, and row
+			 * comparison says ri == start_row, so it stays
+			 * false. Only a match on a different row after the
+			 * file boundary counts as wrapped. */
+			if (out_wrapped && i > 0 && !revisit)
 				*out_wrapped =
 				    backwards ? (ri > start_row) : (ri <
 								    start_row);
