@@ -344,6 +344,14 @@ typedef struct {
 	/* The browser entry list, owned by browser_free_entries() and
 	 * editor_cleanup(). */
 	tlist *browser_entries;
+	/* Browser cursor state. It must survive a temporary mode such
+	 * as help, which memsets mode_state on entry. Keeping it here
+	 * preserves selected, offset, current_dir and show_hidden
+	 * across mode_restore(). */
+	int browser_selected;
+	int browser_offset;
+	char browser_current_dir[PATH_MAX];
+	bool browser_show_hidden;
 } mode_owners_t;
 
 typedef struct {
@@ -620,9 +628,27 @@ static void mode_set(editor_mode_t new_mode)
 		break;
 	}
 
+	/* Save browser cursor state before memset wipes the union. */
+	if (ec.mode == MODE_BROWSER) {
+		ec.mode_owners.browser_selected = ec.mode_state.browser.selected;
+		ec.mode_owners.browser_offset = ec.mode_state.browser.offset;
+		snprintf(ec.mode_owners.browser_current_dir,
+			 sizeof(ec.mode_owners.browser_current_dir), "%s",
+			 ec.mode_state.browser.current_dir);
+		ec.mode_owners.browser_show_hidden = ec.mode_state.browser.show_hidden;
+	}
+
 	/* Initialize new mode */
 	ec.mode = new_mode;
 	memset(&ec.mode_state, 0, sizeof(ec.mode_state));
+	if (new_mode == MODE_BROWSER) {
+		ec.mode_state.browser.selected = ec.mode_owners.browser_selected;
+		ec.mode_state.browser.offset = ec.mode_owners.browser_offset;
+		snprintf(ec.mode_state.browser.current_dir,
+			 sizeof(ec.mode_state.browser.current_dir), "%s",
+			 ec.mode_owners.browser_current_dir);
+		ec.mode_state.browser.show_hidden = ec.mode_owners.browser_show_hidden;
+	}
 
 	/* Mode-specific initialization */
 	switch (new_mode) {
@@ -4707,6 +4733,7 @@ static void browser_free_entries(void)
 	}
 	/* current_dir is a union member, so it is only the browser's to
 	 * clear while the browser mode is live. */
+	ec.mode_owners.browser_current_dir[0] = '\0';
 	if (ec.mode == MODE_BROWSER)
 		ec.mode_state.browser.current_dir[0] = '\0';
 }
@@ -4752,6 +4779,8 @@ static void browser_load_directory(const char *path)
 
 	snprintf(ec.mode_state.browser.current_dir,
 		 sizeof(ec.mode_state.browser.current_dir), "%s", dir_path);
+	snprintf(ec.mode_owners.browser_current_dir,
+		 sizeof(ec.mode_owners.browser_current_dir), "%s", dir_path);
 	ec.mode_owners.browser_entries = tlist_new(sizeof(browser_entry_t));
 	if (!ec.mode_owners.browser_entries) {
 		closedir(dir);
