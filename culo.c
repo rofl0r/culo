@@ -4026,6 +4026,26 @@ static void ui_draw_rows(editor_buf_t * eb)
 			 * the window. */
 			int scan_byte_pos = 0;
 			int scan_render_x = 0;
+			/* When col_offset starts mid tab, the first visible
+			 * column is not the tab head. Seed prev with the byte
+			 * offset of col_offset-1 so the head test compares
+			 * against the true previous column. */
+			if (ec.col_offset > 0) {
+				int b2 = 0, rx2 = 0;
+				while (rx2 < ec.col_offset - 1 && b2 < row->size) {
+					if (row->render_direct_map) { b2 = rx2 + 1; rx2++; }
+					else if (row->chars[b2] == '\t') {
+						rx2 += (TAB_STOP - 1) - (rx2 % TAB_STOP) + 1;
+						b2++;
+					} else {
+						int clen = 1;
+						rx2 += utf8_char_width_and_len(&row->chars[b2], (size_t)(row->size - b2), &clen);
+						b2 += clen;
+					}
+				}
+				prev_tab_cursor_x = b2;
+				prev_tab_cursor_x_valid = true;
+			}
 
 			for (int j = 0; j < len; j++) {
 				int render_pos = ec.col_offset + j;
@@ -4033,7 +4053,7 @@ static void ui_draw_rows(editor_buf_t * eb)
 				 * offset past the bytes it covers, a plain byte
 				 * by one, and a wide character by its length. */
 				if (row->render_direct_map) {
-					scan_byte_pos = render_pos;
+					scan_byte_pos = render_pos > row->size ? row->size : render_pos;
 				} else {
 					while (scan_render_x < render_pos
 					       && scan_byte_pos < row->size) {
