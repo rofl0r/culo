@@ -1621,10 +1621,14 @@ static char *xstrndup0(const char *s, size_t len)
  * when len + 1 exceeds it, and never below the first allocation. */
 static bool strbuf_grow(char **buf, size_t *len, size_t *cap, int byte)
 {
-	if (*len + 2 > *cap) {
+	if (*len < SIZE_MAX - 1 && *len + 2 > *cap) {
+		size_t need = *len + 2;
 		size_t new_cap = *cap ? *cap : 128;
-		while (new_cap < *len + 2)
+		while (new_cap < need) {
+			if (new_cap > SIZE_MAX / 2)
+				return false; /* doubling would overflow */
 			new_cap *= 2;
+		}
 		char *nb = realloc(*buf, new_cap);
 		if (!nb) {
 			/* errno is set by realloc; the buffer is untouched. */
@@ -1643,11 +1647,17 @@ static bool strbuf_grow(char **buf, size_t *len, size_t *cap, int byte)
  * them in itself, rather than handing them over one at a time. */
 static bool strbuf_reserve(char **buf, size_t *len, size_t *cap, size_t want)
 {
-	if (want + 1 <= *cap)
+	if (want < SIZE_MAX && want + 1 <= *cap)
 		return true;
+	if (want >= SIZE_MAX)
+		return false;
+	size_t need = want + 1;
 	size_t new_cap = *cap ? *cap : 128;
-	while (new_cap < want + 1)
+	while (new_cap < need) {
+		if (new_cap > SIZE_MAX / 2)
+			return false;
 		new_cap *= 2;
+	}
 	char *nb = realloc(*buf, new_cap);
 	if (!nb)
 		return false;
@@ -2649,10 +2659,14 @@ static void burst_append(const char *s, size_t n)
 {
 	if (!g_burst.open || n == 0)
 		return;
-	if (g_burst.len + n + 1 > g_burst.cap) {
+	if (g_burst.len < SIZE_MAX - 1 && g_burst.len + n + 1 > g_burst.cap) {
+		size_t need = g_burst.len + n + 1;
 		size_t cap = g_burst.cap ? g_burst.cap * 2 : 1024;
-		while (cap < g_burst.len + n + 1)
+		while (cap < need) {
+			if (cap > SIZE_MAX / 2)
+				return;
 			cap *= 2;
+		}
 		char *nb = realloc(g_burst.buf, cap);
 		if (!nb)
 			return;	/* drop the text; the edit itself stands */
@@ -3575,10 +3589,16 @@ static void buf_append(editor_buf_t * eb, const char *s, int len)
 	/* Grow by doubling.  A repaint appends per byte, so reallocating
 	 * to the exact size each time made every repaint do thousands of
 	 * reallocs and copy what is already there. */
+	if (eb->len > 0 && len > INT_MAX - eb->len)
+		return; /* would overflow int len */
 	if (eb->len + len > eb->cap) {
+		int need = eb->len + len;
 		int cap = eb->cap ? eb->cap : 256;
-		while (cap < eb->len + len)
+		while (cap < need) {
+			if (cap > INT_MAX / 2)
+				return; /* doubling would overflow */
 			cap *= 2;
+		}
 		char *new = realloc(eb->buf, (size_t) cap);
 		if (!new)
 			return;		/* drop the append; the frame is short */
