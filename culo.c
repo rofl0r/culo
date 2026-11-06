@@ -2064,6 +2064,7 @@ static void undo_apply_item(const undo_item_t * item, bool redo)
 
 static void undo_perform(bool redo)
 {
+	burst_break();
 	if (redo ? g_undo.cursor >= g_undo.count : g_undo.cursor <= 0) {
 		ui_set_message(redo ? "Nothing to redo" : "Nothing to undo");
 		return;
@@ -2415,6 +2416,7 @@ static void selection_indent(int dir, const char *indent)
 {
 	if (!ec.selection.active || !indent || !*indent)
 		return;
+	burst_break();
 	size_t ilen = strlen(indent);
 
 	int start_y = ec.selection.start_y;
@@ -2501,6 +2503,7 @@ static void selection_delete(void)
 {
 	if (!ec.selection.active)
 		return;
+	burst_break();
 
 	int start_y = ec.selection.start_y;
 	int start_x = ec.selection.start_x;
@@ -2681,11 +2684,16 @@ static void burst_break(void)
 {
 	if (!g_burst.open)
 		return;
-	if (g_burst.pure && g_burst.len > 0)
+	/* Flush before close: burst_close() clears batching, and the
+	 * record helper drops the item while batching is still on. */
+	bool pure = g_burst.pure;
+	size_t len = g_burst.len;
+	g_burst.open = false;
+	g_undo.batching = false;
+	if (pure && len > 0)
 		undo_record_insert(g_burst.row, g_burst.col, g_burst.buf,
-				   g_burst.len, g_burst.row, g_burst.col,
+				   len, g_burst.row, g_burst.col,
 				   ec.cursor_y, ec.cursor_x);
-	burst_close();
 }
 
 /* Close the burst and record it as one undo step. */
@@ -3349,6 +3357,7 @@ static bool search_do(const char *query)
 /* Perform one text replacement at g_last_match. */
 static bool do_replace_one(const char *replacement, size_t repl_len)
 {
+	burst_break();
 	if (g_last_match.row < 0 || g_last_match.row >= NR)
 		return false;
 	editor_row_t *row = ROW(g_last_match.row);
@@ -4488,6 +4497,7 @@ static bool is_word_char(unsigned char c)
  * Stops at line edges; does not cross rows, like nano's Ctrl+arrows. */
 static void editor_move_word(int dir)
 {
+	burst_break();
 	editor_row_t *row = (ec.cursor_y >= NR) ? NULL : ROW(ec.cursor_y);
 	if (!row)
 		return;
@@ -4515,6 +4525,7 @@ static void editor_move_word(int dir)
 
 static void editor_goto_matching_bracket(void)
 {
+	burst_break();
 	static const char brackets[] = "{}()[]";
 	int row = ec.cursor_y;
 	int col = ec.cursor_x;
@@ -5408,9 +5419,11 @@ static void editor_process_key(void)
 		page_move_cursor(c);
 		break;
 	case HOME_KEY:
+		burst_break();
 		ec.cursor_x = 0;
 		break;
 	case END_KEY:
+		burst_break();
 		if (ec.cursor_y < NR)
 			ec.cursor_x = ROW(ec.cursor_y)->size;
 		break;
