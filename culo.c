@@ -792,7 +792,9 @@ static void term_open_buffer(void)
 
 static void term_disable_raw(void)
 {
-	if (tcsetattr(STDIN_FILENO, TCSAFLUSH, &ec.orig_termios) == -1)
+	/* TCSANOW, not TCSAFLUSH: flush discards queued input, and a
+	 * resume must not drop keys typed while suspended. */
+	if (tcsetattr(STDIN_FILENO, TCSANOW, &ec.orig_termios) == -1)
 		panic("Failed to disable raw mode: ");
 }
 
@@ -820,7 +822,7 @@ static void term_enable_raw(void)
 	raw.c_cc[VMIN] = 0;
 	raw.c_cc[VTIME] = 1;
 	term_open_buffer();
-	if (tcsetattr(STDIN_FILENO, TCSAFLUSH, &raw) == -1)
+	if (tcsetattr(STDIN_FILENO, TCSANOW, &raw) == -1)
 		panic("Failed to set raw mode: ");
 }
 
@@ -4126,27 +4128,21 @@ static void editor_get_cursor_pos(int *row, int *col)
 	}
 }
 
-static void editor_refresh(void)
+/* Act on SIGCONT/SIGWINCH flags. The handlers only set flags, so this
+ * runs in the main loop for every mode, not only in editor_refresh().
+ * Browser, help and search modes skip editor_refresh(), so a resume
+ * while in those modes stayed in cooked mode until the next repaint. */
+static void editor_handle_signals(void)
 {
-	/* The editor was suspended and is back: the shell owned the
-	 * terminal while it was stopped, so raw mode and the alternate
-	 * buffer have to be taken back.  The handler only raised the flag.
-	 */
 	if (g_cont_pending) {
 		g_cont_pending = 0;
 		term_disable_raw();
 		term_open_buffer();
 		term_enable_raw();
 	}
-	/* A resize arrived while the loop was reading a key.  The handler
-	 * only set the flag, so the work happens here, in the main loop. */
 	if (g_resize_pending) {
 		g_resize_pending = 0;
 		term_update_size();
-		/* Bound the cursor by the buffer, not by the window.  A
-		 * resize must not move the cursor to a different line: the
-		 * window only decides how much of the buffer is visible,
-		 * and editor_scroll follows the cursor into the new size. */
 		ec.cursor_y = clamp(ec.cursor_y, 0, NR > 0 ? NR - 1 : 0);
 		if (ec.cursor_y < NR)
 			ec.cursor_x = clamp(ec.cursor_x, 0,
@@ -4154,6 +4150,11 @@ static void editor_refresh(void)
 		else
 			ec.cursor_x = 0;
 	}
+}
+
+static void editor_refresh(void)
+{
+	editor_handle_signals();
 	editor_scroll();
 	editor_buf_t eb = { NULL, 0, 0 };
 	buf_append(&eb, "\x1b[?25l", 6);
@@ -5556,6 +5557,7 @@ int main(int argc, char *argv[])
 
 	/* Main event loop */
 	while (1) {
+		editor_handle_signals();
 		/* Input already queued means the previous keypress was part
 		 * of a burst, so this one is too: keep the burst open. */
 		if (input_pending())
