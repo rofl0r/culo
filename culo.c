@@ -3017,9 +3017,26 @@ static bool file_open(const char *file_name)
 	 * the buffer away by then: the browser reported the failure and
 	 * left an empty editor on screen, so every unsaved change was
 	 * gone with no way back. */
-	FILE *file = try_open(file_name, &ec.read_only);
+	bool read_only = false;
+	FILE *file = try_open(file_name, &read_only);
 	if (!file && errno != ENOENT)
 		return false;
+	/* A directory opens for read on some systems and getline then
+	 * fails at once, which looked like an empty file. Reject it
+	 * before the buffer is touched. */
+	if (file) {
+		struct stat st;
+		if (fstat(fileno(file), &st) == 0 && !S_ISREG(st.st_mode)) {
+			fclose(file);
+			errno = EISDIR;
+			return false;
+		}
+		if (ferror(file)) {
+			fclose(file);
+			return false;
+		}
+	}
+	ec.read_only = read_only;
 	/* No syntax on the old name: the rows are about to go. */
 	syntax_reset_compiled_rules();
 	ec.syntax = NULL;
