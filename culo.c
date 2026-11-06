@@ -522,11 +522,10 @@ static void row_erase(int at)
 	 * ended in the erased row changes state for all of them. */
 	hl_mark_all();
 	tlist_delete(ec.rows, (size_t) at);
-	/* A removed row may have been the longest, and the rows below it
-	 * have all moved up, so the width is measured again.  This is the
-	 * one place a whole-buffer walk is worth it: the erase is rare and
-	 * the counter would otherwise keep the width of a line that is
-	 * gone. */
+	/* hl_mark_all() already measured longest before the delete.
+	 * Measure once more after, so a removed longest row shrinks
+	 * the counter. Measuring only here avoids the double walk
+	 * when erasing many rows in a loop. */
 	ec.longest_line = rows_longest();
 }
 
@@ -1149,7 +1148,8 @@ static void hl_mark_all(void)
 	ec.hl_invalid_from = 0;
 	for (int i = 0; i < NR; i++)
 		ROW(i)->hl_valid = false;
-	ec.longest_line = rows_longest();
+	/* Longest is measured by callers that need it, not here, so
+	 * row_erase() does not walk twice. */
 }
 
 /* Longest row in the buffer, in bytes.  The status bar sizes the column
@@ -3049,6 +3049,7 @@ static void file_clear_buffer(void)
 	ec.line_ending = LINE_ENDING_UNKNOWN;
 	ec.modified = false;
 	hl_mark_all();
+	ec.longest_line = rows_longest();
 }
 
 static bool file_open(const char *file_name)
