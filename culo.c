@@ -1527,12 +1527,21 @@ static int row_cursorx_to_renderx(editor_row_t * row, int cursor_x)
 			byte_pos++;
 		} else {
 			int char_len = 1;
-			int char_width =
-			    utf8_char_width_and_len(&row->chars[byte_pos],
-						    (size_t) (row->size -
-							      byte_pos),
-						    &char_len);
-			render_x += char_width;
+			/* row->render and row->highlight are indexed by
+			 * render byte, not by display cell: row_update()
+			 * copies every UTF-8 byte and expands a tab to
+			 * spaces.  Advance by the byte length, not the
+			 * cell width.  A width based advance drifts by
+			 * (char_len - char_width) for every multi-byte
+			 * or control character, so on a long line a
+			 * search match hundreds of bytes in lands
+			 * outside the window editor_scroll() opens for
+			 * it and the cursor sits in unrelated text. */
+			(void)utf8_char_width_and_len(&row->chars[byte_pos],
+						       (size_t) (row->size -
+							 byte_pos),
+						       &char_len);
+			render_x += char_len;
 			byte_pos += char_len;
 		}
 	}
@@ -4085,7 +4094,8 @@ static void ui_draw_rows(editor_buf_t * eb)
 						b2++;
 					} else {
 						int clen = 1;
-						rx2 += utf8_char_width_and_len(&row->chars[b2], (size_t)(row->size - b2), &clen);
+						(void)utf8_char_width_and_len(&row->chars[b2], (size_t)(row->size - b2), &clen);
+						rx2 += clen;
 						b2 += clen;
 					}
 				}
@@ -4112,14 +4122,13 @@ static void ui_draw_rows(editor_buf_t * eb)
 							scan_byte_pos++;
 						} else {
 							int clen = 1;
-							scan_render_x +=
-							    utf8_char_width_and_len
+							(void)utf8_char_width_and_len
 							    (&row->chars
 							     [scan_byte_pos],
 							     (size_t) (row->size - scan_byte_pos),
 							     &clen);
-							scan_byte_pos +=
-							    clen;
+							scan_render_x += clen;
+							scan_byte_pos += clen;
 						}
 					}
 					scan_render_x = render_pos;
