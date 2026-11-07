@@ -27,7 +27,6 @@ nanorc.h: $(SYNTAX_HEADERS)
 culo: nanorc.h syntax.h
 
 check: culo check-harness
-	@tests/runner.sh
 
 check-harness:
 	@$(MAKE) -C tests/harness run

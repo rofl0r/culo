@@ -1,9 +1,10 @@
 # Agent guidance
 
-- Install `expect` and run tests locally with it enabled before concluding any task:
-  - `sudo apt-get install -y expect` (or equivalent on your OS)
+- Run tests locally before concluding any task:
   - `make`
   - `make check`
+  - Tests are C harness tests under `tests/harness/`; no `expect`
+    or other external driver is needed.
 - If you add or change tests, you still must run them locally (not only in CI).
 - Keep this project tiny and powerful: optimize for a small binary and minimal code growth.
 - Prefer compact, readable logic (including bitwise/state-machine style where appropriate) over large `if/else` forests.
