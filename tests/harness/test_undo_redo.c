@@ -62,6 +62,8 @@ static void open_with(const char *body)
 		exit(2);
 	fputs(body, f);
 	fclose(f);
+	free(ec.copied_char_buffer);
+	ec.copied_char_buffer = NULL;
 	h_release_buffer();
 	editor_init();
 	term_update_size();

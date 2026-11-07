@@ -32,6 +32,8 @@ static void open_with(const char *body)
 	if (body)
 		fputs(body, f);
 	fclose(f);
+	free(ec.copied_char_buffer);
+	ec.copied_char_buffer = NULL;
 	h_release_buffer();
 	editor_init();
 	term_update_size();
@@ -153,6 +155,8 @@ int main(void)
 
 	/* A missing file is a new empty buffer.  file_open on a
 	 * path that does not exist succeeds with no rows. */
+	free(ec.copied_char_buffer);
+	ec.copied_char_buffer = NULL;
 	h_release_buffer();
 	editor_init();
 	term_update_size();
