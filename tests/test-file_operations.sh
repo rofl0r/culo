@@ -177,28 +177,44 @@ test_interleaved_nav_ins() {
     local expected="!!test!!"
     create_test_file "$test_file" ""
 
+    # Pauses between sends: back-to-back bytes look like a pasted
+    # burst, and the editor drops a control or escape key that
+    # follows inserted text in the same burst (paste protection).
+    # This is the same rule test_insert_character documents.
     expect -c "
         set timeout 2
         spawn $EDITOR_BIN $test_file
         after 100
         send -- \"e\"
+        after 50
         send \"\033\[D\"
+        after 50
         send -- \"t\"
-        send \"\033\[C\"	
-        send -- \"st\"
-        send \"\033\[D\"
-        send \"\033\[D\"
-        send \"\033\[D\"
-        send \"\033\[D\"
-        after 200
-        send -- \"!!\"	
+        after 50
         send \"\033\[C\"
-        send \"\033\[C\"	
-        send \"\033\[C\"	
-        send \"\033\[C\"	
-        after 200
-        send -- \"!!\"	
-        after 200
+        after 50
+        send -- \"st\"
+        after 50
+        send \"\033\[D\"
+        after 50
+        send \"\033\[D\"
+        after 50
+        send \"\033\[D\"
+        after 50
+        send \"\033\[D\"
+        after 50
+        send -- \"!!\"
+        after 50
+        send \"\033\[C\"
+        after 50
+        send \"\033\[C\"
+        after 50
+        send \"\033\[C\"
+        after 50
+        send \"\033\[C\"
+        after 50
+        send -- \"!!\"
+        after 50
         send \"\x0F\"      ;# Ctrl-O (Save)
         after 200
         send \"\r\"        ;# enter to confirm
