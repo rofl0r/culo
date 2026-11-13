@@ -587,13 +587,18 @@ int main(int argc, char **argv)
 		return 1;
 	}
 
-	while (fgets(line, sizeof(line), fp)) {
+	for (;;) {
 		char *p;
+
+		if (!fgets(line, sizeof(line), fp))
+			break;
 		if (!strchr(line, '\n') && !feof(fp)) {
 			int c;
 			fprintf(stderr, "nanorc2h: skipping oversized line\n");
 			while ((c = fgetc(fp)) != EOF && c != '\n')
 				;
+			if (c == EOF)
+				break;
 			continue;
 		}
 		rstrip(line);
